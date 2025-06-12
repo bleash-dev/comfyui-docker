@@ -1,25 +1,28 @@
 #!/bin/bash
-set -euo pipefail
+# set -euo pipefail
 
 # Move to script's directory to ensure relative paths work
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 # Detect network volume location
 NETWORK_VOLUME=""
+
+if mountpoint -q /workspace 2>/dev/null || [ -w "/workspace" ]; then
+    NETWORK_VOLUME="/workspace"
 if [ -d "/runpod-volume" ]; then
     NETWORK_VOLUME="/runpod-volume"
-elif mountpoint -q /workspace 2>/dev/null || [ -w "/workspace" ]; then
-    NETWORK_VOLUME="/workspace"
 fi
 
-# Use network volume venv if available
+# Require network volume venv
 if [ -n "$NETWORK_VOLUME" ] && [ -d "$NETWORK_VOLUME/venv/comfyui" ]; then
     export COMFYUI_VENV="$NETWORK_VOLUME/venv/comfyui"
     export PIP_CACHE_DIR="$NETWORK_VOLUME/pip_cache"
     echo "Using persistent virtual environment: $COMFYUI_VENV"
     . $COMFYUI_VENV/bin/activate
-elif [ -d "/opt/venv/comfyui" ]; then
-    . /opt/venv/comfyui/bin/activate
+else
+    echo "❌ No network volume virtual environment found!"
+    echo "This script requires a persistent virtual environment in the network volume."
+    exit 1
 fi
 
 cd /workspace/ComfyUI/custom_nodes
