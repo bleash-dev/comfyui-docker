@@ -35,18 +35,6 @@ else
     exit 1
 fi
 
-# Function to safely create directory structure
-create_dir_structure() {
-    local base_path="$1"
-    echo "Creating directory structure in $base_path"
-    
-    # Create all necessary directories
-    for dir in ComfyUI/models ComfyUI/input ComfyUI/output ComfyUI/custom_nodes ComfyUI/user ComfyUI/temp ComfyUI/web/extensions venv/comfyui venv/jupyter .jupyter .comfyui pip_cache workflows; do
-        mkdir -p "$base_path/$dir"
-        echo "Created $base_path/$dir"
-    done
-}
-
 # Function to safely create symlink
 create_symlink() {
     local src="$1"
@@ -211,7 +199,6 @@ setup_comfyui_installation() {
 
 # Setup network volume
 echo "Setting up persistent storage at $NETWORK_VOLUME"
-create_dir_structure "$NETWORK_VOLUME"
 
 # Setup virtual environments directly in network volume
 setup_virtual_environments
