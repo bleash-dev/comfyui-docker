@@ -88,5 +88,5 @@ EXPOSE 3000 8888
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:3000 || exit 1
 
-# Set default command
-CMD ["/start.sh"]
+# Set default command - explicitly use bash
+CMD ["/bin/bash", "/start.sh"]

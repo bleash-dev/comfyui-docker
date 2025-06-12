@@ -1,4 +1,6 @@
 #!/bin/bash
+set -euo pipefail
+
 # Move to script's directory to ensure relative paths work
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 

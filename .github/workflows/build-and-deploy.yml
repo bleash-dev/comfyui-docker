@@ -69,8 +69,17 @@ jobs:
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Organization Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🔒 Private Package - Authentication Required" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Create PAT for RunPod:**" >> $GITHUB_STEP_SUMMARY
+        echo "1. Go to GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)" >> $GITHUB_STEP_SUMMARY
+        echo "2. Generate new token with scope: \`read:packages\`" >> $GITHUB_STEP_SUMMARY
+        echo "3. Copy the token for RunPod authentication" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
         echo "### RunPod Template Settings:" >> $GITHUB_STEP_SUMMARY
         echo "- **Container Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **Registry Username:** \`your-github-username\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **Registry Password:** \`your-pat-token\`" >> $GITHUB_STEP_SUMMARY
         echo "- **Expose HTTP Ports:** \`3000,8888\`" >> $GITHUB_STEP_SUMMARY
         echo "- **Container Start Command:** \`/start.sh\`" >> $GITHUB_STEP_SUMMARY
         echo "- **Volume Mount Path:** \`/workspace\` (recommended)" >> $GITHUB_STEP_SUMMARY
