@@ -1,0 +1,357 @@
+[
+  {
+    "category": "text to image",
+    "title": "Text-to-Image with Multiple LoRAs and Prompt Conditioning",
+    "workflow_strength": "Enables the blending of multiple LoRAs to stylize the output image while preserving prompt-specific control.",
+    "workflow_weakness": "Not optimized for fine-grained LoRA scheduling or dynamic LoRA injection during runtime. Requires manual adjustment of LoRA influence and prompt balance.",
+    "parameters": {
+      "prompt": "string",
+      "negative_prompt": "string",
+      "width": "z.number().optional()",
+      "height": "z.number().optional()",
+      "batch_size": "z.number().optional()",
+      "steps": "z.number().optional()",
+      "cfg": "z.number().optional()",
+      "sampler_name": "z.enum(['euler', 'euler_ancestral', 'dpmpp_2m', 'ddim', 'plms']).optional()",
+      "scheduler": "z.enum(['normal', 'karras', 'exponential', 'sgm_uniform']).optional()",
+      "denoise": "z.number().optional()",
+      "seed": "z.union([z.number(), z.literal('randomize')]).optional()",
+      "lora_1": "z.object({ name: z.string(), strength_model: z.number(), strength_clip: z.number() })",
+      "lora_2": "z.object({ name: z.string(), strength_model: z.number(), strength_clip: z.number() })",
+      "ckpt_name": "z.string().optional()",
+      "filename_prefix": "z.string().optional()"
+    },
+    "params_practices": [
+      {
+        "parameter": "prompt",
+        "best_practice": "Use detailed and specific visual language to direct image content clearly."
+      },
+      {
+        "parameter": "negative_prompt",
+        "best_practice": "Always include common artifacts and defects to avoid (e.g. blurry, lowres, extra limbs)."
+      },
+      {
+        "parameter": "steps",
+        "best_practice": "Use 20–30 steps for fast generation, 40+ for higher quality at the cost of speed."
+      },
+      {
+        "parameter": "cfg",
+        "best_practice": "Typical range is 6–12; lower for creative results, higher for faithful adherence to prompt."
+      },
+      {
+        "parameter": "sampler_name",
+        "best_practice": "Use 'dpmpp_2m' or 'euler' for high quality and good performance."
+      },
+      {
+        "parameter": "denoise",
+        "best_practice": "Keep around 1.0 for generation from noise; lower for image-to-image control."
+      },
+      {
+        "parameter": "lora_1",
+        "best_practice": "Mix artistic LoRA (like chibi or anime) for strong stylistic changes."
+      },
+      {
+        "parameter": "lora_2",
+        "best_practice": "Use a second LoRA to blend different aesthetics (e.g., realism + stylization)."
+      }
+    ],
+    "description": "This workflow generates a text-to-image result by leveraging a base model checkpoint (dreamshaper_8.safetensors) with **two LoRA adapters** blended at different strengths. It starts by loading the base model and clip encoder via `CheckpointLoaderSimple`. Two `LoraLoader` nodes then apply two LoRA weights — `blindbox_v1_mix` and `MoXinV1` — each modifying both the model and clip representations with individually configured strengths.\n\nBoth LoRA-modified outputs are chained so the final model passed to the `KSampler` has influences from both adapters. The prompts (positive and negative) are encoded using `CLIPTextEncode` nodes with the LoRA-enhanced clip model.\n\nA `EmptyLatentImage` node generates a latent tensor with given width, height, and batch size. `KSampler` uses this latent as starting input, along with the prompt conditioning, model, and sampler configuration (steps, seed, cfg scale, etc.).\n\nThe generated latent is decoded using `VAEDecode`, and the final image is saved with a defined filename prefix.\n\nThis setup is optimal for generating stylized, character-focused outputs (e.g., anime chibi girls) with layered prompt control and multiple style influences.",
+    "examples": [
+      {
+        "input": {
+          "prompt": "1girl, upper body, long hair, chibi style, laughing, dancing, soft pastel colors, surrounded by flowers",
+          "negative_prompt": "(worst quality, low quality:1.4), (bad anatomy), cropped, blurry, text, error",
+          "width": 768,
+          "height": 768,
+          "batch_size": 1,
+          "steps": 30,
+          "cfg": 7,
+          "sampler_name": "dpmpp_2m",
+          "scheduler": "karras",
+          "denoise": 1.0,
+          "seed": "randomize",
+          "lora_1": {
+            "strength_model": 0.75,
+            "strength_clip": 1
+          },
+          "lora_2": {
+            "strength_model": 0.5,
+            "strength_clip": 1
+          },
+          "ckpt_name": "dreamshaper_8.safetensors",
+          "filename_prefix": "2loras_test_"
+        },
+        "expected_behavior": "Generates a high-quality, anime-style image of a happy, chibi girl among flowers with soft color tone."
+      }
+    ],
+    "tags": [
+      "chibi",
+      "anime",
+      "stylized",
+      "LoRA",
+      "multi-lora",
+      "flowers",
+      "pastel",
+      "character"
+    ]
+  },
+  {
+    "category": "text to image",
+    "title": "Dual LoRA Text-to-Image with Realistic Prompt Refinement",
+    "workflow_strength": "Produces highly detailed portrait images by combining two LoRA models, enabling realistic textures and cultural attire reproduction.",
+    "workflow_weakness": "Requires careful prompt curation to balance LoRA influence. Not suitable for abstract or surreal compositions.",
+    "parameters": {
+      "prompt": "string",
+      "negative_prompt": "string",
+      "width": "z.number().optional()",
+      "height": "z.number().optional()",
+      "batch_size": "z.number().optional()",
+      "steps": "z.number().optional()",
+      "cfg": "z.number().optional()",
+      "sampler_name": "z.enum(['euler', 'euler_ancestral', 'dpmpp_2m', 'ddim', 'plms']).optional()",
+      "scheduler": "z.enum(['normal', 'karras', 'exponential', 'sgm_uniform']).optional()",
+      "denoise": "z.number().optional()",
+      "seed": "z.union([z.number(), z.literal('randomize')]).optional()",
+      "lora_1": "z.object({ strength_model: z.number(), strength_clip: z.number() })",
+      "lora_2": "z.object({ strength_model: z.number(), strength_clip: z.number() })",
+      "filename_prefix": "z.string().optional()"
+    },
+    "params_practices": [
+      {
+        "parameter": "prompt",
+        "best_practice": "Include aesthetic details like lighting and expression. Example: 'cinematic lighting, soft focus, elegant pose'."
+      },
+      {
+        "parameter": "negative_prompt",
+        "best_practice": "Include suppression cues like 'extra limbs, watermark, deformed' to reduce visual defects."
+      },
+      {
+        "parameter": "width",
+        "best_practice": "Use 1024 for high-resolution portraits."
+      },
+      {
+        "parameter": "steps",
+        "best_practice": "Set around 30 for efficient convergence and detail stability."
+      },
+      {
+        "parameter": "lora_1",
+        "best_practice": "Use for base stylistic transformation, strength_model around 0.9 recommended."
+      },
+      {
+        "parameter": "lora_2",
+        "best_practice": "Use for accenting specific character traits (e.g. facial detail, clothing texture)."
+      },
+      {
+        "parameter": "cfg",
+        "best_practice": "Between 6–9 for balancing creativity and prompt adherence."
+      },
+      {
+        "parameter": "sampler_name",
+        "best_practice": "Use 'dpmpp_2m' or 'euler' for smoother edge quality."
+      }
+    ],
+    "description": "This workflow generates a highly detailed image of a culturally styled individual (e.g., a traditionally dressed Chinese woman) using a dual-LoRA layering strategy.\n\n1. **CheckpointLoaderSimple** loads the base model `dreamshaper_8.safetensors`, providing the model, VAE, and CLIP.\n2. Two **LoraLoader** nodes are chained: `blindbox_v1_mix` (LoRA 1) followed by `MoXinV1` (LoRA 2). Both operate on the base model + CLIP and apply stylistic enhancements.\n3. The **positive prompt** is encoded via `CLIPTextEncode` to describe the target visual (e.g., facial realism, traditional attire).\n4. The **negative prompt** encodes elements to suppress (e.g., anatomical flaws, watermarks).\n5. A **latent image** canvas is initialized with a defined resolution (1024×1024).\n6. **KSampler** renders the latent using prompt encodings, the LoRA-stacked model, and sampling configurations (seed, steps, scheduler, etc.).\n7. **VAEDecode** transforms the latent output into an image.\n8. The image is saved using a provided filename prefix.\n\nThe workflow is ideal for photo-realistic generations with refined prompt design, blending aesthetic consistency from multiple LoRAs.",
+    "examples": [
+      {
+        "input": {
+          "prompt": "masterpiece, best quality, ultra-detailed, 8K, RAW photo, intricate details, upper-body, smooth skin, realistic lighting, beautiful Chinese girl, solo, traditional Chinese dress, golden embroidery, cinematic lighting",
+          "negative_prompt": "(low quality, worst quality:1.4), (blurry:1.2), (bad anatomy:1.3), extra limbs, deformed, watermark, text, signature",
+          "width": 1024,
+          "height": 1024,
+          "batch_size": 1,
+          "steps": 30,
+          "cfg": 7,
+          "sampler_name": "dpmpp_2m",
+          "scheduler": "karras",
+          "denoise": 1.0,
+          "seed": "randomize",
+          "lora_1": { "strength_model": 0.9, "strength_clip": 1 },
+          "lora_2": { "strength_model": 1, "strength_clip": 1 },
+          "filename_prefix": "2loras_test_"
+        },
+        "expected_behavior": "Outputs a high-resolution portrait of an elegant woman with natural skin tones, refined clothing detail, and cinematic lighting."
+      }
+    ],
+    "tags": [
+      "realistic",
+      "portrait",
+      "high-res",
+      "LoRA",
+      "traditional",
+      "cinematic",
+      "face-detail",
+      "cultural"
+    ]
+  },
+
+  {
+    "category": "text to audio",
+    "title": "Longform TTS Workflow with Exaggeration Control and Audio Concatenation",
+    "workflow_strength": "Excellent for producing seamless, longform voice narration (10,000+ characters) from scripts with consistent tone and pacing using local models.",
+    "workflow_weakness": "Not optimized for real-time or streaming TTS; requires careful tuning of chunking and exaggeration parameters; only supports single-speaker voice continuity without speaker switching.",
+    "parameters": {
+      "long_text": "string",
+      "min_chunk_length": "number",
+      "exaggeration": "number",
+      "cfg_weight": "number.optional()",
+      "temperature": "number.optional()",
+      "use_cpu": "boolean.optional()",
+      "keep_model_loaded": "boolean.optional()"
+    },
+    "params_practices": [
+      {
+        "parameter": "long_text",
+        "best_practice": "Provide a well-structured script with clear sentence boundaries for better chunking and natural TTS delivery."
+      },
+      {
+        "parameter": "min_chunk_length",
+        "best_practice": "Adjust upward to prevent premature cutting; reduce if end chunks are missing. Tune until first and last chunks appear correctly."
+      },
+      {
+        "parameter": "exaggeration",
+        "best_practice": "Use to modulate voice expressiveness; lower for neutral delivery, increase for emotional intensity. Same value propagates to all TTS nodes."
+      },
+      {
+        "parameter": "cfg_weight",
+        "best_practice": "Higher values improve adherence to prompt content but can reduce naturalness. 0.5–0.8 is a good starting range."
+      },
+      {
+        "parameter": "temperature",
+        "best_practice": "Controls speech randomness. Lower for stable tone; raise slightly (0.7–0.9) for expressive delivery."
+      },
+      {
+        "parameter": "use_cpu",
+        "best_practice": "Enable only if GPU is unavailable. Results in significantly slower processing."
+      },
+      {
+        "parameter": "keep_model_loaded",
+        "best_practice": "Set to true when batching multiple TTS jobs to reduce model loading time between runs."
+      }
+    ],
+    "description": "This ComfyUI workflow is built to generate natural-sounding longform audio narration using local TTS models. The process begins with the `SmartSentenceChunkerex` node, which splits a large text input (up to 10,000+ characters) into semantically aware sentence chunks. The minimum chunk length can be controlled to fine-tune where splits occur.\n\nEach chunk is passed to an individual `FL_ChatterboxTTS` node, acting as an independent speaker with shared configuration: the same audio prompt (loaded via `LoadAudio`) ensures vocal consistency, while the `exaggeration` value (propagated via multiple `GetNode` float outputs) ensures uniform expressiveness.\n\nAll TTS nodes receive chunk-specific text and emit audio segments, which are collected and stitched together using the `AudioConcat` node. This produces a continuous, coherent audio track. The final result is previewable via `PreviewAudio` and savable via `SaveAudio`.\n\nThe `ShowText|pysssss` nodes optionally visualize the first and last chunked texts to assist in debugging and verifying chunk length coverage. The `Note` node provides tuning guidance on `min_chunk_length` to ensure beginning and ending segments are properly chunked.\n\nThis modular system allows for scalable production of narrated scripts, ideal for audio essays, video voiceovers, or podcast generation. Once configured, it's fully automated and requires only inputting the text and setting a few control parameters.",
+    "examples": [
+      {
+        "input": {
+          "long_text": "Alright, let's talk about a wildly powerful TTS workflow in ComfyUI...",
+          "min_chunk_length": 122,
+          "exaggeration": 0.5,
+          "cfg_weight": 0.8,
+          "temperature": 0.5,
+          "use_cpu": false,
+          "keep_model_loaded": true
+        },
+        "expected_behavior": "Splits the script into semantically chunked parts, feeds each into a ChatterboxTTS node with uniform exaggeration and voice prompt, then merges audio into a single narration track."
+      }
+    ],
+    "tags": [
+      "tts",
+      "longform",
+      "voiceover",
+      "podcast",
+      "scripted",
+      "audio essay",
+      "chunking",
+      "multi-part",
+      "narration",
+      "exaggeration control"
+    ]
+  },
+  {
+    "category": "image to video",
+    "title": "Audio-Synced Talking Head Video using Sonic and SVD",
+    "workflow_strength": "Generates expressive lip-synced animation videos from a single image and voice track using Sonic and Stable Video Diffusion (SVD) models. Ideal for avatar-based narration or talking-head content.",
+    "workflow_weakness": "Not optimized for real-time rendering. Requires model setup for Sonic and SVD. Limited flexibility in facial pose and expression unless dataset/model is tuned.",
+    "parameters": {
+      "image": "image",
+      "audio_file": "string",
+      "duration": "number.optional()",
+      "seek_seconds": "number.optional()",
+      "min_resolution": "number.optional()",
+      "expand_ratio": "number.optional()",
+      "inference_steps": "number.optional()",
+      "dynamic_scale": "number.optional()",
+      "fps": "number.optional()",
+      "seed": "number.optional()",
+      "loop_count": "number.optional()",
+      "filename_prefix": "string.optional()",
+      "format": "enum([\"video/h264-mp4\"])",
+      "pingpong": "boolean.optional()",
+      "save_output": "boolean.optional()"
+    },
+    "params_practices": [
+      {
+        "parameter": "image",
+        "best_practice": "Use a clear frontal image of the avatar with visible facial features for best lip-sync results."
+      },
+      {
+        "parameter": "audio_file",
+        "best_practice": "Provide clean, mono voice recordings. Trimming unnecessary silences at the start can improve sync accuracy."
+      },
+      {
+        "parameter": "duration",
+        "best_practice": "Leave at 0 to auto-calculate from audio length, or set explicitly to sync with trimmed clips."
+      },
+      {
+        "parameter": "fps",
+        "best_practice": "Standard values like 24 or 25 FPS ensure smoother playback; match with your output editing timeline."
+      },
+      {
+        "parameter": "expand_ratio",
+        "best_practice": "Controls how far the system will animate beyond facial boundaries. 0.5 is a safe default for avatars."
+      },
+      {
+        "parameter": "seed",
+        "best_practice": "Fix the seed for reproducibility or randomize for variation across renders."
+      },
+      {
+        "parameter": "inference_steps",
+        "best_practice": "Higher values improve quality but increase render time. 25–50 is typical for sharp results."
+      },
+      {
+        "parameter": "filename_prefix",
+        "best_practice": "Use descriptive prefixes to manage multiple renders (e.g., 'avatar_news_01')."
+      },
+      {
+        "parameter": "pingpong",
+        "best_practice": "Enable only if you want a back-and-forth loop effect (e.g., for silent or looping animations)."
+      },
+      {
+        "parameter": "save_output",
+        "best_practice": "Set to true to persist output on disk. Useful for batch rendering or downstream editing."
+      }
+    ],
+    "description": "This workflow converts a static avatar image into a realistic lip-synced video using Sonic and Stable Video Diffusion (SVD) in ComfyUI. The process begins with loading the voice audio and avatar image. `ImageOnlyCheckpointLoader` provides the necessary CLIP and VAE features to `SONICTLoader`, which sets up the Sonic model using the appropriate weights.\n\nThe audio and image are passed to `SONIC_PreData`, which extracts meaningful facial animation data and audio features. These are fed into the `SONICSampler`, which generates a frame sequence representing the animated facial video.\n\nSimultaneously, the frame rate is extracted from the sampler output and passed to `VHS_VideoCombine`. This node combines the frames with the original audio track into a synced `.mp4` video. Output options allow specification of framerate, filename prefix, ping-pong looping, and encoding format.\n\nAll models must be correctly installed, including audio-to-token and audio-to-bucket Sonic weights, face detector (YOLO), and Whisper Tiny for audio transcription and embedding.\n\nThis workflow is designed for content creators building avatar-based narration, synthetic dialogue generation, or AI influencers using voice-based animation.",
+    "examples": [
+      {
+        "input": {
+          "image": "avatar.png",
+          "audio_file": "narration.wav",
+          "duration": 0,
+          "fps": 25,
+          "seed": 123456,
+          "inference_steps": 25,
+          "dynamic_scale": 1,
+          "expand_ratio": 0.5,
+          "loop_count": 0,
+          "filename_prefix": "sonic_avatar_test",
+          "format": "video/h264-mp4",
+          "pingpong": false,
+          "save_output": true
+        },
+        "expected_behavior": "Generates a 25 FPS video of the avatar speaking with lip movements synchronized to the narration.wav audio."
+      }
+    ],
+    "tags": [
+      "avatar",
+      "talking head",
+      "lip sync",
+      "tts animation",
+      "audio driven",
+      "facial animation",
+      "sonic",
+      "stable video diffusion",
+      "expressive",
+      "narration"
+    ]
+  }
+]

@@ -226,7 +226,8 @@ setup_download_tools() {
     
     # Install gdown for Google Drive downloads
     . $COMFYUI_VENV/bin/activate
-    pip install --no-cache-dir gdown huggingface_hub
+    pip install --no-cache-dir gdown "huggingface_hub[cli]"
+    huggingface-cli login --token $HF_TOKEN --add-to-git-credential
     deactivate
     
     # Create download scripts directory
