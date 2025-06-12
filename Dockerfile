@@ -29,6 +29,12 @@ RUN apt-get update && apt-get install -y \
     curl \
     libgl1-mesa-glx \
     libglib2.0-0 \
+    libxrandr-dev \
+    libxinerama-dev \
+    libxcursor-dev \
+    libxi-dev \
+    libgl1-mesa-dev \
+    libglu1-mesa-dev \
     ffmpeg \
     libsm6 \
     libxext6 \
@@ -64,88 +70,16 @@ RUN . $COMFYUI_VENV/bin/activate && \
 # Create directory structure
 RUN mkdir -p models input output custom_nodes
 
-# Create the startup script with XPU detection
-COPY <<'EOF' /start.sh
-#!/bin/bash
-set -eo pipefail
-umask 002
+# Copy scripts directory
+COPY scripts/ /scripts/
+RUN chmod +x /scripts/*.sh
 
-echo "🔍 Starting ComfyUI Setup..."
-echo "Python Version: $(python3 --version)"
-
-# Check GPU availability
-if command -v nvidia-smi &> /dev/null; then
-    echo "NVIDIA GPU detected"
-    echo "CUDA Version: $(nvcc --version 2>/dev/null || echo 'NVCC not found')"
-    echo "GPU Information: $(nvidia-smi)"
-    export XPU_TARGET=NVIDIA_GPU
-elif [ -d "/dev/dri" ]; then
-    echo "AMD GPU detected"
-    export XPU_TARGET=AMD_GPU
-else
-    echo "No GPU detected, using CPU"
-    export XPU_TARGET=CPU
-fi
-
-# Function to safely create directory structure
-create_dir_structure() {
-    local base_path="$1"
-    echo "Creating directory structure in $base_path/ComfyUI"
-    
-    for dir in models input output custom_nodes; do
-        mkdir -p "$base_path/ComfyUI/$dir"
-        echo "Created $base_path/ComfyUI/$dir"
-    done
-}
-
-# Function to safely create symlink
-create_symlink() {
-    local src="$1"
-    local dst="$2"
-    
-    if [ -L "$dst" ]; then
-        rm "$dst"
-    elif [ -d "$dst" ]; then
-        rm -rf "$dst"
-    fi
-
-    if [ -d "$src" ]; then
-        ln -sf "$src" "$dst"
-        echo "✅ Created symlink: $dst -> $src"
-    else
-        echo "❌ Source directory $src not found"
-    fi
-}
-
-# Handle RunPod volume
-if [ -d "/runpod-volume" ]; then
-    echo "RunPod network volume detected at /runpod-volume"
-    create_dir_structure "/runpod-volume"
-    
-    for dir in models input output custom_nodes; do
-        create_symlink "/runpod-volume/ComfyUI/$dir" "/workspace/ComfyUI/$dir"
-    done
-else
-    echo "⚠️ No RunPod network volume found, using local storage"
-fi
-
-# Start JupyterLab
-echo "Starting JupyterLab..."
-. $JUPYTER_VENV/bin/activate
-jupyter lab --ip 0.0.0.0 --port 8888 --no-browser --allow-root &
-deactivate
-
-# Print final directory structure
-echo "📁 Final Directory Structure:"
-tree -L 3 /workspace/ComfyUI
-
-# Start ComfyUI
-echo "🚀 Starting ComfyUI..."
-. $COMFYUI_VENV/bin/activate
-exec python main.py --listen 0.0.0.0 --port 3000 --enable-cors-header
-EOF
-
+# Copy the main start script
+COPY scripts/start.sh /start.sh
 RUN chmod +x /start.sh
+
+# Copy ComfyUI to temp location for potential network volume setup
+RUN cp -r /workspace/ComfyUI /tmp/ComfyUI
 
 # Expose ports
 EXPOSE 3000 8888

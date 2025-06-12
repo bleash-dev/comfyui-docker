@@ -1,5 +1,12 @@
 .git
+.github
 .gitignore
+*.md
 README.md
-*/__pycache__
-*.pyc
+docker-compose.yml
+.env
+.env.example
+workspace/
+*.log
+.DS_Store
+Thumbs.db
