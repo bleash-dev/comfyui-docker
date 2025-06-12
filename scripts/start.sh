@@ -220,6 +220,177 @@ setup_comfyui_manager() {
     fi
 }
 
+# Function to setup download tools
+setup_download_tools() {
+    echo "Setting up download tools..."
+    
+    # Install gdown for Google Drive downloads
+    . $COMFYUI_VENV/bin/activate
+    pip install --no-cache-dir gdown huggingface_hub
+    deactivate
+    
+    # Create download scripts directory
+    mkdir -p "$NETWORK_VOLUME/scripts"
+    
+    # Create Google Drive download script
+    cat > "$NETWORK_VOLUME/scripts/download_gdrive.sh" << 'EOF'
+#!/bin/bash
+# Google Drive download script
+# Usage: ./download_gdrive.sh <google_drive_url> <destination_path> [filename]
+
+if [ $# -lt 2 ]; then
+    echo "Usage: $0 <google_drive_url> <destination_path> [filename]"
+    echo "Example: $0 'https://drive.google.com/file/d/1234567890/view' /workspace/ComfyUI/models/checkpoints/ model.safetensors"
+    exit 1
+fi
+
+URL="$1"
+DEST="$2"
+FILENAME="$3"
+
+# Extract file ID from Google Drive URL
+FILE_ID=$(echo "$URL" | grep -oP '(?<=d/)[a-zA-Z0-9_-]+')
+
+if [ -z "$FILE_ID" ]; then
+    echo "❌ Could not extract file ID from URL: $URL"
+    exit 1
+fi
+
+echo "📥 Downloading from Google Drive..."
+echo "File ID: $FILE_ID"
+echo "Destination: $DEST"
+
+# Activate virtual environment and download
+source NETWORK_VOLUME_PLACEHOLDER/venv/comfyui/bin/activate
+
+if [ -n "$FILENAME" ]; then
+    gdown "https://drive.google.com/uc?id=$FILE_ID" -O "$DEST/$FILENAME"
+else
+    gdown "https://drive.google.com/uc?id=$FILE_ID" -O "$DEST"
+fi
+
+if [ $? -eq 0 ]; then
+    echo "✅ Download completed successfully!"
+    ls -lh "$DEST"
+else
+    echo "❌ Download failed!"
+    exit 1
+fi
+EOF
+
+    # Create HuggingFace download script
+    cat > "$NETWORK_VOLUME/scripts/download_hf.sh" << 'EOF'
+#!/bin/bash
+# HuggingFace download script
+# Usage: ./download_hf.sh <repo_id> <filename> <destination_path>
+
+if [ $# -ne 3 ]; then
+    echo "Usage: $0 <repo_id> <filename> <destination_path>"
+    echo "Example: $0 'runwayml/stable-diffusion-v1-5' 'v1-5-pruned.safetensors' /workspace/ComfyUI/models/checkpoints/"
+    exit 1
+fi
+
+REPO_ID="$1"
+FILENAME="$2"
+DEST="$3"
+
+echo "📥 Downloading from HuggingFace..."
+echo "Repo: $REPO_ID"
+echo "File: $FILENAME"
+echo "Destination: $DEST"
+
+# Activate virtual environment and download
+source NETWORK_VOLUME_PLACEHOLDER/venv/comfyui/bin/activate
+huggingface-cli download "$REPO_ID" "$FILENAME" --local-dir "$DEST"
+
+if [ $? -eq 0 ]; then
+    echo "✅ Download completed successfully!"
+    ls -lh "$DEST/$FILENAME"
+else
+    echo "❌ Download failed!"
+    exit 1
+fi
+EOF
+
+    # Create Civitai download script
+    cat > "$NETWORK_VOLUME/scripts/download_civitai.sh" << 'EOF'
+#!/bin/bash
+# Civitai download script
+# Usage: ./download_civitai.sh <model_url> <destination_path> [filename]
+
+if [ $# -lt 2 ]; then
+    echo "Usage: $0 <civitai_model_url> <destination_path> [filename]"
+    echo "Example: $0 'https://civitai.com/api/download/models/12345' /workspace/ComfyUI/models/checkpoints/ model.safetensors"
+    exit 1
+fi
+
+URL="$1"
+DEST="$2"
+FILENAME="$3"
+
+echo "📥 Downloading from Civitai..."
+echo "URL: $URL"
+echo "Destination: $DEST"
+
+# Download using curl with redirect following
+if [ -n "$FILENAME" ]; then
+    curl -L "$URL" -o "$DEST/$FILENAME"
+else
+    curl -L -O -J "$URL" && mv "$(ls -t | head -n1)" "$DEST"
+fi
+
+if [ $? -eq 0 ]; then
+    echo "✅ Download completed successfully!"
+    ls -lh "$DEST"
+else
+    echo "❌ Download failed!"
+    exit 1
+fi
+EOF
+
+    # Replace placeholder with actual network volume path
+    sed -i "s|NETWORK_VOLUME_PLACEHOLDER|$NETWORK_VOLUME|g" "$NETWORK_VOLUME/scripts"/*.sh
+    
+    # Make scripts executable
+    chmod +x "$NETWORK_VOLUME/scripts"/*.sh
+    
+    # Create a helper script for common model types
+    cat > "$NETWORK_VOLUME/scripts/download_helper.sh" << 'EOF'
+#!/bin/bash
+# Download helper with common model destinations
+
+echo "🛠️ ComfyUI Download Helper"
+echo "=========================="
+echo ""
+echo "Available model directories:"
+echo "  1. Checkpoints: /workspace/ComfyUI/models/checkpoints/"
+echo "  2. VAE: /workspace/ComfyUI/models/vae/"
+echo "  3. LoRA: /workspace/ComfyUI/models/loras/"
+echo "  4. ControlNet: /workspace/ComfyUI/models/controlnet/"
+echo "  5. Embeddings: /workspace/ComfyUI/models/embeddings/"
+echo "  6. Upscale Models: /workspace/ComfyUI/models/upscale_models/"
+echo ""
+echo "Usage examples:"
+echo ""
+echo "Google Drive:"
+echo "./download_gdrive.sh 'https://drive.google.com/file/d/ID/view' /workspace/ComfyUI/models/checkpoints/ model.safetensors"
+echo ""
+echo "HuggingFace:"
+echo "./download_hf.sh 'runwayml/stable-diffusion-v1-5' 'v1-5-pruned.safetensors' /workspace/ComfyUI/models/checkpoints/"
+echo ""
+echo "Civitai:"
+echo "./download_civitai.sh 'https://civitai.com/api/download/models/12345' /workspace/ComfyUI/models/loras/ lora.safetensors"
+echo ""
+echo "Direct URL:"
+echo "wget -P /workspace/ComfyUI/models/checkpoints/ 'https://example.com/model.safetensors'"
+EOF
+
+    chmod +x "$NETWORK_VOLUME/scripts/download_helper.sh"
+    
+    echo "✅ Download tools installed"
+    echo "📚 Run: /workspace/scripts/download_helper.sh for usage examples"
+}
+
 # Setup network volume
 echo "Setting up persistent storage at $NETWORK_VOLUME"
 
@@ -240,6 +411,9 @@ setup_comfyui_installation
 
 # Setup ComfyUI Manager
 setup_comfyui_manager
+
+# Setup download tools
+setup_download_tools
 
 echo "✅ All data running from network volume"
 
