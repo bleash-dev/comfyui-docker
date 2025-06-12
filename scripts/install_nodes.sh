@@ -6,11 +6,10 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 # Detect network volume location
 NETWORK_VOLUME=""
-
-if mountpoint -q /workspace 2>/dev/null || [ -w "/workspace" ]; then
-    NETWORK_VOLUME="/workspace"
 if [ -d "/runpod-volume" ]; then
     NETWORK_VOLUME="/runpod-volume"
+elif mountpoint -q /workspace 2>/dev/null || [ -w "/workspace" ]; then
+    NETWORK_VOLUME="/workspace"
 fi
 
 # Require network volume venv

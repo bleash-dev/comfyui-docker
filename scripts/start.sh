@@ -197,6 +197,29 @@ setup_comfyui_installation() {
     fi
 }
 
+# Function to setup ComfyUI Manager
+setup_comfyui_manager() {
+    local manager_dir="$NETWORK_VOLUME/ComfyUI/custom_nodes/ComfyUI-Manager"
+    
+    if [ ! -d "$manager_dir" ]; then
+        echo "Installing ComfyUI Manager..."
+        . $COMFYUI_VENV/bin/activate
+        cd "$NETWORK_VOLUME/ComfyUI/custom_nodes"
+        git clone https://github.com/ltdrdata/ComfyUI-Manager.git
+        
+        # Install Manager requirements if they exist
+        if [ -f "ComfyUI-Manager/requirements.txt" ]; then
+            echo "Installing ComfyUI Manager requirements..."
+            pip install --no-cache-dir -r ComfyUI-Manager/requirements.txt
+        fi
+        
+        deactivate
+        echo "✅ ComfyUI Manager installed"
+    else
+        echo "✅ ComfyUI Manager already installed"
+    fi
+}
+
 # Setup network volume
 echo "Setting up persistent storage at $NETWORK_VOLUME"
 
@@ -214,6 +237,9 @@ setup_persistent_comfyui_data
 
 # Setup ComfyUI installation
 setup_comfyui_installation
+
+# Setup ComfyUI Manager
+setup_comfyui_manager
 
 echo "✅ All data running from network volume"
 
