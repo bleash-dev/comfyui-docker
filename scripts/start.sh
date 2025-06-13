@@ -279,7 +279,7 @@ echo "Destination: $DEST"
 (
     cd "$DEST" && \
     . "NETWORK_VOLUME_PLACEHOLDER/venv/comfyui/bin/activate" && \
-    gdown "$FILE_ID" --fuzzy
+    gdown "$FILE_ID"
 )
 
 DOWNLOAD_STATUS=$?

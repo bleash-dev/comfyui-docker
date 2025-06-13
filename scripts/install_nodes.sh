@@ -50,6 +50,15 @@ if [ -f "../nodes.txt" ]; then
             echo "Installing requirements for $repo_name"
             pip3 install --cache-dir="${PIP_CACHE_DIR:-/tmp/pip}" -r "$repo_name/requirements.txt"
         fi
+        
+        # Run custom installation script if it exists (e.g., for Playwright browsers)
+        if [ -f "$repo_name/install.py" ]; then
+            echo "Running custom installation script for $repo_name"
+            cd "$repo_name"
+            python install.py
+            cd ..
+        fi
+        
     done < "../nodes.txt"
 else
     echo "No nodes.txt file found, skipping custom node installation"
