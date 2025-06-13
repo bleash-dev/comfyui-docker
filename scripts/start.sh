@@ -249,12 +249,15 @@ fi
 INPUT="$1"
 DEST="$2"
 
-# Extract file ID from Google Drive URL or use direct file ID
-if [[ "$INPUT" == *"drive.google.com"* ]]; then
-    FILE_ID=$(echo "$INPUT" | grep -oP '(?<=d/)[a-zA-Z0-9_-]+')
-else
-    FILE_ID="$INPUT"
-fi
+# Extract file ID from Google Drive URL or use direct file ID (POSIX compatible)
+case "$INPUT" in
+    *"drive.google.com"*)
+        FILE_ID=$(echo "$INPUT" | sed -n 's|.*[/=]\([a-zA-Z0-9_-]\{25,\}\).*|\1|p')
+        ;;
+    *)
+        FILE_ID="$INPUT"
+        ;;
+esac
 
 if [ -z "$FILE_ID" ]; then
     echo "❌ Could not extract file ID from input: $INPUT"
@@ -264,7 +267,8 @@ fi
 # Validate destination directory
 if [ ! -d "$DEST" ]; then
     echo "❌ Destination directory does not exist: $DEST"
-    exit 1
+    echo "Creating destination directory..."
+    mkdir -p "$DEST"
 fi
 
 echo "📥 Downloading from Google Drive..."
@@ -275,15 +279,24 @@ echo "Destination: $DEST"
 (
     cd "$DEST" && \
     . "NETWORK_VOLUME_PLACEHOLDER/venv/comfyui/bin/activate" && \
-    gdown "$FILE_ID"
+    gdown "$FILE_ID" --fuzzy
 )
 
-if [ $? -eq 0 ]; then
+DOWNLOAD_STATUS=$?
+
+if [ $DOWNLOAD_STATUS -eq 0 ]; then
     echo "✅ Download completed successfully!"
     echo "📁 Files in destination:"
     ls -lh "$DEST"
 else
     echo "❌ Download failed!"
+    echo ""
+    echo "🔧 Troubleshooting tips:"
+    echo "1. Check if the Google Drive file is public (shared with 'Anyone with the link')"
+    echo "2. Try accessing the file directly in browser: https://drive.google.com/file/d/$FILE_ID/view"
+    echo "3. If the file is private, you may need to authenticate gdown:"
+    echo "   gdown --folder 'your_folder_url' --remaining-ok"
+    echo "4. Alternative: Download manually and upload to the container"
     exit 1
 fi
 EOF
