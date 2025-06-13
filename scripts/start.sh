@@ -237,23 +237,33 @@ setup_download_tools() {
     cat > "$NETWORK_VOLUME/scripts/download_gdrive.sh" << 'EOF'
 #!/bin/bash
 # Google Drive download script
-# Usage: ./download_gdrive.sh <google_drive_url> <destination_path> [filename]
+# Usage: ./download_gdrive.sh <google_drive_url_or_file_id> <destination_path>
 
-if [ $# -lt 2 ]; then
-    echo "Usage: $0 <google_drive_url> <destination_path> [filename]"
-    echo "Example: $0 'https://drive.google.com/file/d/1234567890/view' /workspace/ComfyUI/models/checkpoints/ model.safetensors"
+if [ $# -ne 2 ]; then
+    echo "Usage: $0 <google_drive_url_or_file_id> <destination_path>"
+    echo "Example: $0 'https://drive.google.com/file/d/1234567890/view' /workspace/ComfyUI/models/checkpoints/"
+    echo "Example: $0 '1234567890' /workspace/ComfyUI/models/checkpoints/"
     exit 1
 fi
 
-URL="$1"
+INPUT="$1"
 DEST="$2"
-FILENAME="$3"
 
-# Extract file ID from Google Drive URL
-FILE_ID=$(echo "$URL" | grep -oP '(?<=d/)[a-zA-Z0-9_-]+')
+# Extract file ID from Google Drive URL or use direct file ID
+if [[ "$INPUT" == *"drive.google.com"* ]]; then
+    FILE_ID=$(echo "$INPUT" | grep -oP '(?<=d/)[a-zA-Z0-9_-]+')
+else
+    FILE_ID="$INPUT"
+fi
 
 if [ -z "$FILE_ID" ]; then
-    echo "❌ Could not extract file ID from URL: $URL"
+    echo "❌ Could not extract file ID from input: $INPUT"
+    exit 1
+fi
+
+# Validate destination directory
+if [ ! -d "$DEST" ]; then
+    echo "❌ Destination directory does not exist: $DEST"
     exit 1
 fi
 
@@ -261,17 +271,16 @@ echo "📥 Downloading from Google Drive..."
 echo "File ID: $FILE_ID"
 echo "Destination: $DEST"
 
-# Activate virtual environment and download
-source NETWORK_VOLUME_PLACEHOLDER/venv/comfyui/bin/activate
-
-if [ -n "$FILENAME" ]; then
-    gdown "https://drive.google.com/uc?id=$FILE_ID" -O "$DEST/$FILENAME"
-else
-    gdown "https://drive.google.com/uc?id=$FILE_ID" -O "$DEST"
-fi
+# Activate virtual environment and download in destination directory using subshell
+(
+    cd "$DEST" && \
+    . "NETWORK_VOLUME_PLACEHOLDER/venv/comfyui/bin/activate" && \
+    gdown "$FILE_ID"
+)
 
 if [ $? -eq 0 ]; then
     echo "✅ Download completed successfully!"
+    echo "📁 Files in destination:"
     ls -lh "$DEST"
 else
     echo "❌ Download failed!"
@@ -301,7 +310,7 @@ echo "File: $FILENAME"
 echo "Destination: $DEST"
 
 # Activate virtual environment and download
-source NETWORK_VOLUME_PLACEHOLDER/venv/comfyui/bin/activate
+. "NETWORK_VOLUME_PLACEHOLDER/venv/comfyui/bin/activate"
 huggingface-cli download "$REPO_ID" "$FILENAME" --local-dir "$DEST"
 
 if [ $? -eq 0 ]; then
