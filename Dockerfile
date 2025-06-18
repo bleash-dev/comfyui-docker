@@ -39,12 +39,12 @@ RUN apt-get update && apt-get install -y \
     libsm6 \
     libxext6 \
     tree \
-    fuse3 \
-    libfuse3-3 \
-    libfuse3-dev \
-    fuse \
-    unzip \
-    ca-certificates \
+    # fuse3 \
+    # libfuse3-3 \
+    # libfuse3-dev \
+    # fuse \
+    # unzip \
+    # ca-certificates \
     # inotify-tools \
     && rm -rf /var/lib/apt/lists/*
 
