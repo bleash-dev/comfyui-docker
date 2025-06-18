@@ -342,6 +342,71 @@ setup_comfyui_manager() {
     echo "✅ ComfyUI Manager installed"
 }
 
+# Function to setup additional custom nodes
+setup_additional_custom_nodes() {
+    echo "📝 Setting up additional custom nodes with logging..." >> "$STARTUP_LOG"
+    
+    local custom_nodes_dir="$NETWORK_VOLUME/ComfyUI/custom_nodes"
+    local filesystem_manager_dir="$custom_nodes_dir/Comfyui-FileSytem-Manager"
+    local idle_checker_dir="$custom_nodes_dir/Comfyui-Idle-Checker"
+    
+    . $COMFYUI_VENV/bin/activate
+    cd "$custom_nodes_dir"
+    
+    # Install Comfyui-FileSytem-Manager
+    if [ -d "$filesystem_manager_dir" ] && [ -f "$filesystem_manager_dir/__init__.py" ]; then
+        echo "✅ Comfyui-FileSytem-Manager already exists (from mounted storage)"
+        
+        # Check and update if needed
+        cd "$filesystem_manager_dir"
+        git pull
+        cd "$custom_nodes_dir"
+    else
+        echo "Installing Comfyui-FileSytem-Manager..."
+        git clone https://github.com/bleash-dev/Comfyui-FileSytem-Manager.git
+        
+        if [ -f "$filesystem_manager_dir/requirements.txt" ]; then
+            pip install --no-cache-dir -r "$filesystem_manager_dir/requirements.txt"
+        fi
+        
+        if [ -f "$filesystem_manager_dir/install.py" ]; then
+            cd "$filesystem_manager_dir"
+            python install.py
+            cd "$custom_nodes_dir"
+        fi
+        
+        echo "✅ Comfyui-FileSytem-Manager installed"
+    fi
+    
+    # Install Comfyui-Idle-Checker
+    if [ -d "$idle_checker_dir" ] && [ -f "$idle_checker_dir/__init__.py" ]; then
+        echo "✅ Comfyui-Idle-Checker already exists (from mounted storage)"
+        
+        # Check and update if needed
+        cd "$idle_checker_dir"
+        git pull
+        cd "$custom_nodes_dir"
+    else
+        echo "Installing Comfyui-Idle-Checker..."
+        git clone https://github.com/bleash-dev/Comfyui-Idle-Checker.git
+        
+        if [ -f "$idle_checker_dir/requirements.txt" ]; then
+            pip install --no-cache-dir -r "$idle_checker_dir/requirements.txt"
+        fi
+        
+        if [ -f "$idle_checker_dir/install.py" ]; then
+            cd "$idle_checker_dir"
+            python install.py
+            cd "$custom_nodes_dir"
+        fi
+        
+        echo "✅ Comfyui-Idle-Checker installed"
+    fi
+    
+    deactivate
+    echo "✅ Additional custom nodes setup complete"
+}
+
 # Function to setup download tools
 setup_download_tools() {
     echo "Setting up download tools..."
@@ -558,6 +623,7 @@ setup_persistent_jupyter
 setup_persistent_comfyui_data
 setup_comfyui_installation
 setup_comfyui_manager
+setup_additional_custom_nodes
 setup_download_tools
 
 echo "✅ All components setup complete"
