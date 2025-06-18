@@ -8,9 +8,17 @@ required_vars=("RUNPOD_API_KEY" "RUNPOD_TEMPLATE_ID" "DOCKER_IMAGE_TAG" "GITHUB_
 for var in "${required_vars[@]}"; do
     if [ -z "${!var:-}" ]; then
         echo "❌ Required environment variable $var is not set"
+        echo "💡 Make sure to set this as a secret in your GitHub repository"
         exit 1
     fi
 done
+
+# Use the commit-tagged image if available, fallback to main tag
+if [ -n "${DOCKER_METADATA_OUTPUT_TAGS:-}" ]; then
+    # Extract the commit-tagged image from the tags
+    COMMIT_TAG=$(echo "$DOCKER_METADATA_OUTPUT_TAGS" | grep -E ":[a-z]+-[a-f0-9]+" | head -n1 || echo "$DOCKER_IMAGE_TAG")
+    DOCKER_IMAGE_TAG="$COMMIT_TAG"
+fi
 
 echo "📋 Template Update Details:"
 echo "  Template ID: $RUNPOD_TEMPLATE_ID"
