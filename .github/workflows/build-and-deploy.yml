@@ -61,6 +61,18 @@ jobs:
           PYTORCH_VERSION=2.4.0
           COMFYUI_VERSION=master
 
+    - name: Update RunPod Template
+      if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+      env:
+        RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        RUNPOD_TEMPLATE_ID: ${{ secrets.RUNPOD_TEMPLATE_ID }}
+        DOCKER_IMAGE_TAG: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+        GITHUB_USERNAME: ${{ github.actor }}
+        GITHUB_PAT: ${{ secrets.RUNPOD_GITHUB_PAT }}
+      run: |
+        chmod +x ./scripts/update_runpod_template.sh
+        ./scripts/update_runpod_template.sh
+
     - name: Generate deployment info
       if: github.event_name != 'pull_request'
       run: |
@@ -88,3 +100,18 @@ jobs:
         echo "### Access URLs (when deployed):" >> $GITHUB_STEP_SUMMARY
         echo "- **ComfyUI:** \`https://your-pod-id-3000.proxy.runpod.net\`" >> $GITHUB_STEP_SUMMARY
         echo "- **Jupyter Lab:** \`https://your-pod-id-8888.proxy.runpod.net\`" >> $GITHUB_STEP_SUMMARY
+
+        if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          echo "### 🎯 RunPod Template Auto-Updated!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Your RunPod template has been automatically updated with the latest Docker image." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Template ID:** \`${{ secrets.RUNPOD_TEMPLATE_ID }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Updated Image:** \`${{ fromJSON(steps.meta.outputs.json).tags[0] }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🚀 Ready to Deploy!" >> $GITHUB_STEP_SUMMARY
+          echo "1. Go to RunPod → Templates" >> $GITHUB_STEP_SUMMARY
+          echo "2. Find your updated template" >> $GITHUB_STEP_SUMMARY
+          echo "3. Click **Deploy** to start a new pod with the latest image" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+        fi
