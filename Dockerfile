@@ -45,7 +45,7 @@ RUN apt-get update && apt-get install -y \
     fuse \
     unzip \
     ca-certificates \
-    inotify-tools \
+    # inotify-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Configure FUSE for non-root access
