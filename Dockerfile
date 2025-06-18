@@ -40,12 +40,9 @@ RUN apt-get update && apt-get install -y \
     libxext6 \
     tree \
     fuse3 \
-    libfuse3-3 \
-    libfuse3-dev \
-    fuse \
-    # unzip \
-    # ca-certificates \
-    # inotify-tools \
+    unzip \
+    ca-certificates \
+    inotify-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Configure FUSE for non-root access
