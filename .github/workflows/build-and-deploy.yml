@@ -67,8 +67,6 @@ jobs:
         RUNPOD_API_KEY: ${{ secrets.RUN_POD_TOKEN }}
         RUNPOD_TEMPLATE_ID: ${{ secrets.THIS_POD_TEMPLATE_ID }}
         DOCKER_IMAGE_TAG: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
-        GITHUB_USERNAME: ${{ github.actor }}
-        GITHUB_PAT: ${{ secrets.RUNPOD_GITHUB_PAT }}
       run: |
         chmod +x ./scripts/update_runpod_template.sh
         ./scripts/update_runpod_template.sh

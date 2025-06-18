@@ -4,7 +4,7 @@ set -euo pipefail
 echo "🚀 Updating RunPod template..."
 
 # Validate required environment variables
-required_vars=("RUNPOD_API_KEY" "RUNPOD_TEMPLATE_ID" "DOCKER_IMAGE_TAG" "GITHUB_USERNAME" "GITHUB_PAT")
+required_vars=("RUNPOD_API_KEY" "RUNPOD_TEMPLATE_ID" "DOCKER_IMAGE_TAG")
 for var in "${required_vars[@]}"; do
     if [ -z "${!var:-}" ]; then
         echo "❌ Required environment variable $var is not set"
@@ -23,7 +23,6 @@ fi
 echo "📋 Template Update Details:"
 echo "  Template ID: $RUNPOD_TEMPLATE_ID"
 echo "  Docker Image: $DOCKER_IMAGE_TAG"
-echo "  Registry Auth: $GITHUB_USERNAME"
 
 # Make the API call to update the template
 echo "📤 Sending update request to RunPod API..."
