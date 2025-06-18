@@ -33,11 +33,11 @@ response=$(curl -s -w "\n%{http_code}" \
     -H "Content-Type: application/json" \
     "https://api.runpod.io/graphql" \
     --data-raw '{
-        "query": "mutation updateTemplate($input: UpdateTemplateInput!) { updateTemplate(input: $input) { id name containerImage } }",
+        "query": "mutation saveTemplate($input: SaveTemplateInput!) { saveTemplate(input: $input) { id name imageName } }",
         "variables": {
             "input": {
                 "id": "'$RUNPOD_TEMPLATE_ID'",
-                "containerImage": "'$DOCKER_IMAGE_TAG'"
+                "imageName": "'$DOCKER_IMAGE_TAG'"
             }
         }
     }')
@@ -53,7 +53,7 @@ if [ "$http_code" -eq 200 ]; then
     echo "📋 Response: $response_body"
     
     # Parse and display template info if successful
-    if echo "$response_body" | grep -q '"updateTemplate"'; then
+    if echo "$response_body" | grep -q '"saveTemplate"'; then
         echo "🎉 Template update confirmed"
     fi
 else
