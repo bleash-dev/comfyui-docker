@@ -64,7 +64,7 @@ jobs:
     - name: Update RunPod Template
       if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
       env:
-        RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        RUNPOD_API_KEY: ${{ secrets.RUN_POD_TOKEN }}
         RUNPOD_TEMPLATE_ID: ${{ secrets.RUNPOD_TEMPLATE_ID }}
         DOCKER_IMAGE_TAG: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
         GITHUB_USERNAME: ${{ github.actor }}
