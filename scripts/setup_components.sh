@@ -1,4 +1,5 @@
 #!/bin/bash
+set -eo pipefail # Ensures script exits on error and handles pipe failures
 # Setup all ComfyUI components
 
 echo "🔧 Setting up ComfyUI components..."

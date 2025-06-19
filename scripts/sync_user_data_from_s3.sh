@@ -3,67 +3,105 @@
 
 echo "📥 Syncing user data from S3..."
 
-# Sync ComfyUI user folders
-if rclone lsd "s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/ComfyUI/" 2>/dev/null; then
-    echo "📁 Found user ComfyUI data in S3"
-    
-    # Get list of user folders
-    user_folders=()
-    while IFS= read -r line; do
-        if [[ $line =~ ^[[:space:]]*[-0-9]+[[:space:]]+[0-9-]+[[:space:]]+[0-9:]+[[:space:]]+(.+)$ ]]; then
-            folder_name="${BASH_REMATCH[1]}"
-            # Skip shared folders
-            if [[ "$folder_name" != "models" && "$folder_name" != "custom_nodes" ]]; then
-                user_folders+=("$folder_name")
-            fi
-        fi
-    done < <(rclone lsd "s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/ComfyUI/" 2>/dev/null)
-    
-    # Sync each user folder
-    for folder in "${user_folders[@]}"; do
-        local_path="$NETWORK_VOLUME/ComfyUI/$folder"
-        s3_path="s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/ComfyUI/$folder"
-        
-        mkdir -p "$local_path"
-        echo "📥 Syncing ComfyUI/$folder from S3..."
-        rclone sync "$s3_path" "$local_path" --progress --retries 3 || echo "Failed to sync $folder"
-    done
-    
-    # Sync ComfyUI root files
-    s3_root_files="s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/ComfyUI/_root_files"
-    if rclone lsd "$s3_root_files" >/dev/null 2>&1; then
-        echo "📥 Syncing ComfyUI root files from S3..."
-        temp_root="/tmp/comfyui_root_restore"
-        mkdir -p "$temp_root"
-        rclone sync "$s3_root_files" "$temp_root" --progress --retries 3
-        
-        for file in "$temp_root"/*; do
-            if [[ -f "$file" ]]; then
-                filename=$(basename "$file")
-                if [[ ! -e "$NETWORK_VOLUME/ComfyUI/$filename" ]]; then
-                    cp "$file" "$NETWORK_VOLUME/ComfyUI/"
-                fi
-            fi
-        done
-        rm -rf "$temp_root"
+# --- Configuration & Validation ---
+set -eo pipefail # Exit on error, treat unset variables as an error, and pipe failures
+
+required_vars=("AWS_BUCKET_NAME" "POD_USER_NAME" "POD_ID" "NETWORK_VOLUME")
+for var in "${required_vars[@]}"; do
+    if [ -z "${!var}" ]; then
+        echo "❌ ERROR: Required environment variable $var is not set."
+        exit 1
     fi
-fi
+done
 
-# Sync other user folders
-if rclone lsd "s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/" 2>/dev/null; then
-    while IFS= read -r line; do
-        if [[ $line =~ ^[[:space:]]*[-0-9]+[[:space:]]+[0-9-]+[[:space:]]+[0-9:]+[[:space:]]+(.+)$ ]]; then
-            folder_name="${BASH_REMATCH[1]}"
-            if [[ "$folder_name" != "ComfyUI" && "$folder_name" != "_pod_tracking" && "$folder_name" != "_workspace_root" ]]; then
-                local_path="$NETWORK_VOLUME/$folder_name"
-                s3_path="s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/$folder_name"
-                
-                mkdir -p "$local_path"
-                echo "📥 Syncing $folder_name from S3..."
-                rclone sync "$s3_path" "$local_path" --progress --retries 3 || echo "Failed to sync $folder_name"
-            fi
+# Base S3 path for the current pod's user data
+S3_POD_BASE="s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID"
+
+# Ensure the local base directory exists
+mkdir -p "$NETWORK_VOLUME"
+
+# --- ComfyUI Specific Sync ---
+S3_COMFYUI_BASE="$S3_POD_BASE/ComfyUI"
+LOCAL_COMFYUI_BASE="$NETWORK_VOLUME/ComfyUI"
+
+echo "ℹ️ Checking for user-specific ComfyUI data in S3 at $S3_COMFYUI_BASE/"
+if rclone lsd "$S3_COMFYUI_BASE/" --retries 2 >/dev/null 2>&1; then # Check if ComfyUI base exists
+    echo "👍 Found user ComfyUI data in S3. Starting sync..."
+    mkdir -p "$LOCAL_COMFYUI_BASE" # Ensure local ComfyUI base exists
+
+    # 1. Sync specific user-modifiable ComfyUI subfolders (e.g., inputs, outputs)
+    #    Add other folders here that the user typically owns and modifies,
+    #    and that are NOT part of shared/common models or custom_nodes.
+    #    Example: 'input', 'output', 'temp_files', 'user_configs'
+    comfyui_user_sync_folders=("input" "output") # Customize this list
+
+    for folder_name in "${comfyui_user_sync_folders[@]}"; do
+        s3_folder_path="$S3_COMFYUI_BASE/$folder_name/"
+        local_folder_path="$LOCAL_COMFYUI_BASE/$folder_name/"
+
+        # Check if the specific user folder exists in S3 before syncing
+        if rclone lsd "$s3_folder_path" --retries 1 >/dev/null 2>&1; then
+            echo "  📥 Syncing ComfyUI/$folder_name from S3..."
+            mkdir -p "$local_folder_path"
+            rclone sync "$s3_folder_path" "$local_folder_path" --progress --retries 3 || \
+                echo "⚠️ WARNING: Failed to sync ComfyUI/$folder_name. Pod will continue."
+        else
+            echo "  ℹ️ No user data for ComfyUI/$folder_name found in S3."
         fi
-    done < <(rclone lsd "s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/" 2>/dev/null)
+    done
+
+    # 2. Sync ComfyUI root files (e.g., user_startup_options.json, workflow_api.js if customized)
+    #    These are files directly in ComfyUI/, not in subfolders managed above.
+    #    Assume _root_files on S3 contains only files meant for the ComfyUI root.
+    s3_comfyui_root_files_path="$S3_COMFYUI_BASE/_root_files/"
+    if rclone lsd "$s3_comfyui_root_files_path" --retries 1 >/dev/null 2>&1; then
+        echo "  📥 Syncing ComfyUI root files from $s3_comfyui_root_files_path to $LOCAL_COMFYUI_BASE/ ..."
+        # Sync directly. This will overwrite local files if they exist and are different in S3.
+        # It will also bring down new files from S3.
+        # If a file was deleted from S3's _root_files, rclone sync will delete it locally too (if it was from a previous sync).
+        rclone sync "$s3_comfyui_root_files_path" "$LOCAL_COMFYUI_BASE/" --progress --retries 3 || \
+            echo "⚠️ WARNING: Failed to sync ComfyUI root files. Pod will continue."
+    else
+        echo "  ℹ️ No ComfyUI _root_files found in S3."
+    fi
+else
+    echo "ℹ️ No user-specific ComfyUI directory found in S3 for this pod session."
+fi
+echo ""
+
+
+# --- General User Data Sync (Other Top-Level Folders) ---
+echo "ℹ️ Checking for other user-specific data in S3 at $S3_POD_BASE/"
+if rclone lsd "$S3_POD_BASE/" --retries 2 >/dev/null 2>&1; then # Check if pod base itself exists
+    echo "👍 Found pod session base in S3. Syncing other user folders..."
+
+    # Define folders to exclude from this general sync
+    # These are either handled specifically (ComfyUI) or are internal (_pod_tracking)
+    # or potentially mounted/handled differently (_workspace_root if it's a special mount point)
+    declare -A exclude_folders_map # Use an associative array for efficient lookup
+    exclude_folders_map["ComfyUI"]=1
+    exclude_folders_map["_pod_tracking"]=1
+    exclude_folders_map["_workspace_root"]=1 # If this is a special folder synced by other means
+
+    # Get list of top-level directories in the pod's S3 base
+    rclone lsf "$S3_POD_BASE/" --dirs-only --retries 2 | while IFS= read -r dir_entry; do
+        folder_name="${dir_entry%/}" # Remove trailing slash
+
+        if [[ -z "${exclude_folders_map[$folder_name]}" ]]; then # Check if folder is NOT in the exclusion map
+            s3_folder_path="$S3_POD_BASE/$folder_name/"
+            local_folder_path="$NETWORK_VOLUME/$folder_name/" # Sync to top-level of NETWORK_VOLUME
+
+            echo "  📥 Syncing general folder '$folder_name' from S3..."
+            mkdir -p "$local_folder_path"
+            rclone sync "$s3_folder_path" "$local_folder_path" --progress --retries 3 || \
+                echo "⚠️ WARNING: Failed to sync general folder '$folder_name'. Pod will continue."
+        else
+            echo "  ↪️ Skipping folder '$folder_name' (in exclusion list or handled separately)."
+        fi
+    done
+else
+    echo "ℹ️ No S3 data found at the pod session base: $S3_POD_BASE/"
 fi
 
-echo "✅ User data sync from S3 completed"
+echo ""
+echo "✅ User data sync from S3 completed."

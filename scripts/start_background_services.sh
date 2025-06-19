@@ -4,12 +4,12 @@
 echo "🚀 Starting background services..."
 
 # Start sync daemon
-nohup bash -c 'while true; do /scripts/sync_user_data.sh; sleep 300; done' > /scripts/.sync_daemon.log 2>&1 &
+nohup bash -c 'while true; do '$NETWORK_VOLUME'/scripts/sync_user_data.sh; sleep 300; done' > $NETWORK_VOLUME/.sync_daemon.log 2>&1 &
 
 # Start signal handler
-nohup /scripts/signal_handler.sh > /scripts/.signal_handler.log 2>&1 &
+nohup $NETWORK_VOLUME/scripts/signal_handler.sh > $NETWORK_VOLUME/.signal_handler.log 2>&1 &
 
 # Start log sync
-nohup bash -c 'while true; do /scripts/sync_logs.sh; sleep 180; done' > /scripts/.log_sync.log 2>&1 &
+nohup bash -c 'while true; do '$NETWORK_VOLUME'/scripts/sync_logs.sh; sleep 180; done' > $NETWORK_VOLUME/.log_sync.log 2>&1 &
 
 echo "✅ Background services started"
