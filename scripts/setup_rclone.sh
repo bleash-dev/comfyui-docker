@@ -37,10 +37,15 @@ if [ ! -f /etc/fuse.conf ] || ! grep -q "user_allow_other" /etc/fuse.conf; then
 fi
 
 # Validate required environment variables
-required_vars=("AWS_BUCKET_NAME" "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" "AWS_REGION" "POD_USER_NAME")
+required_vars=("AWS_BUCKET_NAME" "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" "AWS_REGION" "POD_USER_NAME" "POD_ID")
 for var in "${required_vars[@]}"; do
     if [ -z "${!var}" ]; then
         echo "❌ Required environment variable $var is not set"
+        if [ "$var" = "POD_ID" ]; then
+            echo "POD_ID is required for pod-specific data isolation"
+            echo "Without POD_ID, the sync system cannot safely identify pod-specific data"
+            echo "Container startup ABORTED due to missing POD_ID."
+        fi
         exit 1
     fi
 done
@@ -49,6 +54,7 @@ echo "✅ Environment variables validated"
 echo "Bucket: $AWS_BUCKET_NAME"
 echo "Region: $AWS_REGION" 
 echo "User: $POD_USER_NAME"
+echo "Pod ID: $POD_ID"
 echo "Network Volume: $NETWORK_VOLUME"
 
 # Create rclone config directory
@@ -96,14 +102,14 @@ COMFYUI_SHARED_FOLDERS=(
 get_user_s3_folders() {
     local folders=()
     
-    # Get user-specific folders from ComfyUI directory in S3
-    if rclone lsd s3:$AWS_BUCKET_NAME/comfy_sessions/$POD_USER_NAME/ComfyUI/ 2>/dev/null; then
+    # Get user-specific folders from ComfyUI directory in S3 (now pod-specific)
+    if rclone lsd s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/ComfyUI/ 2>/dev/null; then
         while IFS= read -r line; do
             if [[ $line =~ ^[[:space:]]*[-0-9]+[[:space:]]+[0-9-]+[[:space:]]+[0-9:]+[[:space:]]+(.+)$ ]]; then
                 folder_name="${BASH_REMATCH[1]}"
                 folders+=("$folder_name")
             fi
-        done < <(rclone lsd s3:$AWS_BUCKET_NAME/comfy_sessions/$POD_USER_NAME/ComfyUI/ 2>/dev/null)
+        done < <(rclone lsd s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/ComfyUI/ 2>/dev/null)
     fi
     
     printf '%s\n' "${folders[@]}"
@@ -208,7 +214,7 @@ mount_failures=()
 
 for folder in "${SHARED_FOLDERS[@]}"; do
     mount_point="$NETWORK_VOLUME/$folder"
-    s3_path="s3:$AWS_BUCKET_NAME/comfy_sessions/shared/$folder"
+    s3_path="s3:$AWS_BUCKET_NAME/pod_sessions/shared/$folder"
     
     # Create mount point
     mkdir -p "$mount_point"
@@ -235,7 +241,7 @@ echo "📝 Note: ComfyUI will be installed locally to allow mixed shared/user su
 echo "📁 Setting up ComfyUI shared folder mounts..."
 for folder in "${COMFYUI_SHARED_FOLDERS[@]}"; do
     mount_point="$NETWORK_VOLUME/ComfyUI/$folder"
-    s3_path="s3:$AWS_BUCKET_NAME/comfy_sessions/shared/ComfyUI/$folder"
+    s3_path="s3:$AWS_BUCKET_NAME/pod_sessions/shared/ComfyUI/$folder"
     
     # Create mount point
     mkdir -p "$mount_point"
@@ -295,7 +301,7 @@ fi
 # Process all discovered user ComfyUI folders
 for folder in "${discovered_user_folders[@]}"; do
     local_path="$NETWORK_VOLUME/ComfyUI/$folder"
-    s3_path="s3:$AWS_BUCKET_NAME/comfy_sessions/$POD_USER_NAME/ComfyUI/$folder"
+    s3_path="s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/ComfyUI/$folder"
     
     # Skip if it's a shared ComfyUI folder (security check)
     if is_comfyui_shared_folder "$folder"; then
@@ -318,9 +324,9 @@ done
 # Remove the predefined user folders setup - we'll handle everything dynamically
 echo "📁 Setting up dynamic user-specific ComfyUI content..."
 
-# Sync ComfyUI root files if they exist in S3
+# Sync ComfyUI root files if they exist in S3 (now pod-specific)
 echo "📄 Syncing ComfyUI root files from S3..."
-s3_root_files_path="s3:$AWS_BUCKET_NAME/comfy_sessions/$POD_USER_NAME/ComfyUI/_root_files"
+s3_root_files_path="s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/ComfyUI/_root_files"
 if rclone lsd "$s3_root_files_path" >/dev/null 2>&1 || rclone ls "$s3_root_files_path" >/dev/null 2>&1; then
     echo "📥 Found ComfyUI root files in S3, syncing..."
     # Create temp directory and sync from S3
@@ -432,7 +438,7 @@ if [[ -d "$NETWORK_VOLUME/ComfyUI" ]]; then
     # Sync each user ComfyUI folder
     for folder in "\${comfyui_user_folders[@]}"; do
         local_path="$NETWORK_VOLUME/ComfyUI/\$folder"
-        s3_path="s3:$AWS_BUCKET_NAME/comfy_sessions/$POD_USER_NAME/ComfyUI/\$folder"
+        s3_path="s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/ComfyUI/\$folder"
         
         if [[ -d "\$local_path" ]]; then
             echo "📤 Syncing ComfyUI folder: \$folder"
@@ -471,8 +477,8 @@ if [[ -d "$NETWORK_VOLUME/ComfyUI" ]]; then
             fi
         done
         
-        # Sync temp directory to S3
-        s3_path="s3:$AWS_BUCKET_NAME/comfy_sessions/$POD_USER_NAME/ComfyUI/_root_files"
+        # Sync temp directory to S3 (now pod-specific)
+        s3_path="s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/ComfyUI/_root_files"
         if rclone sync "\$temp_dir" "\$s3_path" --progress; then
             echo "✅ Synced ComfyUI root files"
             echo "\$(date): Successfully synced ComfyUI root files" >> "\$SYNC_LOG"
@@ -514,7 +520,7 @@ echo "📁 Found \${#user_folders[@]} other user-specific folders"
 # Sync each other user folder
 for folder in "\${user_folders[@]}"; do
     local_path="$NETWORK_VOLUME/\$folder"
-    s3_path="s3:$AWS_BUCKET_NAME/comfy_sessions/$POD_USER_NAME/\$folder"
+    s3_path="s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/\$folder"
     
     if [[ -d "\$local_path" ]] && [[ "\$(ls -A "\$local_path" 2>/dev/null)" ]]; then
         echo "📤 Syncing \$folder to S3..."
@@ -545,7 +551,7 @@ done
 
 if [[ \${#loose_files[@]} -gt 0 ]]; then
     echo "📤 Syncing \${#loose_files[@]} loose files to S3..."
-    s3_path="s3:$AWS_BUCKET_NAME/comfy_sessions/$POD_USER_NAME/_workspace_root"
+    s3_path="s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/_workspace_root"
     
     # Create temporary directory for loose files
     temp_dir="/tmp/workspace_root_sync"
@@ -556,7 +562,7 @@ if [[ \${#loose_files[@]} -gt 0 ]]; then
         cp "$NETWORK_VOLUME/\$file" "\$temp_dir/"
     done
     
-    # Sync temp directory to S3
+    # Sync temp directory to S3 (now pod-specific)
     if rclone sync "\$temp_dir" "\$s3_path" --progress; then
         echo "✅ Synced loose files"
         echo "\$(date): Successfully synced loose files" >> "\$SYNC_LOG"
@@ -1323,11 +1329,12 @@ chmod +x "$NETWORK_VOLUME/scripts/error_detector.sh"
 
 echo "✅ Rclone S3 setup completed successfully!"
 echo ""
-echo "📁 Shared folders mounted from: comfy_sessions/shared/ (predefined only)"
-echo "📁 ComfyUI shared folders mounted from: comfy_sessions/shared/ComfyUI/ (models, custom_nodes, input)"
-echo "👤 User ComfyUI folders synced from: comfy_sessions/$POD_USER_NAME/ComfyUI/ (output, user, temp, workflows, etc.)"
-echo "👤 Other user folders synced from: comfy_sessions/$POD_USER_NAME/"
+echo "📁 Shared folders mounted from: pod_sessions/shared/ (predefined only)"
+echo "📁 ComfyUI shared folders mounted from: pod_sessions/shared/ComfyUI/ (models, custom_nodes, input)"
+echo "👤 User ComfyUI folders synced from: pod_sessions/$POD_USER_NAME/$POD_ID/ComfyUI/ (output, user, temp, workflows, etc.)"
+echo "👤 Other user folders synced from: pod_sessions/$POD_USER_NAME/$POD_ID/"
 echo "🗂️ Network Volume: $NETWORK_VOLUME"
+echo "🔧 FUSE: Properly configured and tested"
 echo ""
 if [[ ${#mount_failures[@]} -eq 0 ]] && [[ ${#sync_failures[@]} -eq 0 ]]; then
     echo "🎉 All critical operations completed successfully!"
@@ -1342,20 +1349,13 @@ echo "💡 Use '$NETWORK_VOLUME/sync_user_data.sh' to manually sync your changes
 echo "💡 Use '$NETWORK_VOLUME/sync_new_folders.sh' to check for new folders"
 echo "⏰ Automatic sync is configured to run every 5 minutes"
 echo "🛑 Use '$NETWORK_VOLUME/graceful_shutdown.sh' for clean shutdown"
-fi
-echo ""
-echo "🔒 Security: Only predefined shared folders are mounted"
-echo "📁 Main shared: venv, .comfyui"
-echo "📁 ComfyUI shared: models, custom_nodes"  
-echo "👤 User-specific: Everything else in ComfyUI + all other folders (dynamically detected)"
-echo "💡 Use '$NETWORK_VOLUME/sync_user_data.sh' to manually sync your changes to S3"
 echo "⏰ Automatic sync is configured to run every 5 minutes"
 echo ""
-echo "📁 Main shared folders mounted from: comfy_sessions/shared/ (venv, .comfyui)"
+echo "📁 Main shared folders mounted from: pod_sessions/shared/ (venv, .comfyui)"
 echo "📁 ComfyUI app: Installed locally in $NETWORK_VOLUME/ComfyUI"
-echo "📁 ComfyUI shared subfolders mounted from: comfy_sessions/shared/ComfyUI/ (models, custom_nodes)"
-echo "👤 User ComfyUI subfolders synced from: comfy_sessions/$POD_USER_NAME/ComfyUI/ (input, output, user, temp, workflows, etc.)"
-echo "👤 Other user folders synced from: comfy_sessions/$POD_USER_NAME/"
+echo "📁 ComfyUI shared subfolders mounted from: pod_sessions/shared/ComfyUI/ (models, custom_nodes)"
+echo "👤 User ComfyUI subfolders synced from: pod_sessions/$POD_USER_NAME/ComfyUI/ (input, output, user, temp, workflows, etc.)"
+echo "👤 Other user folders synced from: pod_sessions/$POD_USER_NAME/"
 echo "🗂️ Network Volume: $NETWORK_VOLUME"
 echo "🔧 FUSE: Properly configured and tested"
 echo ""

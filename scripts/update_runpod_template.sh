@@ -56,7 +56,7 @@ else
     exit 1
 fi
 
-echo "🎉 RunPod template update completed!"
+# Extract HTTP status code
 http_code=$(echo "$response" | tail -n1)
 response_body=$(echo "$response" | head -n -1)
 
