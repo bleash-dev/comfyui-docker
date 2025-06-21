@@ -77,7 +77,7 @@ chmod +x "$NETWORK_VOLUME/scripts/sync_user_data.sh"
 # Graceful shutdown script
 cat > "$NETWORK_VOLUME/scripts/graceful_shutdown.sh" << 'EOF'
 #!/bin/bash
-# Graceful shutdown with tracking cleanup
+# Graceful shutdown with data sync (no FUSE unmounting)
 
 echo "🛑 Graceful shutdown initiated at $(date)"
 
@@ -100,14 +100,8 @@ pkill -f "$NETWORK_VOLUME/scripts/" 2>/dev/null || true
 [ -f "$NETWORK_VOLUME/scripts/sync_logs.sh" ] && "$NETWORK_VOLUME/scripts/sync_logs.sh"
 [ -f "$NETWORK_VOLUME/scripts/sync_user_data.sh" ] && "$NETWORK_VOLUME/scripts/sync_user_data.sh"
 
-# Unmount rclone filesystems
-for mount_point in "$NETWORK_VOLUME/venv" "$NETWORK_VOLUME/.comfyui" "$NETWORK_VOLUME/ComfyUI/models" "$NETWORK_VOLUME/ComfyUI/custom_nodes"; do
-    if mountpoint -q "$mount_point" 2>/dev/null; then
-        fusermount -u "$mount_point" 2>/dev/null || umount "$mount_point" 2>/dev/null || true
-    fi
-done
-
-pkill -f "rclone mount" 2>/dev/null || true
+# Stop any remaining rclone processes (though we shouldn't have mount processes)
+pkill -f "rclone" 2>/dev/null || true
 
 echo "✅ Graceful shutdown completed"
 EOF
@@ -129,6 +123,12 @@ trap handle_signal SIGTERM SIGINT SIGQUIT
 
 while true; do
     sleep 1
+done
+EOF
+
+chmod +x "$NETWORK_VOLUME/scripts/signal_handler.sh"
+
+echo "✅ Sync scripts created"
 done
 EOF
 

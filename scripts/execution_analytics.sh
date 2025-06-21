@@ -1,5 +1,5 @@
 #!/bin/bash
-# Pod execution analytics and reporting
+# Pod execution analytics and reporting (no FUSE dependencies)
 
 # --- Configuration & Validation ---
 set -eo pipefail # Exit on error, treat unset variables as an error (optional), and pipe failures
@@ -248,9 +248,10 @@ show_s3_status() {
     echo "🗂️ S3 Integration Status for $POD_USER_NAME"
     echo "------------------------------------------"
     
-    echo "ℹ️ Checking S3 access to base path: $S3_USER_SESSIONS_BASE/"
-    if rclone lsd "$S3_USER_SESSIONS_BASE/" --retries 1 --max-depth 1; then # Added max-depth
-        echo "✅ S3 access to user session base: Working"
+    echo "ℹ️ Checking S3 connectivity to base path: $S3_USER_SESSIONS_BASE/"
+    if rclone lsd "$S3_USER_SESSIONS_BASE/" --retries 1 --max-depth 1; then
+        echo "✅ S3 connectivity: Working"
+        echo "📊 Sync-only mode: All operations use rclone sync/copy (no FUSE mounts)"
         
         echo "📁 Your tracked Pod ID directories in S3:"
         local found_pods=false
@@ -263,17 +264,17 @@ show_s3_status() {
         fi
         
         # Example for shared resources - adapt path as needed
-        local s3_shared_base="s3:$AWS_BUCKET_NAME/pod_sessions/shared/"
-        echo "🔗 Checking for shared resources (example path: $s3_shared_base):"
+        local s3_shared_base="s3:$AWS_BUCKET_NAME/pod_sessions/global_shared/"
+        echo "🔗 Checking for global shared resources (example path: $s3_shared_base):"
         if rclone lsd "$s3_shared_base" --retries 1 --max-depth 1 2>/dev/null; then
              rclone lsf "$s3_shared_base" --dirs-only --retries 1 | while IFS= read -r shared_item; do
-                echo "  - Shared: ${shared_item%/}"
+                echo "  - Global: ${shared_item%/}"
             done
         else
-            echo "  - No shared resources found at $s3_shared_base or path not accessible."
+            echo "  - No global shared resources found at $s3_shared_base or path not accessible."
         fi
     else
-        echo "❌ S3 access to user session base ($S3_USER_SESSIONS_BASE/): Failed"
+        echo "❌ S3 connectivity ($S3_USER_SESSIONS_BASE/): Failed"
         echo "   Please check your AWS credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION),"
         echo "   rclone configuration, and network connectivity."
     fi

@@ -14,8 +14,12 @@ for var in "${required_vars[@]}"; do
     fi
 done
 
-# Base S3 path for the current pod's user data
+# Base S3 path for the current pod's user data (pod-specific)
 S3_POD_BASE="s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID"
+
+# User-specific shared data (not pod-specific)
+S3_USER_SHARED_BASE="s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/shared"
+S3_USER_COMFYUI_SHARED_BASE="s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/ComfyUI/shared"
 
 # Ensure the local base directory exists
 mkdir -p "$NETWORK_VOLUME"
@@ -105,3 +109,54 @@ fi
 
 echo ""
 echo "✅ User data sync from S3 completed."
+
+# --- User-Specific Shared Data Sync (Not Pod-Specific) ---
+echo "ℹ️ Checking for user-specific shared data in S3 at $S3_USER_SHARED_BASE/"
+if rclone lsd "$S3_USER_SHARED_BASE/" --retries 2 >/dev/null 2>&1; then
+    echo "👍 Found user shared data in S3. Starting sync..."
+    
+    user_shared_sync_folders=("venv" ".comfyui")
+    
+    for folder_name in "${user_shared_sync_folders[@]}"; do
+        s3_folder_path="$S3_USER_SHARED_BASE/$folder_name/"
+        local_folder_path="$NETWORK_VOLUME/$folder_name/"
+        
+        if rclone lsd "$s3_folder_path" --retries 1 >/dev/null 2>&1; then
+            echo "  📥 Syncing user-shared/$folder_name from S3..."
+            mkdir -p "$local_folder_path"
+            rclone sync "$s3_folder_path" "$local_folder_path" --progress --retries 3 || \
+                echo "⚠️ WARNING: Failed to sync user-shared/$folder_name. Pod will continue."
+        else
+            echo "  ℹ️ No user shared data for $folder_name found in S3."
+        fi
+    done
+else
+    echo "ℹ️ No user-specific shared directory found in S3."
+fi
+echo ""
+
+# --- User-Specific ComfyUI Shared Data Sync ---
+echo "ℹ️ Checking for user-specific ComfyUI shared data in S3 at $S3_USER_COMFYUI_SHARED_BASE/"
+if rclone lsd "$S3_USER_COMFYUI_SHARED_BASE/" --retries 2 >/dev/null 2>&1; then
+    echo "👍 Found user ComfyUI shared data in S3. Starting sync..."
+    mkdir -p "$NETWORK_VOLUME/ComfyUI"
+    
+    comfyui_user_shared_sync_folders=("custom_nodes")
+    
+    for folder_name in "${comfyui_user_shared_sync_folders[@]}"; do
+        s3_folder_path="$S3_USER_COMFYUI_SHARED_BASE/$folder_name/"
+        local_folder_path="$NETWORK_VOLUME/ComfyUI/$folder_name/"
+        
+        if rclone lsd "$s3_folder_path" --retries 1 >/dev/null 2>&1; then
+            echo "  📥 Syncing ComfyUI-user-shared/$folder_name from S3..."
+            mkdir -p "$local_folder_path"
+            rclone sync "$s3_folder_path" "$local_folder_path" --progress --retries 3 || \
+                echo "⚠️ WARNING: Failed to sync ComfyUI-user-shared/$folder_name. Pod will continue."
+        else
+            echo "  ℹ️ No user ComfyUI shared data for $folder_name found in S3."
+        fi
+    done
+else
+    echo "ℹ️ No user-specific ComfyUI shared directory found in S3."
+fi
+echo ""

@@ -39,19 +39,12 @@ RUN apt-get update && apt-get install -y \
     libsm6 \
     libxext6 \
     tree \
-    fuse3 \
     unzip \
     ca-certificates \
     inotify-tools \
     jq \
     bc \
     && rm -rf /var/lib/apt/lists/*
-
-# Configure FUSE for non-root access
-RUN echo "user_allow_other" >> /etc/fuse.conf && \
-    chmod a+r /etc/fuse.conf && \
-    groupadd -f fuse && \
-    usermod -a -G fuse root
 
 # Install rclone
 RUN curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip && \
@@ -62,10 +55,6 @@ RUN curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip && \
     chmod 755 /usr/bin/rclone && \
     cd .. && \
     rm -rf rclone-*
-
-# Create FUSE mount points and set permissions
-RUN mkdir -p /tmp/fuse_mounts && \
-    chmod 777 /tmp/fuse_mounts
 
 # Set up workspace
 WORKDIR /workspace
@@ -81,9 +70,9 @@ RUN chmod +x /start.sh
 # Expose ports
 EXPOSE 3000 8888
 
-# Add healthcheck that also verifies FUSE availability
+# Add healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:3000 || exit 1
 
-# Set default command - explicitly use bash with FUSE support
+# Set default command
 CMD ["/bin/bash", "/start.sh"]

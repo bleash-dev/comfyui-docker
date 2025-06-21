@@ -1,11 +1,11 @@
 #!/bin/bash
-set -eo pipefail # Ensures script exits on error and handles pipe failures
+set -eo pipefail
 
 echo "=== ComfyUI Container Startup - $(date) ==="
 echo "🔍 Starting ComfyUI Setup with S3 Integration..."
 echo "Python Version: $(python3 --version)"
 
-# Detect network volume location EARLY (before any background processes)
+# Detect network volume location EARLY
 echo "🔧 Detecting network volume location..."
 NETWORK_VOLUME=""
 if [ -d "/runpod-volume" ]; then
@@ -14,7 +14,7 @@ if [ -d "/runpod-volume" ]; then
 elif mountpoint -q /workspace 2>/dev/null; then
     NETWORK_VOLUME="/workspace"
     echo "Network volume detected at /workspace (mounted)"
-elif [ -f "/workspace/.runpod_volume" ] || [ -w "/workspace" ]; then # Check writability for /workspace as well
+elif [ -f "/workspace/.runpod_volume" ] || [ -w "/workspace" ]; then
     NETWORK_VOLUME="/workspace"
     echo "Using /workspace as persistent storage"
 else
@@ -26,11 +26,10 @@ fi
 # Export NETWORK_VOLUME for all child processes
 export NETWORK_VOLUME
 
-# Enable comprehensive logging from the start (now that we have NETWORK_VOLUME)
+# Enable comprehensive logging
 STARTUP_LOG="$NETWORK_VOLUME/.startup.log"
-# Create the log file and set permissions if it doesn't exist, to avoid tee issues if NETWORK_VOLUME was just formatted/is new
 touch "$STARTUP_LOG"
-chmod 664 "$STARTUP_LOG" # Or appropriate permissions
+chmod 664 "$STARTUP_LOG"
 
 exec 1> >(tee -a "$STARTUP_LOG")
 exec 2> >(tee -a "$STARTUP_LOG" >&2)
@@ -42,66 +41,23 @@ echo "User: $(whoami)"
 echo "----------------------------------------------------"
 echo "📁 Network Volume set to: $NETWORK_VOLUME"
 
-# Start pod execution tracking early (now NETWORK_VOLUME is available)
+# Start pod execution tracking early
 echo "🕐 Starting pod execution tracking..."
-# Ensure log directory for tracker exists if it writes its own separate log
 mkdir -p "$(dirname "$NETWORK_VOLUME/.pod_tracker.log")"
 nohup bash /scripts/pod_execution_tracker.sh > "$NETWORK_VOLUME/.pod_tracker.log" 2>&1 &
 POD_TRACKER_PID=$!
-echo "$POD_TRACKER_PID" > /tmp/pod_tracker.pid # Consider placing on $NETWORK_VOLUME if /tmp is too ephemeral for other scripts
+echo "$POD_TRACKER_PID" > /tmp/pod_tracker.pid
 echo "Pod tracker started with PID $POD_TRACKER_PID. Log: $NETWORK_VOLUME/.pod_tracker.log"
 
-
-# Check FUSE filesystem availability
-echo "🔧 Checking FUSE filesystem availability..."
-if [ ! -c /dev/fuse ]; then
-    echo "❌ CRITICAL: /dev/fuse device not found!"
-    echo "FUSE filesystem is required for S3 mounting via rclone."
-    echo "Container startup ABORTED due to missing FUSE support."
-    exit 1
-fi
-echo "✅ /dev/fuse device found."
-
-# Test FUSE functionality
-echo "🧪 Testing FUSE functionality with rclone :memory: mount..."
-test_mount_dir="/tmp/fuse_test_$(date +%s)" # Unique test dir
-mkdir -p "$test_mount_dir"
-
-# Increased timeout slightly, added --allow-other for some environments, though :memory: might not need it.
-# Added --no-checksum --no-modtime for :memory: mount to speed it up.
-if timeout 15 rclone mount :memory: "$test_mount_dir" --daemon --allow-non-empty --no-checksum --no-modtime --vfs-cache-mode off >/dev/null 2>&1; then
-    sleep 2 # Give it a moment to actually mount
-    if mountpoint -q "$test_mount_dir"; then
-        echo "✅ FUSE mount test successful. Mount point accessible."
-        fusermount -uz "$test_mount_dir" 2>/dev/null || umount -l "$test_mount_dir" 2>/dev/null || echo "⚠️ Note: Could not unmount FUSE test dir, but test passed."
-    else
-        echo "❌ FUSE mount test FAILED - mount point not accessible after rclone command succeeded."
-        # Attempt to clean up even if mountpoint check failed
-        fusermount -uz "$test_mount_dir" 2>/dev/null || umount -l "$test_mount_dir" 2>/dev/null || true
-        rm -rf "$test_mount_dir"
-        exit 1
-    fi
-else
-    echo "❌ FUSE mount test FAILED - rclone command to mount :memory: failed."
-    # Attempt to clean up
-    rm -rf "$test_mount_dir" # rmdir might fail if mount partially happened
-    exit 1
-fi
-rm -rf "$test_mount_dir"
-echo "✅ FUSE filesystem test completed."
 
 # Check GPU availability
 echo "🔎 Checking GPU availability..."
 if command -v nvidia-smi &> /dev/null; then
     echo "✅ NVIDIA GPU detected via nvidia-smi."
     export XPU_TARGET="NVIDIA_GPU"
-    # Optional: Log GPU details
-    # nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
-elif [ -d "/dev/dri" ] && compgen -G "/dev/dri/renderD*" > /dev/null; then # Check for render nodes
+elif [ -d "/dev/dri" ] && compgen -G "/dev/dri/renderD*" > /dev/null; then
     echo "✅ AMD/Intel GPU detected via /dev/dri/renderD*."
-    # Further differentiation might be needed if both AMD and Intel iGPU exist.
-    # For now, let's assume if renderD* exists, it's usable by ROCm or Intel tools.
-    export XPU_TARGET="AMD_GPU" # Or "GPU" generally if specific AMD tools aren't guaranteed
+    export XPU_TARGET="AMD_GPU"
 else
     echo "ℹ️ No dedicated GPU (NVIDIA/AMD) detected. Using CPU."
     export XPU_TARGET="CPU"
@@ -109,9 +65,9 @@ fi
 echo "🎯 XPU_TARGET set to: $XPU_TARGET"
 
 
-# Setup S3 mounting with rclone (this also creates all sync scripts)
+# Setup S3 storage with rclone
 echo "🔧 Setting up S3 storage with rclone via /scripts/setup_rclone.sh..."
-if ! bash /scripts/setup_rclone.sh; then # Assuming this script has its own error reporting
+if ! bash /scripts/setup_rclone.sh; then
     echo "❌ CRITICAL: S3 storage setup failed (see output from setup_rclone.sh)."
     echo "Container startup ABORTED."
     exit 1

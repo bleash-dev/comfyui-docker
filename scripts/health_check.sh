@@ -1,5 +1,5 @@
 #!/bin/bash
-# Health check with sync monitoring
+# Health check with sync monitoring (no FUSE dependencies)
 
 echo "🏥 Running health check..."
 
@@ -17,6 +17,13 @@ if pgrep -f "sync_daemon.sh" >/dev/null; then
 else
     echo "⚠️ Sync daemon is not running, restarting..."
     nohup /workspace/sync_daemon.sh > /workspace/.sync_daemon.log 2>&1 &
+fi
+
+# Check S3 connectivity instead of mount status
+if rclone lsd "s3:$AWS_BUCKET_NAME/" --retries 1 --max-depth 1 >/dev/null 2>&1; then
+    echo "✅ S3 connectivity working"
+else
+    echo "⚠️ S3 connectivity issues detected"
 fi
 
 # Check last sync time

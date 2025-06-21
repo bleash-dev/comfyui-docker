@@ -96,7 +96,8 @@ create_session_data() {
     if [ "$status" = "running" ]; then
         startup_completed_val="true"
     fi
-    s3_mounted_val=$([ -n "$(mount | grep rclone)" ] && echo "true" || echo "false")
+    # Remove FUSE mount detection, use S3 connection test instead
+    s3_mounted_val=$(rclone lsd "s3:$AWS_BUCKET_NAME/" --retries 1 --max-depth 1 >/dev/null 2>&1 && echo "true" || echo "false")
 
     cat > "$LOCAL_TRACKING_FILE" << EOF
 {
@@ -178,10 +179,11 @@ sync_tracking_data() {
         local duration=$((current_time - START_TIME))
 
         if command -v jq >/dev/null 2>&1; then
-            jq ".session.duration_seconds = $duration | .session.duration_human = \"$(printf '%02d:%02d:%02d' $((duration/3600)) $((duration%3600/60)) $((duration%60)))\" | .session.last_update = \"$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)\" | .session.last_timestamp = $current_time | .metrics.s3_mounted = $([ -n "$(mount | grep rclone)" ] && echo "true" || echo "false")" "$LOCAL_TRACKING_FILE" > "$LOCAL_TRACKING_FILE.tmp" && mv "$LOCAL_TRACKING_FILE.tmp" "$LOCAL_TRACKING_FILE"
+            # Update S3 connectivity status instead of mount status
+            local s3_connected=$(rclone lsd "s3:$AWS_BUCKET_NAME/" --retries 1 --max-depth 1 >/dev/null 2>&1 && echo "true" || echo "false")
+            jq ".session.duration_seconds = $duration | .session.duration_human = \"$(printf '%02d:%02d:%02d' $((duration/3600)) $((duration%3600/60)) $((duration%60)))\" | .session.last_update = \"$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)\" | .session.last_timestamp = $current_time | .metrics.s3_connected = $s3_connected" "$LOCAL_TRACKING_FILE" > "$LOCAL_TRACKING_FILE.tmp" && mv "$LOCAL_TRACKING_FILE.tmp" "$LOCAL_TRACKING_FILE"
         else
             # If jq not found, create_session_data (called by periodic loop) will handle updating duration
-            # but s3_mounted might not be updated here without jq. The create_session_data call in the loop will refresh it.
             :
         fi
         
