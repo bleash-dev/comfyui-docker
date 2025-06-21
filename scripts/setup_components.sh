@@ -54,23 +54,71 @@ ln -sf "$network_comfyui_config" "/root/.comfyui"
 
 # Setup ComfyUI installation
 comfyui_dir="$NETWORK_VOLUME/ComfyUI"
-if [ ! -f "$comfyui_dir/main.py" ]; then
+
+# Check if ComfyUI directory exists and handle appropriately
+if [ -d "$comfyui_dir" ]; then
+    echo "ComfyUI directory already exists at $comfyui_dir"
+    
+    # Check if it's a valid ComfyUI installation
+    if [ -f "$comfyui_dir/main.py" ]; then
+        echo "✅ Found existing ComfyUI installation"
+        cd "$comfyui_dir"
+        
+        # Update existing installation
+        echo "Updating existing ComfyUI installation..."
+        git fetch --all || echo "⚠️ Git fetch failed, continuing with existing version"
+        git reset --hard origin/master || echo "⚠️ Git reset failed, continuing with current version"
+        
+        # Ensure dependencies are installed
+        . $COMFYUI_VENV/bin/activate
+        echo "Installing/updating ComfyUI requirements..."
+        pip install --no-cache-dir -r requirements.txt || echo "⚠️ Requirements installation had issues"
+        
+        if ! python -c "import torch" 2>/dev/null; then
+            echo "Installing PyTorch..."
+            pip install --no-cache-dir torch==${PYTORCH_VERSION:-2.4.0} torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+        fi
+        deactivate
+    else
+        echo "⚠️ ComfyUI directory exists but doesn't contain main.py"
+        
+        # Check if directory is empty or only contains hidden files
+        if [ -z "$(ls -A "$comfyui_dir" 2>/dev/null | grep -v '^\.')" ]; then
+            echo "Directory is effectively empty, proceeding with fresh installation..."
+            rm -rf "$comfyui_dir"
+            echo "Installing ComfyUI..."
+            . $COMFYUI_VENV/bin/activate
+            git clone https://github.com/comfyanonymous/ComfyUI "$comfyui_dir"
+            cd "$comfyui_dir"
+            pip install --no-cache-dir -r requirements.txt
+            pip install --no-cache-dir torch==${PYTORCH_VERSION:-2.4.0} torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+            deactivate
+        else
+            echo "Directory contains files but not a valid ComfyUI installation"
+            echo "Contents:"
+            ls -la "$comfyui_dir"
+            
+            # Backup existing directory and install fresh
+            backup_dir="$NETWORK_VOLUME/ComfyUI_backup_$(date +%Y%m%d_%H%M%S)"
+            echo "Backing up existing directory to $backup_dir"
+            mv "$comfyui_dir" "$backup_dir"
+            
+            echo "Installing fresh ComfyUI..."
+            . $COMFYUI_VENV/bin/activate
+            git clone https://github.com/comfyanonymous/ComfyUI "$comfyui_dir"
+            cd "$comfyui_dir"
+            pip install --no-cache-dir -r requirements.txt
+            pip install --no-cache-dir torch==${PYTORCH_VERSION:-2.4.0} torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+            deactivate
+        fi
+    fi
+else
     echo "Installing ComfyUI..."
     . $COMFYUI_VENV/bin/activate
     git clone https://github.com/comfyanonymous/ComfyUI "$comfyui_dir"
     cd "$comfyui_dir"
     pip install --no-cache-dir -r requirements.txt
     pip install --no-cache-dir torch==${PYTORCH_VERSION:-2.4.0} torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-    deactivate
-else
-    echo "✅ Using existing ComfyUI installation"
-    cd "$comfyui_dir"
-    . $COMFYUI_VENV/bin/activate
-    if ! python -c "import torch" 2>/dev/null; then
-        echo "Installing ComfyUI requirements..."
-        pip install --no-cache-dir -r requirements.txt
-        pip install --no-cache-dir torch==${PYTORCH_VERSION:-2.4.0} torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-    fi
     deactivate
 fi
 
@@ -82,6 +130,14 @@ if [ ! -d "$manager_dir" ]; then
     cd "$NETWORK_VOLUME/ComfyUI/custom_nodes"
     git clone https://github.com/ltdrdata/ComfyUI-Manager.git
     [ -f "ComfyUI-Manager/requirements.txt" ] && pip install --no-cache-dir -r ComfyUI-Manager/requirements.txt
+    deactivate
+else
+    echo "✅ ComfyUI Manager already exists"
+    cd "$manager_dir"
+    . $COMFYUI_VENV/bin/activate
+    echo "Updating ComfyUI Manager..."
+    git pull || echo "⚠️ Git pull failed, continuing with existing version"
+    [ -f "requirements.txt" ] && pip install --no-cache-dir -r requirements.txt
     deactivate
 fi
 
@@ -98,7 +154,7 @@ cd "$custom_nodes_dir"
 if [ -d "$filesystem_manager_dir" ] && [ -f "$filesystem_manager_dir/__init__.py" ]; then
     echo "✅ Comfyui-FileSytem-Manager already exists (from mounted storage)"
     cd "$filesystem_manager_dir"
-    git pull
+    git pull || echo "⚠️ Git pull failed, continuing with existing version"
     cd "$custom_nodes_dir"
 else
     echo "Installing Comfyui-FileSytem-Manager..."
@@ -121,7 +177,7 @@ fi
 if [ -d "$idle_checker_dir" ] && [ -f "$idle_checker_dir/__init__.py" ]; then
     echo "✅ Comfyui-Idle-Checker already exists (from mounted storage)"
     cd "$idle_checker_dir"
-    git pull
+    git pull || echo "⚠️ Git pull failed, continuing with existing version"
     cd "$custom_nodes_dir"
 else
     echo "Installing Comfyui-Idle-Checker..."

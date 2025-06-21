@@ -156,7 +156,4 @@ fi
 echo ""
 
 echo "✅ User data sync from S3 completed."
-else
-    echo "ℹ️ No user-specific ComfyUI shared directory found in S3."
-fi
-echo ""
+
