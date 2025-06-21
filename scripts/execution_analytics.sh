@@ -249,14 +249,14 @@ show_s3_status() {
     echo "------------------------------------------"
     
     echo "ℹ️ Checking S3 connectivity to base path: $S3_USER_SESSIONS_BASE/"
-    if rclone lsd "$S3_USER_SESSIONS_BASE/" --retries 1 --max-depth 1; then
+    if aws s3 ls "$S3_USER_SESSIONS_BASE/" >/dev/null 2>&1; then
         echo "✅ S3 connectivity: Working"
-        echo "📊 Sync-only mode: All operations use rclone sync/copy (no FUSE mounts)"
+        echo "📊 Sync-only mode: All operations use AWS CLI sync (no mounting)"
         
         echo "📁 Your tracked Pod ID directories in S3:"
         local found_pods=false
-        rclone lsf "$S3_USER_SESSIONS_BASE/" --dirs-only --retries 1 | while IFS= read -r pod_dir; do
-            echo "  - ${pod_dir%/}" # Remove trailing slash
+        aws s3 ls "$S3_USER_SESSIONS_BASE/" | grep "PRE" | awk '{print $2}' | sed 's/\///g' | while IFS= read -r pod_dir; do
+            echo "  - $pod_dir"
             found_pods=true
         done
         if ! $found_pods; then
@@ -264,11 +264,11 @@ show_s3_status() {
         fi
         
         # Example for shared resources - adapt path as needed
-        local s3_shared_base="s3:$AWS_BUCKET_NAME/pod_sessions/global_shared/"
+        local s3_shared_base="s3://$AWS_BUCKET_NAME/pod_sessions/global_shared/"
         echo "🔗 Checking for global shared resources (example path: $s3_shared_base):"
-        if rclone lsd "$s3_shared_base" --retries 1 --max-depth 1 2>/dev/null; then
-             rclone lsf "$s3_shared_base" --dirs-only --retries 1 | while IFS= read -r shared_item; do
-                echo "  - Global: ${shared_item%/}"
+        if aws s3 ls "$s3_shared_base" >/dev/null 2>&1; then
+             aws s3 ls "$s3_shared_base" | grep "PRE" | awk '{print $2}' | sed 's/\///g' | while IFS= read -r shared_item; do
+                echo "  - Global: $shared_item"
             done
         else
             echo "  - No global shared resources found at $s3_shared_base or path not accessible."
@@ -276,7 +276,7 @@ show_s3_status() {
     else
         echo "❌ S3 connectivity ($S3_USER_SESSIONS_BASE/): Failed"
         echo "   Please check your AWS credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION),"
-        echo "   rclone configuration, and network connectivity."
+        echo "   AWS CLI configuration, and network connectivity."
     fi
     echo ""
 }

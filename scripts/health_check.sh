@@ -20,7 +20,7 @@ else
 fi
 
 # Check S3 connectivity instead of mount status
-if rclone lsd "s3:$AWS_BUCKET_NAME/" --retries 1 --max-depth 1 >/dev/null 2>&1; then
+if aws s3 ls "s3://$AWS_BUCKET_NAME/" >/dev/null 2>&1; then
     echo "✅ S3 connectivity working"
 else
     echo "⚠️ S3 connectivity issues detected"

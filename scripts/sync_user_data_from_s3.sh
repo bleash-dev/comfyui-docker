@@ -15,11 +15,11 @@ for var in "${required_vars[@]}"; do
 done
 
 # Base S3 path for the current pod's user data (pod-specific)
-S3_POD_BASE="s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID"
+S3_POD_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID"
 
 # User-specific shared data (not pod-specific)
-S3_USER_SHARED_BASE="s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/shared"
-S3_USER_COMFYUI_SHARED_BASE="s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/ComfyUI/shared"
+S3_USER_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/shared"
+S3_USER_COMFYUI_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/ComfyUI/shared"
 
 # Ensure the local base directory exists
 mkdir -p "$NETWORK_VOLUME"
@@ -29,7 +29,7 @@ S3_COMFYUI_BASE="$S3_POD_BASE/ComfyUI"
 LOCAL_COMFYUI_BASE="$NETWORK_VOLUME/ComfyUI"
 
 echo "ℹ️ Checking for user-specific ComfyUI data in S3 at $S3_COMFYUI_BASE/"
-if rclone lsd "$S3_COMFYUI_BASE/" --retries 2 >/dev/null 2>&1; then # Check if ComfyUI base exists
+if aws s3 ls "$S3_COMFYUI_BASE/" >/dev/null 2>&1; then
     echo "👍 Found user ComfyUI data in S3. Starting sync..."
     mkdir -p "$LOCAL_COMFYUI_BASE" # Ensure local ComfyUI base exists
 
@@ -44,10 +44,10 @@ if rclone lsd "$S3_COMFYUI_BASE/" --retries 2 >/dev/null 2>&1; then # Check if C
         local_folder_path="$LOCAL_COMFYUI_BASE/$folder_name/"
 
         # Check if the specific user folder exists in S3 before syncing
-        if rclone lsd "$s3_folder_path" --retries 1 >/dev/null 2>&1; then
+        if aws s3 ls "$s3_folder_path" >/dev/null 2>&1; then
             echo "  📥 Syncing ComfyUI/$folder_name from S3..."
             mkdir -p "$local_folder_path"
-            rclone sync "$s3_folder_path" "$local_folder_path" --progress --retries 3 || \
+            aws s3 sync "$s3_folder_path" "$local_folder_path" || \
                 echo "⚠️ WARNING: Failed to sync ComfyUI/$folder_name. Pod will continue."
         else
             echo "  ℹ️ No user data for ComfyUI/$folder_name found in S3."
@@ -58,12 +58,9 @@ if rclone lsd "$S3_COMFYUI_BASE/" --retries 2 >/dev/null 2>&1; then # Check if C
     #    These are files directly in ComfyUI/, not in subfolders managed above.
     #    Assume _root_files on S3 contains only files meant for the ComfyUI root.
     s3_comfyui_root_files_path="$S3_COMFYUI_BASE/_root_files/"
-    if rclone lsd "$s3_comfyui_root_files_path" --retries 1 >/dev/null 2>&1; then
+    if aws s3 ls "$s3_comfyui_root_files_path" >/dev/null 2>&1; then
         echo "  📥 Syncing ComfyUI root files from $s3_comfyui_root_files_path to $LOCAL_COMFYUI_BASE/ ..."
-        # Sync directly. This will overwrite local files if they exist and are different in S3.
-        # It will also bring down new files from S3.
-        # If a file was deleted from S3's _root_files, rclone sync will delete it locally too (if it was from a previous sync).
-        rclone sync "$s3_comfyui_root_files_path" "$LOCAL_COMFYUI_BASE/" --progress --retries 3 || \
+        aws s3 sync "$s3_comfyui_root_files_path" "$LOCAL_COMFYUI_BASE/" || \
             echo "⚠️ WARNING: Failed to sync ComfyUI root files. Pod will continue."
     else
         echo "  ℹ️ No ComfyUI _root_files found in S3."
@@ -76,7 +73,7 @@ echo ""
 
 # --- General User Data Sync (Other Top-Level Folders) ---
 echo "ℹ️ Checking for other user-specific data in S3 at $S3_POD_BASE/"
-if rclone lsd "$S3_POD_BASE/" --retries 2 >/dev/null 2>&1; then # Check if pod base itself exists
+if aws s3 ls "$S3_POD_BASE/" >/dev/null 2>&1; then
     echo "👍 Found pod session base in S3. Syncing other user folders..."
 
     # Define folders to exclude from this general sync
@@ -88,16 +85,14 @@ if rclone lsd "$S3_POD_BASE/" --retries 2 >/dev/null 2>&1; then # Check if pod b
     exclude_folders_map["_workspace_root"]=1 # If this is a special folder synced by other means
 
     # Get list of top-level directories in the pod's S3 base
-    rclone lsf "$S3_POD_BASE/" --dirs-only --retries 2 | while IFS= read -r dir_entry; do
-        folder_name="${dir_entry%/}" # Remove trailing slash
-
+    aws s3 ls "$S3_POD_BASE/" | grep "PRE" | awk '{print $2}' | sed 's/\///g' | while IFS= read -r folder_name; do
         if [[ -z "${exclude_folders_map[$folder_name]}" ]]; then # Check if folder is NOT in the exclusion map
             s3_folder_path="$S3_POD_BASE/$folder_name/"
             local_folder_path="$NETWORK_VOLUME/$folder_name/" # Sync to top-level of NETWORK_VOLUME
 
             echo "  📥 Syncing general folder '$folder_name' from S3..."
             mkdir -p "$local_folder_path"
-            rclone sync "$s3_folder_path" "$local_folder_path" --progress --retries 3 || \
+            aws s3 sync "$s3_folder_path" "$local_folder_path" || \
                 echo "⚠️ WARNING: Failed to sync general folder '$folder_name'. Pod will continue."
         else
             echo "  ↪️ Skipping folder '$folder_name' (in exclusion list or handled separately)."
@@ -108,11 +103,10 @@ else
 fi
 
 echo ""
-echo "✅ User data sync from S3 completed."
 
 # --- User-Specific Shared Data Sync (Not Pod-Specific) ---
 echo "ℹ️ Checking for user-specific shared data in S3 at $S3_USER_SHARED_BASE/"
-if rclone lsd "$S3_USER_SHARED_BASE/" --retries 2 >/dev/null 2>&1; then
+if aws s3 ls "$S3_USER_SHARED_BASE/" >/dev/null 2>&1; then
     echo "👍 Found user shared data in S3. Starting sync..."
     
     user_shared_sync_folders=("venv" ".comfyui")
@@ -121,10 +115,10 @@ if rclone lsd "$S3_USER_SHARED_BASE/" --retries 2 >/dev/null 2>&1; then
         s3_folder_path="$S3_USER_SHARED_BASE/$folder_name/"
         local_folder_path="$NETWORK_VOLUME/$folder_name/"
         
-        if rclone lsd "$s3_folder_path" --retries 1 >/dev/null 2>&1; then
+        if aws s3 ls "$s3_folder_path" >/dev/null 2>&1; then
             echo "  📥 Syncing user-shared/$folder_name from S3..."
             mkdir -p "$local_folder_path"
-            rclone sync "$s3_folder_path" "$local_folder_path" --progress --retries 3 || \
+            aws s3 sync "$s3_folder_path" "$local_folder_path" || \
                 echo "⚠️ WARNING: Failed to sync user-shared/$folder_name. Pod will continue."
         else
             echo "  ℹ️ No user shared data for $folder_name found in S3."
@@ -137,7 +131,7 @@ echo ""
 
 # --- User-Specific ComfyUI Shared Data Sync ---
 echo "ℹ️ Checking for user-specific ComfyUI shared data in S3 at $S3_USER_COMFYUI_SHARED_BASE/"
-if rclone lsd "$S3_USER_COMFYUI_SHARED_BASE/" --retries 2 >/dev/null 2>&1; then
+if aws s3 ls "$S3_USER_COMFYUI_SHARED_BASE/" >/dev/null 2>&1; then
     echo "👍 Found user ComfyUI shared data in S3. Starting sync..."
     mkdir -p "$NETWORK_VOLUME/ComfyUI"
     
@@ -147,15 +141,21 @@ if rclone lsd "$S3_USER_COMFYUI_SHARED_BASE/" --retries 2 >/dev/null 2>&1; then
         s3_folder_path="$S3_USER_COMFYUI_SHARED_BASE/$folder_name/"
         local_folder_path="$NETWORK_VOLUME/ComfyUI/$folder_name/"
         
-        if rclone lsd "$s3_folder_path" --retries 1 >/dev/null 2>&1; then
+        if aws s3 ls "$s3_folder_path" >/dev/null 2>&1; then
             echo "  📥 Syncing ComfyUI-user-shared/$folder_name from S3..."
             mkdir -p "$local_folder_path"
-            rclone sync "$s3_folder_path" "$local_folder_path" --progress --retries 3 || \
+            aws s3 sync "$s3_folder_path" "$local_folder_path" || \
                 echo "⚠️ WARNING: Failed to sync ComfyUI-user-shared/$folder_name. Pod will continue."
         else
             echo "  ℹ️ No user ComfyUI shared data for $folder_name found in S3."
         fi
     done
+else
+    echo "ℹ️ No user-specific ComfyUI shared directory found in S3."
+fi
+echo ""
+
+echo "✅ User data sync from S3 completed."
 else
     echo "ℹ️ No user-specific ComfyUI shared directory found in S3."
 fi

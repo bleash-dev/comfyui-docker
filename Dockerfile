@@ -46,15 +46,11 @@ RUN apt-get update && apt-get install -y \
     bc \
     && rm -rf /var/lib/apt/lists/*
 
-# Install rclone
-RUN curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip && \
-    unzip rclone-current-linux-amd64.zip && \
-    cd rclone-*-linux-amd64 && \
-    cp rclone /usr/bin/ && \
-    chown root:root /usr/bin/rclone && \
-    chmod 755 /usr/bin/rclone && \
-    cd .. && \
-    rm -rf rclone-*
+# Install AWS CLI v2
+RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
+    unzip awscliv2.zip && \
+    ./aws/install && \
+    rm -rf awscliv2.zip aws/
 
 # Set up workspace
 WORKDIR /workspace

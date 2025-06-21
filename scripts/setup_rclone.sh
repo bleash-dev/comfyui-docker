@@ -1,7 +1,7 @@
 #!/bin/bash
 set -eo pipefail
 
-echo "🔧 Setting up rclone S3 storage (sync-only operations)..."
+echo "🔧 Setting up AWS S3 storage (sync-only operations)..."
 
 # Validate that NETWORK_VOLUME was set by start.sh
 if [ -z "$NETWORK_VOLUME" ]; then
@@ -12,8 +12,8 @@ echo "📁 Using Network Volume: $NETWORK_VOLUME"
 
 # Create scripts directory on the network volume if it doesn't exist
 mkdir -p "$NETWORK_VOLUME/scripts"
-RCLONE_CACHE_DIR="$NETWORK_VOLUME/.cache/rclone"
-mkdir -p "$RCLONE_CACHE_DIR"
+AWS_CACHE_DIR="$NETWORK_VOLUME/.cache/aws"
+mkdir -p "$AWS_CACHE_DIR"
 
 # Validate required environment variables
 required_vars=("AWS_BUCKET_NAME" "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" "AWS_REGION" "POD_USER_NAME" "POD_ID")
@@ -30,33 +30,42 @@ done
 echo "✅ Environment variables validated."
 echo "   Bucket: $AWS_BUCKET_NAME, Region: $AWS_REGION, User: $POD_USER_NAME, Pod: $POD_ID"
 
-# Create rclone configuration
-RCLONE_CONFIG_DIR="/root/.config/rclone"
-RCLONE_CONFIG_FILE="$RCLONE_CONFIG_DIR/rclone.conf"
-mkdir -p "$RCLONE_CONFIG_DIR"
-echo "📝 Creating rclone configuration at $RCLONE_CONFIG_FILE..."
-cat > "$RCLONE_CONFIG_FILE" << EOF
-[s3]
-type = s3
-provider = AWS
-access_key_id = $AWS_ACCESS_KEY_ID
-secret_access_key = $AWS_SECRET_ACCESS_KEY
-region = $AWS_REGION
-acl = private
-storage_class = STANDARD
-EOF
-echo "✅ Rclone configuration created."
+# Configure AWS CLI
+echo "📝 Configuring AWS CLI..."
+export AWS_CONFIG_FILE="$AWS_CACHE_DIR/config"
+export AWS_SHARED_CREDENTIALS_FILE="$AWS_CACHE_DIR/credentials"
 
-# Test rclone connection
+mkdir -p "$(dirname "$AWS_CONFIG_FILE")"
+mkdir -p "$(dirname "$AWS_SHARED_CREDENTIALS_FILE")"
+
+cat > "$AWS_CONFIG_FILE" << EOF
+[default]
+region = $AWS_REGION
+output = json
+EOF
+
+cat > "$AWS_SHARED_CREDENTIALS_FILE" << EOF
+[default]
+aws_access_key_id = $AWS_ACCESS_KEY_ID
+aws_secret_access_key = $AWS_SECRET_ACCESS_KEY
+EOF
+
+# Set restrictive permissions
+chmod 600 "$AWS_CONFIG_FILE"
+chmod 600 "$AWS_SHARED_CREDENTIALS_FILE"
+
+echo "✅ AWS CLI configuration created."
+
+# Test AWS S3 connection
 echo "🔍 Testing S3 connection to bucket '$AWS_BUCKET_NAME'..."
 
-# First try to list the bucket itself (this tests basic connectivity and permissions)
-if ! rclone about "s3:$AWS_BUCKET_NAME" --retries 2 >/dev/null 2>&1; then
+# First try to get bucket location
+if ! aws s3api get-bucket-location --bucket "$AWS_BUCKET_NAME" >/dev/null 2>&1; then
     echo "❌ CRITICAL: Failed basic connectivity test to S3 bucket '$AWS_BUCKET_NAME'."
     echo "   Trying alternative connection test..."
     
-    # Fallback test: try to list the bucket root (even if empty)
-    if ! rclone ls "s3:$AWS_BUCKET_NAME/" --max-depth 1 --retries 2 >/dev/null 2>&1; then
+    # Fallback test: try to list bucket contents
+    if ! aws s3 ls "s3://$AWS_BUCKET_NAME/" >/dev/null 2>&1; then
         echo "❌ CRITICAL: All S3 connection tests failed for bucket '$AWS_BUCKET_NAME'."
         echo "   Please check:"
         echo "   - AWS credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)"
@@ -67,7 +76,7 @@ if ! rclone about "s3:$AWS_BUCKET_NAME" --retries 2 >/dev/null 2>&1; then
         
         # Try to give more specific error information
         echo "🔍 Attempting diagnostic test..."
-        rclone ls "s3:$AWS_BUCKET_NAME/" --max-depth 1 --retries 1 --verbose 2>&1 | head -10 || true
+        aws s3 ls "s3://$AWS_BUCKET_NAME/" --debug 2>&1 | head -10 || true
         
         exit 1
     else
@@ -79,21 +88,24 @@ fi
 
 # Additional test: try to create and read a test file to verify write permissions
 echo "🔍 Testing S3 write permissions..."
-test_file_content="rclone_test_$(date +%s)"
-test_s3_path="s3:$AWS_BUCKET_NAME/.rclone_test"
+test_file_content="aws_test_$(date +%s)"
+test_s3_path="s3://$AWS_BUCKET_NAME/.aws_test"
+test_local_file="/tmp/.aws_test"
 
-if echo "$test_file_content" | rclone rcat "$test_s3_path" --retries 2 2>/dev/null; then
+echo "$test_file_content" > "$test_local_file"
+
+if aws s3 cp "$test_local_file" "$test_s3_path" >/dev/null 2>&1; then
     # Verify we can read it back
-    if downloaded_content=$(rclone cat "$test_s3_path" --retries 2 2>/dev/null) && \
+    if downloaded_content=$(aws s3 cp "$test_s3_path" - 2>/dev/null) && \
        [ "$downloaded_content" = "$test_file_content" ]; then
         echo "✅ S3 write/read permissions verified."
         # Clean up test file
-        rclone delete "$test_s3_path" --retries 1 >/dev/null 2>&1 || true
+        aws s3 rm "$test_s3_path" >/dev/null 2>&1 || true
     else
         echo "⚠️ WARNING: S3 write successful but read verification failed."
         echo "   This may indicate permission issues or eventual consistency delays."
         # Still clean up test file
-        rclone delete "$test_s3_path" --retries 1 >/dev/null 2>&1 || true
+        aws s3 rm "$test_s3_path" >/dev/null 2>&1 || true
     fi
 else
     echo "⚠️ WARNING: S3 write test failed."
@@ -101,6 +113,8 @@ else
     echo "   Some features requiring S3 uploads may not work."
     echo "   Proceeding with setup anyway..."
 fi
+
+rm -f "$test_local_file"
 
 # Create all sync and utility scripts
 echo "📝 Creating/configuring dynamic scripts..."
@@ -138,10 +152,10 @@ mkdir -p "$models_dir"
 cat > "$models_dir/.global_shared_info" << EOF
 {
     "type": "global_shared",
-    "s3_path": "s3:$AWS_BUCKET_NAME/pod_sessions/global_shared/models/",
+    "s3_path": "s3://$AWS_BUCKET_NAME/pod_sessions/global_shared/models/",
     "sync_strategy": "on_demand",
     "last_listed": null,
-    "note": "Uses rclone sync operations, no FUSE mounting"
+    "note": "Uses AWS CLI sync operations, no mounting"
 }
 EOF
 echo "✅ Created global shared directory structure: $models_dir"
@@ -164,4 +178,4 @@ else
     echo "⚠️ WARNING: User data sync script not found. Skipping user data sync."
 fi
 
-echo "✅ Rclone S3 setup completed successfully! (sync-only mode)"
+echo "✅ AWS S3 setup completed successfully! (sync-only mode)"

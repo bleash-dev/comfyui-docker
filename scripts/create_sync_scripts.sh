@@ -35,8 +35,8 @@ if [[ -d "$NETWORK_VOLUME/ComfyUI" ]]; then
         if [[ -d "$dir" ]]; then
             folder_name=$(basename "$dir")
             if ! is_comfyui_shared "$folder_name"; then
-                s3_path="s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/ComfyUI/$folder_name"
-                rclone sync "$dir" "$s3_path" --progress || echo "Failed to sync $folder_name"
+                s3_path="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/ComfyUI/$folder_name/"
+                aws s3 sync "$dir" "$s3_path" --delete || echo "Failed to sync $folder_name"
             fi
         fi
     done
@@ -53,7 +53,7 @@ if [[ -d "$NETWORK_VOLUME/ComfyUI" ]]; then
         for file in "${comfyui_files[@]}"; do
             cp "$NETWORK_VOLUME/ComfyUI/$file" "$temp_dir/"
         done
-        rclone sync "$temp_dir" "s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/ComfyUI/_root_files" --progress
+        aws s3 sync "$temp_dir" "s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/ComfyUI/_root_files/" --delete
         rm -rf "$temp_dir"
     fi
 fi
@@ -63,8 +63,8 @@ for dir in $NETWORK_VOLUME/*/; do
     if [[ -d "$dir" ]]; then
         folder_name=$(basename "$dir")
         if ! is_shared_folder "$folder_name" && [[ "$folder_name" != "ComfyUI" ]] && [[ -n "$(ls -A "$dir" 2>/dev/null)" ]]; then
-            s3_path="s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/$folder_name"
-            rclone sync "$dir" "$s3_path" --progress || echo "Failed to sync $folder_name"
+            s3_path="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/$folder_name/"
+            aws s3 sync "$dir" "$s3_path" --delete || echo "Failed to sync $folder_name"
         fi
     fi
 done
@@ -77,7 +77,7 @@ chmod +x "$NETWORK_VOLUME/scripts/sync_user_data.sh"
 # Graceful shutdown script
 cat > "$NETWORK_VOLUME/scripts/graceful_shutdown.sh" << 'EOF'
 #!/bin/bash
-# Graceful shutdown with data sync (no FUSE unmounting)
+# Graceful shutdown with data sync (no mounting)
 
 echo "🛑 Graceful shutdown initiated at $(date)"
 
@@ -100,8 +100,8 @@ pkill -f "$NETWORK_VOLUME/scripts/" 2>/dev/null || true
 [ -f "$NETWORK_VOLUME/scripts/sync_logs.sh" ] && "$NETWORK_VOLUME/scripts/sync_logs.sh"
 [ -f "$NETWORK_VOLUME/scripts/sync_user_data.sh" ] && "$NETWORK_VOLUME/scripts/sync_user_data.sh"
 
-# Stop any remaining rclone processes (though we shouldn't have mount processes)
-pkill -f "rclone" 2>/dev/null || true
+# Stop any remaining AWS processes
+pkill -f "aws" 2>/dev/null || true
 
 echo "✅ Graceful shutdown completed"
 EOF
