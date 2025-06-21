@@ -8,6 +8,7 @@ export SCRIPT_DIR="${SCRIPT_DIR:-/scripts}"
 export PYTHON_VERSION="${PYTHON_VERSION:-3.10}"
 export PYTHON_CMD="${PYTHON_CMD:-python${PYTHON_VERSION}}"
 export CONFIG_ROOT="${CONFIG_ROOT:-/root}"
+export COMFYUI_VENV="$NETWORK_VOLUME/venv/comfyui"
 
 # Analytics shortcut
 cat > "$NETWORK_VOLUME/analytics" << EOF
