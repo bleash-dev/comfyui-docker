@@ -1,31 +1,30 @@
 #!/bin/bash
-set -eo pipefail # Ensures script exits on error and handles pipe failures
-# Setup all ComfyUI components
+set -eo pipefail
 
 echo "🔧 Setting up ComfyUI components..."
+
+# Set default script directory, Python version, and config root
+export SCRIPT_DIR="${SCRIPT_DIR:-/scripts}"
+export PYTHON_VERSION="${PYTHON_VERSION:-3.10}"
+export PYTHON_CMD="${PYTHON_CMD:-python${PYTHON_VERSION}}"
+
+echo "📝 Using Python: $PYTHON_CMD ($($PYTHON_CMD --version))"
+
+# Environment setup  
+export COMFYUI_VENV="$NETWORK_VOLUME/venv/comfyui"
+
+# Create consolidated requirements file for optimization
+CONSOLIDATED_REQUIREMENTS="/tmp/consolidated_requirements.txt"
+> "$CONSOLIDATED_REQUIREMENTS"  # Clear file
 
 # Setup virtual environments
 if [ ! -d "$COMFYUI_VENV" ]; then
     echo "Creating ComfyUI virtual environment..."
     mkdir -p "$(dirname "$COMFYUI_VENV")"
-    python${PYTHON_VERSION:-3.10} -m venv "$COMFYUI_VENV"
+    $PYTHON_CMD -m venv "$COMFYUI_VENV"
 fi
 
-if [ ! -d "$JUPYTER_VENV" ]; then
-    echo "Creating Jupyter virtual environment..."
-    mkdir -p "$(dirname "$JUPYTER_VENV")"
-    python${PYTHON_VERSION:-3.10} -m venv "$JUPYTER_VENV"
-fi
-
-# Setup Jupyter
-if ! "$JUPYTER_VENV/bin/python" -c "import jupyterlab" 2>/dev/null; then
-    echo "Installing JupyterLab..."
-    . "$JUPYTER_VENV/bin/activate"
-    pip install --no-cache-dir jupyterlab notebook numpy pandas
-    deactivate
-fi
-
-# Setup Jupyter config
+# Setup Jupyter config - store directly in network volume
 network_jupyter_dir="$NETWORK_VOLUME/.jupyter"
 if [ ! -d "$network_jupyter_dir" ]; then
     mkdir -p "$network_jupyter_dir"
@@ -43,14 +42,31 @@ EOF
     deactivate
 fi
 
-rm -rf "/root/.jupyter"
-ln -sf "$network_jupyter_dir" "/root/.jupyter"
-
-# Setup ComfyUI config
+# Setup ComfyUI config - store directly in network volume
 network_comfyui_config="$NETWORK_VOLUME/.comfyui"
 mkdir -p "$network_comfyui_config"
-rm -rf "/root/.comfyui"
-ln -sf "$network_comfyui_config" "/root/.comfyui"
+
+echo "✅ Configuration directories created directly in network volume"
+
+# Fix symbolic link creation for Jupyter config
+if [ -L "$CONFIG_ROOT/.jupyter" ]; then
+    # If it's already a symlink, remove it
+    rm -f "$CONFIG_ROOT/.jupyter"
+elif [ -d "$CONFIG_ROOT/.jupyter" ]; then
+    # If it's a directory, backup and remove it
+    mv "$CONFIG_ROOT/.jupyter" "$CONFIG_ROOT/.jupyter.backup.$(date +%s)" 2>/dev/null || rm -rf "$CONFIG_ROOT/.jupyter"
+fi
+ln -sf "$network_jupyter_dir" "$CONFIG_ROOT/.jupyter"
+
+# Fix symbolic link creation for ComfyUI config
+if [ -L "$CONFIG_ROOT/.comfyui" ]; then
+    # If it's already a symlink, remove it
+    rm -f "$CONFIG_ROOT/.comfyui"
+elif [ -d "$CONFIG_ROOT/.comfyui" ]; then
+    # If it's a directory, backup and remove it
+    mv "$CONFIG_ROOT/.comfyui" "$CONFIG_ROOT/.comfyui.backup.$(date +%s)" 2>/dev/null || rm -rf "$CONFIG_ROOT/.comfyui"
+fi
+ln -sf "$network_comfyui_config" "$CONFIG_ROOT/.comfyui"
 
 # Setup ComfyUI installation
 comfyui_dir="$NETWORK_VOLUME/ComfyUI"
@@ -69,16 +85,12 @@ if [ -d "$comfyui_dir" ]; then
         git fetch --all || echo "⚠️ Git fetch failed, continuing with existing version"
         git reset --hard origin/master || echo "⚠️ Git reset failed, continuing with current version"
         
-        # Ensure dependencies are installed
-        . $COMFYUI_VENV/bin/activate
-        echo "Installing/updating ComfyUI requirements..."
-        pip install --no-cache-dir -r requirements.txt || echo "⚠️ Requirements installation had issues"
-        
-        if ! python -c "import torch" 2>/dev/null; then
-            echo "Installing PyTorch..."
-            pip install --no-cache-dir torch==${PYTORCH_VERSION:-2.4.0} torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+# Add ComfyUI requirements to consolidated file
+        if [ -f "requirements.txt" ]; then
+            echo "# ComfyUI requirements" >> "$CONSOLIDATED_REQUIREMENTS"
+            cat requirements.txt >> "$CONSOLIDATED_REQUIREMENTS"
+            echo "" >> "$CONSOLIDATED_REQUIREMENTS"
         fi
-        deactivate
     else
         echo "⚠️ ComfyUI directory exists but doesn't contain main.py"
         
@@ -104,41 +116,55 @@ if [ -d "$comfyui_dir" ]; then
             mv "$comfyui_dir" "$backup_dir"
             
             echo "Installing fresh ComfyUI..."
-            . $COMFYUI_VENV/bin/activate
             git clone https://github.com/comfyanonymous/ComfyUI "$comfyui_dir"
             cd "$comfyui_dir"
-            pip install --no-cache-dir -r requirements.txt
-            pip install --no-cache-dir torch==${PYTORCH_VERSION:-2.4.0} torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-            deactivate
+            
+            # Add ComfyUI requirements to consolidated file
+            if [ -f "requirements.txt" ]; then
+                echo "# ComfyUI requirements" >> "$CONSOLIDATED_REQUIREMENTS"
+                cat requirements.txt >> "$CONSOLIDATED_REQUIREMENTS"
+                echo "" >> "$CONSOLIDATED_REQUIREMENTS"
+            fi
         fi
     fi
 else
     echo "Installing ComfyUI..."
-    . $COMFYUI_VENV/bin/activate
     git clone https://github.com/comfyanonymous/ComfyUI "$comfyui_dir"
     cd "$comfyui_dir"
-    pip install --no-cache-dir -r requirements.txt
-    pip install --no-cache-dir torch==${PYTORCH_VERSION:-2.4.0} torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-    deactivate
+    
+    # Add ComfyUI requirements to consolidated file
+    if [ -f "requirements.txt" ]; then
+        echo "# ComfyUI requirements" >> "$CONSOLIDATED_REQUIREMENTS"
+        cat requirements.txt >> "$CONSOLIDATED_REQUIREMENTS"
+        echo "" >> "$CONSOLIDATED_REQUIREMENTS"
+    fi
 fi
 
 # Setup ComfyUI Manager
 manager_dir="$NETWORK_VOLUME/ComfyUI/custom_nodes/ComfyUI-Manager"
 if [ ! -d "$manager_dir" ]; then
     echo "Installing ComfyUI Manager..."
-    . $COMFYUI_VENV/bin/activate
     cd "$NETWORK_VOLUME/ComfyUI/custom_nodes"
     git clone https://github.com/ltdrdata/ComfyUI-Manager.git
-    [ -f "ComfyUI-Manager/requirements.txt" ] && pip install --no-cache-dir -r ComfyUI-Manager/requirements.txt
-    deactivate
+    
+    # Add ComfyUI Manager requirements to consolidated file
+    if [ -f "ComfyUI-Manager/requirements.txt" ]; then
+        echo "# ComfyUI-Manager requirements" >> "$CONSOLIDATED_REQUIREMENTS"
+        cat "ComfyUI-Manager/requirements.txt" >> "$CONSOLIDATED_REQUIREMENTS"
+        echo "" >> "$CONSOLIDATED_REQUIREMENTS"
+    fi
 else
     echo "✅ ComfyUI Manager already exists"
     cd "$manager_dir"
-    . $COMFYUI_VENV/bin/activate
     echo "Updating ComfyUI Manager..."
     git pull || echo "⚠️ Git pull failed, continuing with existing version"
-    [ -f "requirements.txt" ] && pip install --no-cache-dir -r requirements.txt
-    deactivate
+    
+    # Add ComfyUI Manager requirements to consolidated file
+    if [ -f "requirements.txt" ]; then
+        echo "# ComfyUI-Manager requirements" >> "$CONSOLIDATED_REQUIREMENTS"
+        cat "requirements.txt" >> "$CONSOLIDATED_REQUIREMENTS"
+        echo "" >> "$CONSOLIDATED_REQUIREMENTS"
+    fi
 fi
 
 # Setup additional custom nodes
@@ -147,7 +173,6 @@ custom_nodes_dir="$NETWORK_VOLUME/ComfyUI/custom_nodes"
 filesystem_manager_dir="$custom_nodes_dir/Comfyui-FileSytem-Manager"
 idle_checker_dir="$custom_nodes_dir/Comfyui-Idle-Checker"
 
-. $COMFYUI_VENV/bin/activate
 cd "$custom_nodes_dir"
 
 # Install Comfyui-FileSytem-Manager
@@ -159,18 +184,13 @@ if [ -d "$filesystem_manager_dir" ] && [ -f "$filesystem_manager_dir/__init__.py
 else
     echo "Installing Comfyui-FileSytem-Manager..."
     git clone https://github.com/bleash-dev/Comfyui-FileSytem-Manager.git
-    
-    if [ -f "$filesystem_manager_dir/requirements.txt" ]; then
-        pip install --no-cache-dir -r "$filesystem_manager_dir/requirements.txt"
-    fi
-    
-    if [ -f "$filesystem_manager_dir/install.py" ]; then
-        cd "$filesystem_manager_dir"
-        python install.py
-        cd "$custom_nodes_dir"
-    fi
-    
-    echo "✅ Comfyui-FileSytem-Manager installed"
+fi
+
+# Add Comfyui-FileSytem-Manager requirements to consolidated file
+if [ -f "$filesystem_manager_dir/requirements.txt" ]; then
+    echo "# Comfyui-FileSytem-Manager requirements" >> "$CONSOLIDATED_REQUIREMENTS"
+    cat "$filesystem_manager_dir/requirements.txt" >> "$CONSOLIDATED_REQUIREMENTS"
+    echo "" >> "$CONSOLIDATED_REQUIREMENTS"
 fi
 
 # Install Comfyui-Idle-Checker
@@ -182,21 +202,14 @@ if [ -d "$idle_checker_dir" ] && [ -f "$idle_checker_dir/__init__.py" ]; then
 else
     echo "Installing Comfyui-Idle-Checker..."
     git clone https://github.com/bleash-dev/Comfyui-Idle-Checker.git
-    
-    if [ -f "$idle_checker_dir/requirements.txt" ]; then
-        pip install --no-cache-dir -r "$idle_checker_dir/requirements.txt"
-    fi
-    
-    if [ -f "$idle_checker_dir/install.py" ]; then
-        cd "$idle_checker_dir"
-        python install.py
-        cd "$custom_nodes_dir"
-    fi
-    
-    echo "✅ Comfyui-Idle-Checker installed"
 fi
 
-deactivate
+# Add Comfyui-Idle-Checker requirements to consolidated file
+if [ -f "$idle_checker_dir/requirements.txt" ]; then
+    echo "# Comfyui-Idle-Checker requirements" >> "$CONSOLIDATED_REQUIREMENTS"
+    cat "$idle_checker_dir/requirements.txt" >> "$CONSOLIDATED_REQUIREMENTS"
+    echo "" >> "$CONSOLIDATED_REQUIREMENTS"
+fi
 echo "✅ Additional custom nodes setup complete"
 
 # Setup download tools
@@ -393,13 +406,87 @@ fi
 echo "✅ Download tools setup complete"
 echo "📚 Run: $NETWORK_VOLUME/scripts/download_helper.sh for usage examples"
 
-# Start JupyterLab
+# Start JupyterLab with custom config directory
 echo "Starting JupyterLab..."
 . $JUPYTER_VENV/bin/activate
-jupyter lab --ip 0.0.0.0 --port 8888 --no-browser --allow-root &
+JUPYTER_CONFIG_DIR="$network_jupyter_dir" jupyter lab --ip 0.0.0.0 --port 8888 --no-browser --allow-root &
 deactivate
 
-# Install custom nodes if nodes.txt exists
-[ -f "$NETWORK_VOLUME/ComfyUI/nodes.txt" ] && bash /scripts/install_nodes.sh
+# Add standard tools to consolidated requirements
+echo "# Standard tools requirements" >> "$CONSOLIDATED_REQUIREMENTS"
+echo "gdown" >> "$CONSOLIDATED_REQUIREMENTS"
+echo "huggingface_hub[cli]" >> "$CONSOLIDATED_REQUIREMENTS"
+echo "" >> "$CONSOLIDATED_REQUIREMENTS"
 
+# Install custom nodes if nodes.txt exists
+[ -f "$NETWORK_VOLUME/ComfyUI/nodes.txt" ] && bash "$SCRIPT_DIR/install_nodes.sh" "$CONSOLIDATED_REQUIREMENTS"
+
+# Consolidated pip install - Install all requirements in one go
+if [ -s "$CONSOLIDATED_REQUIREMENTS" ]; then
+    echo "🔄 Installing all consolidated requirements..."
+    . $COMFYUI_VENV/bin/activate
+    
+    # Remove duplicates and empty lines
+    sort "$CONSOLIDATED_REQUIREMENTS" | uniq | grep -v '^$' | grep -v '^#' > "${CONSOLIDATED_REQUIREMENTS}.clean"
+    
+    # Install all requirements at once
+    pip install --no-cache-dir -r "${CONSOLIDATED_REQUIREMENTS}.clean" || echo "⚠️ Some requirements failed to install"
+    
+    # Install PyTorch if needed
+    if ! python -c "import torch" 2>/dev/null; then
+        echo "Installing PyTorch..."
+        pip install --no-cache-dir torch==${PYTORCH_VERSION:-2.4.0} torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+    fi
+    
+    # Run custom installation scripts after pip install
+    echo "🔧 Running custom installation scripts..."
+    
+    # FileSystem Manager install
+    if [ -f "$filesystem_manager_dir/install.py" ]; then
+        echo "Running Comfyui-FileSytem-Manager installation..."
+        cd "$filesystem_manager_dir"
+        python install.py || echo "⚠️ Comfyui-FileSytem-Manager install.py failed"
+        cd "$custom_nodes_dir"
+    fi
+    
+    # Idle Checker install
+    if [ -f "$idle_checker_dir/install.py" ]; then
+        echo "Running Comfyui-Idle-Checker installation..."
+        cd "$idle_checker_dir"
+        python install.py || echo "⚠️ Comfyui-Idle-Checker install.py failed"
+        cd "$custom_nodes_dir"
+    fi
+    
+    # Run install.py for any custom nodes from nodes.txt
+    if [ -f "$NETWORK_VOLUME/ComfyUI/nodes.txt" ]; then
+        echo "Running install.py scripts for custom nodes..."
+        while IFS= read -r repo_url; do
+            [[ -z "$repo_url" || "$repo_url" =~ ^[[:space:]]*# ]] && continue
+            repo_name=$(basename "$repo_url" .git)
+            if [ -f "$repo_name/install.py" ]; then
+                echo "Running install.py for $repo_name..."
+                cd "$repo_name"
+                python install.py || echo "⚠️ $repo_name install.py failed"
+                cd "$custom_nodes_dir"
+            fi
+        done < "$NETWORK_VOLUME/ComfyUI/nodes.txt"
+    fi
+    
+    # Setup HuggingFace token if provided
+    if [ -n "$HF_TOKEN" ]; then
+        echo "🔧 Configuring HuggingFace CLI..."
+        huggingface-cli login --token "$HF_TOKEN" --add-to-git-credential || echo "⚠️ HuggingFace login failed"
+    fi
+    
+    deactivate
+    
+    # Cleanup
+    rm -f "$CONSOLIDATED_REQUIREMENTS" "${CONSOLIDATED_REQUIREMENTS}.clean"
+    
+    echo "✅ Consolidated pip installation completed"
+else
+    echo "ℹ️ No requirements to install"
+fi
+
+echo "✅ All components setup complete"
 echo "✅ All components setup complete"

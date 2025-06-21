@@ -3,6 +3,9 @@ set -eo pipefail
 
 echo "🔧 Setting up AWS S3 storage (sync-only operations)..."
 
+# Set default script directory
+export SCRIPT_DIR="${SCRIPT_DIR:-/scripts}"
+
 # Validate that NETWORK_VOLUME was set by start.sh
 if [ -z "$NETWORK_VOLUME" ]; then
     echo "❌ CRITICAL: NETWORK_VOLUME not set by start.sh. This script cannot proceed."
@@ -30,13 +33,13 @@ done
 echo "✅ Environment variables validated."
 echo "   Bucket: $AWS_BUCKET_NAME, Region: $AWS_REGION, User: $POD_USER_NAME, Pod: $POD_ID"
 
-# Configure AWS CLI
+# Configure AWS CLI - store directly in network volume
 echo "📝 Configuring AWS CLI..."
-export AWS_CONFIG_FILE="$AWS_CACHE_DIR/config"
-export AWS_SHARED_CREDENTIALS_FILE="$AWS_CACHE_DIR/credentials"
+AWS_CONFIG_DIR="$NETWORK_VOLUME/.aws"
+export AWS_CONFIG_FILE="$AWS_CONFIG_DIR/config"
+export AWS_SHARED_CREDENTIALS_FILE="$AWS_CONFIG_DIR/credentials"
 
-mkdir -p "$(dirname "$AWS_CONFIG_FILE")"
-mkdir -p "$(dirname "$AWS_SHARED_CREDENTIALS_FILE")"
+mkdir -p "$AWS_CONFIG_DIR"
 
 cat > "$AWS_CONFIG_FILE" << EOF
 [default]
@@ -54,7 +57,7 @@ EOF
 chmod 600 "$AWS_CONFIG_FILE"
 chmod 600 "$AWS_SHARED_CREDENTIALS_FILE"
 
-echo "✅ AWS CLI configuration created."
+echo "✅ AWS CLI configuration created at: $AWS_CONFIG_DIR"
 
 # Test AWS S3 connection
 echo "🔍 Testing S3 connection to bucket '$AWS_BUCKET_NAME'..."
@@ -133,24 +136,24 @@ rm -f "$test_local_file"
 
 # Create all sync and utility scripts
 echo "📝 Creating/configuring dynamic scripts..."
-if [ -f /scripts/create_sync_scripts.sh ]; then
-    if ! bash /scripts/create_sync_scripts.sh; then
+if [ -f "$SCRIPT_DIR/create_sync_scripts.sh" ]; then
+    if ! bash "$SCRIPT_DIR/create_sync_scripts.sh"; then
         echo "❌ CRITICAL: Failed to create sync scripts."
         exit 1
     fi
     echo "  ✅ Sync scripts created/configured."
 fi
 
-if [ -f /scripts/create_monitoring_scripts.sh ]; then
-    if ! bash /scripts/create_monitoring_scripts.sh; then
+if [ -f "$SCRIPT_DIR/create_monitoring_scripts.sh" ]; then
+    if ! bash "$SCRIPT_DIR/create_monitoring_scripts.sh"; then
         echo "❌ CRITICAL: Failed to create monitoring scripts."
         exit 1
     fi
     echo "  ✅ Monitoring scripts created/configured."
 fi
 
-if [ -f /scripts/create_utility_scripts.sh ]; then
-    if ! bash /scripts/create_utility_scripts.sh; then
+if [ -f "$SCRIPT_DIR/create_utility_scripts.sh" ]; then
+    if ! bash "$SCRIPT_DIR/create_utility_scripts.sh"; then
         echo "❌ CRITICAL: Failed to create utility scripts."
         exit 1
     fi
@@ -179,8 +182,8 @@ echo "✅ Created global shared directory structure: $models_dir"
 USER_SYNC_SCRIPT_PATH=""
 if [ -f "$NETWORK_VOLUME/scripts/sync_user_data_from_s3.sh" ]; then
     USER_SYNC_SCRIPT_PATH="$NETWORK_VOLUME/scripts/sync_user_data_from_s3.sh"
-elif [ -f "/scripts/sync_user_data_from_s3.sh" ]; then
-    USER_SYNC_SCRIPT_PATH="/scripts/sync_user_data_from_s3.sh"
+elif [ -f "$SCRIPT_DIR/sync_user_data_from_s3.sh" ]; then
+    USER_SYNC_SCRIPT_PATH="$SCRIPT_DIR/sync_user_data_from_s3.sh"
 fi
 
 if [ -n "$USER_SYNC_SCRIPT_PATH" ]; then

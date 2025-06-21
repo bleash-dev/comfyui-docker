@@ -91,7 +91,7 @@ jobs:
         echo "- **Container Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
         echo "- **Registry Username:** \`your-github-username\`" >> $GITHUB_STEP_SUMMARY
         echo "- **Registry Password:** \`your-pat-token\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **Expose HTTP Ports:** \`3000,8888\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **Expose HTTP Ports:** \`8080\`" >> $GITHUB_STEP_SUMMARY
         echo "- **Container Start Command:** \`/start.sh\`" >> $GITHUB_STEP_SUMMARY
         echo "- **Volume Mount Path:** \`/workspace\` (recommended)" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY

@@ -23,7 +23,7 @@ done
 # Define tracking paths
 TRACKING_DIR="$NETWORK_VOLUME/.pod_tracking"
 LOCAL_TRACKING_FILE="$TRACKING_DIR/current_session.json"
-S3_TRACKING_BASE="s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID"
+S3_TRACKING_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID"
 S3_SESSION_FILE="$S3_TRACKING_BASE/_pod_tracking/session.json"
 S3_SUMMARY_FILE="$S3_TRACKING_BASE/_pod_tracking/execution_summary.json"
 
@@ -33,7 +33,11 @@ mkdir -p "$TRACKING_DIR"
 START_TIME=$(date +%s)
 START_ISO=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)
 
+# Set default tracking sync interval (in seconds) if not provided via environment
+export SYNC_INTERVAL_TRACKING="${SYNC_INTERVAL_TRACKING:-30}"  # 30 seconds
+
 echo "📊 Tracking: Pod $POD_ID, User $POD_USER_NAME, Start: $START_ISO"
+echo "🔄 Tracking sync interval: every $SYNC_INTERVAL_TRACKING seconds"
 
 # Detect pod information
 detect_pod_info() {
@@ -124,7 +128,7 @@ create_session_data() {
         "startup_completed": $startup_completed_val,
         "comfyui_started": $comfyui_started_val,
         "jupyter_started": $jupyter_started_val,
-        "s3_mounted": $s3_mounted_val
+        "s3_connected": $s3_connected_val
     },
     "timestamps": {
         "container_start": "$START_ISO",
@@ -187,8 +191,8 @@ sync_tracking_data() {
             :
         fi
         
-        if aws s3 cp "$LOCAL_TRACKING_FILE" "$(dirname "$S3_SESSION_FILE" | sed 's|s3:/|s3://|')/" --only-show-errors; then
-            echo "✅ Tracking data synced to S3: $(dirname "$S3_SESSION_FILE")/$(basename "$LOCAL_TRACKING_FILE")"
+        if aws s3 cp "$LOCAL_TRACKING_FILE" "$S3_SESSION_FILE" --only-show-errors; then
+            echo "✅ Tracking data synced to S3: $S3_SESSION_FILE"
         else
             echo "❌ Failed to sync tracking data to S3."
         fi
@@ -205,9 +209,14 @@ update_execution_summary() {
         return 1
     fi
 
-    local temp_summary_local="$TRACKING_DIR/execution_summary.json.local"
+    local temp_summary_local="$TRACKING_DIR/execution_summary.json"
+    local temp_summary_download="$TRACKING_DIR/execution_summary_download.json"
 
-    if ! rclone copy "$S3_SUMMARY_FILE" "$TRACKING_DIR/" --retries 3 ; then
+    # Try to download existing summary from S3
+    if aws s3 cp "$S3_SUMMARY_FILE" "$temp_summary_download" --only-show-errors 2>/dev/null; then
+        echo "ℹ️ Downloaded existing execution summary from S3."
+        mv "$temp_summary_download" "$temp_summary_local"
+    else
         echo "ℹ️ No existing S3 summary found or failed to download. Creating new summary."
         cat > "$temp_summary_local" << EOF
 {
@@ -220,8 +229,6 @@ update_execution_summary() {
     "session_history": []
 }
 EOF
-    else
-        mv "$TRACKING_DIR/$(basename "$S3_SUMMARY_FILE")" "$temp_summary_local"
     fi
 
     local session_summary
@@ -254,8 +261,9 @@ EOF
         .last_updated = $current_iso_date' \
        "$temp_summary_local" > "$temp_summary_local.tmp" && mv "$temp_summary_local.tmp" "$temp_summary_local"
 
-    if rclone copy "$temp_summary_local" "$(dirname "$S3_SUMMARY_FILE")/" --retries 3; then
-        echo "✅ Execution summary updated for pod: $POD_ID to $(dirname "$S3_SUMMARY_FILE")/$(basename "$S3_SUMMARY_FILE")"
+    # Upload updated summary to S3
+    if aws s3 cp "$temp_summary_local" "$S3_SUMMARY_FILE" --only-show-errors; then
+        echo "✅ Execution summary updated for pod: $POD_ID to $S3_SUMMARY_FILE"
     else
         echo "❌ Failed to update execution summary to S3."
     fi
@@ -302,10 +310,10 @@ trap handle_shutdown SIGTERM SIGINT SIGQUIT
 create_session_data "initializing"
 sync_tracking_data
 
-echo "⏳ Waiting indefinitely for S3 setup to complete (rclone mount or $NETWORK_VOLUME/.setup_complete)..."
+echo "⏳ Waiting indefinitely for S3 setup to complete (AWS CLI setup or $NETWORK_VOLUME/.setup_complete)..."
 s3_setup_done=false
 while true; do
-    if [ -n "$(mount | grep rclone)" ] || [ -f "$NETWORK_VOLUME/.setup_complete" ]; then
+    if aws s3 ls "s3://$AWS_BUCKET_NAME/" >/dev/null 2>&1 || [ -f "$NETWORK_VOLUME/.setup_complete" ]; then
         echo "✅ S3 setup detected as complete."
         update_timestamp "s3_setup_complete"
         s3_setup_done=true # Set flag
@@ -323,7 +331,7 @@ monitor_services() {
     
     echo "🏃 Starting service monitoring..."
     while true; do
-        if [ "$comfyui_started_flag" = false ] && pgrep -f "python.*main.py.*--listen.*--port.*3000" >/dev/null; then
+        if [ "$comfyui_started_flag" = false ] && pgrep -f "python.*main.py.*--listen.*--port.*8080" >/dev/null; then
             echo "🎨 ComfyUI service detected as started"
             update_session_metric "comfyui_started" "true"
             comfyui_started_flag=true
@@ -352,7 +360,7 @@ monitor_services() {
 monitor_services &
 MONITOR_PID=$!
 
-echo "🔄 Starting periodic sync loop (every 30 seconds)..."
+echo "🔄 Starting periodic sync loop (every $SYNC_INTERVAL_TRACKING seconds)..."
 while true; do
     # Check if monitor_services is still running. If not, services are assumed to be up.
     if ! ps -p $MONITOR_PID > /dev/null 2>&1 && [ -f "$LOCAL_TRACKING_FILE" ]; then
@@ -369,7 +377,7 @@ while true; do
         fi
     fi
     sync_tracking_data
-    sleep 30
+    sleep $SYNC_INTERVAL_TRACKING
 done &
 SYNC_PID=$!
 

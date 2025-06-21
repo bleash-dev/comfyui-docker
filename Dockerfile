@@ -5,13 +5,15 @@ FROM --platform=linux/amd64 nvidia/cuda:11.8.0-runtime-ubuntu22.04
 ARG PYTHON_VERSION=3.10
 ARG PYTORCH_VERSION=2.4.0
 ARG COMFYUI_VERSION=master
+ARG UBUNTU_VERSION=22.04
 
 # Environment variables
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHON_VERSION=${PYTHON_VERSION} \
     PYTORCH_VERSION=${PYTORCH_VERSION} \
-    XPU_TARGET=NVIDIA_GPU
+    XPU_TARGET=NVIDIA_GPU \
+    PATH="/opt/miniconda3/bin:$PATH"
 
 # Create virtual environment paths (these will be updated at runtime)
 ENV VENV_DIR=/opt/venv
@@ -46,6 +48,10 @@ RUN apt-get update && apt-get install -y \
     bc \
     && rm -rf /var/lib/apt/lists/*
 
+# Create symbolic links for python commands
+RUN ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python3 && \
+    ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python
+
 # Install AWS CLI v2
 RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
     unzip awscliv2.zip && \
@@ -64,11 +70,11 @@ COPY scripts/start.sh /start.sh
 RUN chmod +x /start.sh
 
 # Expose ports
-EXPOSE 3000 8888
+EXPOSE 8080
 
 # Add healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:3000 || exit 1
+    CMD curl -f http://localhost:8080 || exit 1
 
 # Set default command
 CMD ["/bin/bash", "/start.sh"]

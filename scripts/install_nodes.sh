@@ -1,67 +1,59 @@
 #!/bin/bash
-# set -euo pipefail
+# Custom node installation with consolidated requirements
 
 # Move to script's directory to ensure relative paths work
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
-# Detect network volume location
-NETWORK_VOLUME=""
-if [ -d "/runpod-volume" ]; then
-    NETWORK_VOLUME="/runpod-volume"
-elif mountpoint -q /workspace 2>/dev/null || [ -w "/workspace" ]; then
-    NETWORK_VOLUME="/workspace"
-fi
+# Set default Python version
+export PYTHON_VERSION="${PYTHON_VERSION:-3.10}"
+export PYTHON_CMD="${PYTHON_CMD:-python${PYTHON_VERSION}}"
 
-# Require network volume venv
-if [ -n "$NETWORK_VOLUME" ] && [ -d "$NETWORK_VOLUME/venv/comfyui" ]; then
-    export COMFYUI_VENV="$NETWORK_VOLUME/venv/comfyui"
-    export PIP_CACHE_DIR="$NETWORK_VOLUME/pip_cache"
-    echo "Using persistent virtual environment: $COMFYUI_VENV"
-    . $COMFYUI_VENV/bin/activate
-else
-    echo "❌ No network volume virtual environment found!"
-    echo "This script requires a persistent virtual environment in the network volume."
-    exit 1
-fi
+echo "📝 Using Python: $PYTHON_CMD ($($PYTHON_CMD --version))"
 
-cd /workspace/ComfyUI/custom_nodes
+# Get consolidated requirements file path from argument
+CONSOLIDATED_REQUIREMENTS="${1:-/tmp/consolidated_requirements.txt}"
 
-# Read and install nodes from nodes.txt
-if [ -f "../nodes.txt" ]; then
-    while IFS= read -r repo; do
+# Check if nodes.txt exists
+if [ -f "$NETWORK_VOLUME/ComfyUI/nodes.txt" ]; then
+    echo "📋 Installing custom nodes from nodes.txt..."
+    
+    # Move to custom nodes directory
+    cd "$NETWORK_VOLUME/ComfyUI/custom_nodes" || exit 1
+    
+    # Process each line in nodes.txt
+    while IFS= read -r repo_url; do
         # Skip empty lines and comments
-        [[ -z "$repo" || "$repo" =~ ^#.*$ ]] && continue
+        [[ -z "$repo_url" || "$repo_url" =~ ^[[:space:]]*# ]] && continue
         
-        # Extract repo name from URL
-        repo_name=$(basename "$repo" .git)
+        echo "📦 Processing repository: $repo_url"
         
-        echo "Installing $repo_name..."
+        # Extract repository name from URL
+        repo_name=$(basename "$repo_url" .git)
+        
+        # Clone or update repository
         if [ -d "$repo_name" ]; then
-            echo "$repo_name already exists, updating..."
+            echo "Directory $repo_name already exists. Updating..."
             cd "$repo_name"
-            git pull
+            git pull || echo "⚠️ Git pull failed for $repo_name"
             cd ..
         else
-            git clone "$repo"
+            echo "Cloning $repo_name..."
+            git clone "$repo_url" || echo "⚠️ Git clone failed for $repo_url"
         fi
         
-        # Install requirements if they exist
+        # Add requirements to consolidated file if they exist
         if [ -f "$repo_name/requirements.txt" ]; then
-            echo "Installing requirements for $repo_name"
-            pip3 install --cache-dir="${PIP_CACHE_DIR:-/tmp/pip}" -r "$repo_name/requirements.txt"
+            echo "Adding requirements from $repo_name to consolidated file"
+            echo "# $repo_name requirements" >> "$CONSOLIDATED_REQUIREMENTS"
+            cat "$repo_name/requirements.txt" >> "$CONSOLIDATED_REQUIREMENTS"
+            echo "" >> "$CONSOLIDATED_REQUIREMENTS"
         fi
         
-        # Run custom installation script if it exists (e.g., for Playwright browsers)
-        if [ -f "$repo_name/install.py" ]; then
-            echo "Running custom installation script for $repo_name"
-            cd "$repo_name"
-            python install.py
-            cd ..
-        fi
-        
-    done < "../nodes.txt"
+    done < "$NETWORK_VOLUME/ComfyUI/nodes.txt"
+    
+    echo "✅ Custom node repositories processed (requirements added to consolidated file)"
 else
-    echo "No nodes.txt file found, skipping custom node installation"
+    echo "ℹ️ No nodes.txt file found, skipping custom node installation"
 fi
 
 echo "✅ Custom node installation complete"

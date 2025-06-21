@@ -38,7 +38,7 @@ CURRENT_POD_ID="${POD_ID:-}" # Use POD_ID from env if set, otherwise empty
 TRACKING_DIR="$NETWORK_VOLUME/.pod_tracking" # For current_session.json
 TEMP_DIR=$(mktemp -d -p "${TMPDIR:-/tmp}" "pod_analytics.XXXXXX") # Secure temp directory
 
-S3_USER_SESSIONS_BASE="s3:$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME"
+S3_USER_SESSIONS_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME"
 S3_CURRENT_POD_SUMMARY=""
 if [ -n "$CURRENT_POD_ID" ]; then
     S3_CURRENT_POD_SUMMARY="$S3_USER_SESSIONS_BASE/$CURRENT_POD_ID/_pod_tracking/execution_summary.json"
@@ -79,7 +79,7 @@ show_current_pod_summary() {
     
     local summary_file="$TEMP_DIR/current_pod_execution_summary.json"
     echo "ℹ️ Attempting to download summary from: $S3_CURRENT_POD_SUMMARY"
-    if rclone copyto "$S3_CURRENT_POD_SUMMARY" "$summary_file" --retries 3; then # copyto for single file
+    if aws s3 cp "$S3_CURRENT_POD_SUMMARY" "$summary_file" --only-show-errors 2>/dev/null; then
         echo "Pod ID: $(jq -r '.pod_id // "N/A"' "$summary_file")"
         echo "Total Sessions Recorded: $(jq -r '.total_sessions // 0' "$summary_file")"
         echo "Total Runtime for this Pod ID: $(jq -r '.total_duration_human // "00:00:00"' "$summary_file")"
@@ -111,16 +111,11 @@ show_user_summary() {
     mkdir -p "$user_pods_dl_dir"
     
     echo "ℹ️ Downloading all execution_summary.json files from: $S3_USER_SESSIONS_BASE/"
-    # Using --files-from with rclone lsjson to get exact files, more robust
-    rclone lsjson "$S3_USER_SESSIONS_BASE/" --recursive --include "*/_pod_tracking/execution_summary.json" 2>/dev/null | \
-        jq -r '.[].Path' | \
-        while IFS= read -r s3_path; do
-            # Create corresponding local directory structure
-            local local_path_suffix=$(echo "$s3_path" | sed "s|^.*/pod_sessions/$POD_USER_NAME/||") # Get path relative to user base
-            mkdir -p "$user_pods_dl_dir/$(dirname "$local_path_suffix")"
-            rclone copyto "$S3_USER_SESSIONS_BASE/$s3_path" "$user_pods_dl_dir/$local_path_suffix" --retries 2 || \
-                echo "⚠️ Failed to download $s3_path"
-        done
+    # Use aws s3 sync to download all _pod_tracking/execution_summary.json files
+    aws s3 sync "$S3_USER_SESSIONS_BASE/" "$user_pods_dl_dir/" \
+        --exclude "*" \
+        --include "*/_pod_tracking/execution_summary.json" \
+        --only-show-errors 2>/dev/null || echo "⚠️ Some files may have failed to download"
 
     local total_sessions_all_pods=0
     local total_duration_all_pods=0
@@ -167,14 +162,10 @@ show_recent_sessions() {
     mkdir -p "$user_pods_dl_dir"
 
     echo "ℹ️ Downloading all execution_summary.json files for recent session analysis..."
-    rclone lsjson "$S3_USER_SESSIONS_BASE/" --recursive --include "*/_pod_tracking/execution_summary.json" 2>/dev/null | \
-        jq -r '.[].Path' | \
-        while IFS= read -r s3_path; do
-            local local_path_suffix=$(echo "$s3_path" | sed "s|^.*/pod_sessions/$POD_USER_NAME/||")
-            mkdir -p "$user_pods_dl_dir/$(dirname "$local_path_suffix")"
-            rclone copyto "$S3_USER_SESSIONS_BASE/$s3_path" "$user_pods_dl_dir/$local_path_suffix" --retries 2 || \
-                echo "⚠️ Failed to download $s3_path for recent session analysis"
-        done
+    aws s3 sync "$S3_USER_SESSIONS_BASE/" "$user_pods_dl_dir/" \
+        --exclude "*" \
+        --include "*/_pod_tracking/execution_summary.json" \
+        --only-show-errors 2>/dev/null || echo "⚠️ Some files may have failed to download"
         
     local all_sessions_file="$TEMP_DIR/all_sessions_collected.json"
     # Initialize as an empty array
@@ -229,7 +220,7 @@ show_current_session_local() {
         echo "--- Metrics ---"
         echo "ComfyUI Started: $(jq -r '.metrics.comfyui_started // false' "$local_current_session_file")"
         echo "Jupyter Started: $(jq -r '.metrics.jupyter_started // false' "$local_current_session_file")"
-        echo "S3 Mounted: $(jq -r '.metrics.s3_mounted // false' "$local_current_session_file")"
+        echo "S3 Connected: $(jq -r '.metrics.s3_connected // false' "$local_current_session_file")"
         echo "--- Pod Info ---"
         echo "Type: $(jq -r '.pod_info.type // "N/A"' "$local_current_session_file")"
         echo "GPU: $(jq -r '.pod_info.gpu // "N/A"' "$local_current_session_file")"

@@ -3,28 +3,52 @@ set -eo pipefail
 
 echo "=== ComfyUI Container Startup - $(date) ==="
 echo "🔍 Starting ComfyUI Setup with S3 Integration..."
-echo "Python Version: $(python3 --version)"
 
-# Detect network volume location EARLY
-echo "🔧 Detecting network volume location..."
-NETWORK_VOLUME=""
-if [ -d "/runpod-volume" ]; then
-    NETWORK_VOLUME="/runpod-volume"
-    echo "Network volume detected at /runpod-volume"
-elif mountpoint -q /workspace 2>/dev/null; then
-    NETWORK_VOLUME="/workspace"
-    echo "Network volume detected at /workspace (mounted)"
-elif [ -f "/workspace/.runpod_volume" ] || [ -w "/workspace" ]; then
-    NETWORK_VOLUME="/workspace"
-    echo "Using /workspace as persistent storage"
+# Set default Python version
+export PYTHON_VERSION="${PYTHON_VERSION:-3.10}"
+export PYTHON_CMD="${PYTHON_CMD:-python${PYTHON_VERSION}}"
+echo "Python Version: $($PYTHON_CMD --version)"
+
+# Set default script directory
+export SCRIPT_DIR="${SCRIPT_DIR:-/scripts}"
+echo "📁 Using script directory: $SCRIPT_DIR"
+
+# Detect network volume location EARLY - only if NETWORK_VOLUME is not already set
+if [ -z "$NETWORK_VOLUME" ]; then
+    echo "🔧 Detecting network volume location..."
+    if [ -d "/runpod-volume" ]; then
+        NETWORK_VOLUME="/runpod-volume"
+        echo "Network volume detected at /runpod-volume"
+    elif mountpoint -q /workspace 2>/dev/null; then
+        NETWORK_VOLUME="/workspace"
+        echo "Network volume detected at /workspace (mounted)"
+    elif [ -f "/workspace/.runpod_volume" ] || [ -w "/workspace" ]; then
+        NETWORK_VOLUME="/workspace"
+        echo "Using /workspace as persistent storage"
+    else
+        echo "❌ CRITICAL: No network volume detected or usable!"
+        echo "This container requires persistent storage at /workspace or /runpod-volume."
+        exit 1
+    fi
 else
-    echo "❌ CRITICAL: No network volume detected or usable!"
-    echo "This container requires persistent storage at /workspace or /runpod-volume."
-    exit 1
+    echo "📁 Using pre-configured NETWORK_VOLUME: $NETWORK_VOLUME"
 fi
 
 # Export NETWORK_VOLUME for all child processes
 export NETWORK_VOLUME
+
+# Remove any broken symbolic links from previous runs
+echo "🔧 Cleaning up any symlinks..."
+if [ -f "$SCRIPT_DIR/fix_symlinks.sh" ]; then
+    bash "$SCRIPT_DIR/fix_symlinks.sh"
+fi
+
+# Set AWS config to use network volume directly
+export AWS_CONFIG_FILE="$NETWORK_VOLUME/.aws/config"
+export AWS_SHARED_CREDENTIALS_FILE="$NETWORK_VOLUME/.aws/credentials"
+
+# Set Jupyter config to use network volume directly
+export JUPYTER_CONFIG_DIR="$NETWORK_VOLUME/.jupyter"
 
 # Enable comprehensive logging
 STARTUP_LOG="$NETWORK_VOLUME/.startup.log"
@@ -44,7 +68,7 @@ echo "📁 Network Volume set to: $NETWORK_VOLUME"
 # Start pod execution tracking early
 echo "🕐 Starting pod execution tracking..."
 mkdir -p "$(dirname "$NETWORK_VOLUME/.pod_tracker.log")"
-nohup bash /scripts/pod_execution_tracker.sh > "$NETWORK_VOLUME/.pod_tracker.log" 2>&1 &
+nohup bash "$SCRIPT_DIR/pod_execution_tracker.sh" > "$NETWORK_VOLUME/.pod_tracker.log" 2>&1 &
 POD_TRACKER_PID=$!
 echo "$POD_TRACKER_PID" > /tmp/pod_tracker.pid
 echo "Pod tracker started with PID $POD_TRACKER_PID. Log: $NETWORK_VOLUME/.pod_tracker.log"
@@ -65,9 +89,9 @@ fi
 echo "🎯 XPU_TARGET set to: $XPU_TARGET"
 
 
-# Setup S3 storage with rclone
-echo "🔧 Setting up S3 storage with rclone via /scripts/setup_rclone.sh..."
-if ! bash /scripts/setup_rclone.sh; then
+# Setup S3 storage with AWS CLI
+echo "🔧 Setting up S3 storage with AWS CLI via $SCRIPT_DIR/setup_rclone.sh..."
+if ! bash "$SCRIPT_DIR/setup_rclone.sh"; then
     echo "❌ CRITICAL: S3 storage setup failed (see output from setup_rclone.sh)."
     echo "Container startup ABORTED."
     exit 1
@@ -116,12 +140,12 @@ echo "✅ All required scripts on $NETWORK_VOLUME/scripts/ verified."
 
 
 # Start background services (using script from /scripts/ baked into image)
-echo "🚀 Starting background services via /scripts/start_background_services.sh..."
-if [ -f /scripts/start_background_services.sh ]; then
-    bash /scripts/start_background_services.sh # Assuming this script backgrounds its own processes and logs appropriately
+echo "🚀 Starting background services via $SCRIPT_DIR/start_background_services.sh..."
+if [ -f "$SCRIPT_DIR/start_background_services.sh" ]; then
+    bash "$SCRIPT_DIR/start_background_services.sh" # Assuming this script backgrounds its own processes and logs appropriately
     echo "✅ Background services script initiated."
 else
-    echo "ℹ️ No /scripts/start_background_services.sh found, skipping."
+    echo "ℹ️ No $SCRIPT_DIR/start_background_services.sh found, skipping."
 fi
 
 
@@ -147,8 +171,8 @@ fi
 
 
 # Setup all components (ComfyUI, models, etc.) via image script
-echo "🔧 Setting up all components via /scripts/setup_components.sh..."
-if ! bash /scripts/setup_components.sh; then # Assuming this script has its own error reporting
+echo "🔧 Setting up all components via $SCRIPT_DIR/setup_components.sh..."
+if ! bash "$SCRIPT_DIR/setup_components.sh"; then # Assuming this script has its own error reporting
     echo "❌ CRITICAL: Component setup failed (see output from setup_components.sh)."
     exit 1
 fi

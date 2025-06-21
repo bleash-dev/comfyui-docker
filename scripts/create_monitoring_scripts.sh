@@ -3,13 +3,16 @@
 
 echo "📝 Creating monitoring scripts..."
 
+# Set default script directory
+export SCRIPT_DIR="${SCRIPT_DIR:-/scripts}"
+
 # Log sync script
 cat > "$NETWORK_VOLUME/scripts/sync_logs.sh" << 'EOF'
 #!/bin/bash
 # Sync logs to S3
 
 LOG_DATE=$(date +%Y-%m-%d)
-S3_LOG_BASE="s3:$AWS_BUCKET_NAME/pod_logs/$POD_USER_NAME/logs/$LOG_DATE"
+S3_LOG_BASE="s3://$AWS_BUCKET_NAME/pod_logs/$POD_USER_NAME/logs/$LOG_DATE"
 LOCAL_LOG_DIR="/tmp/log_collection"
 
 mkdir -p "$LOCAL_LOG_DIR"
@@ -29,7 +32,7 @@ GPU Info: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || ech
 ENVEOF
 
 TIMESTAMP=$(date +%H-%M-%S)
-rclone sync "$LOCAL_LOG_DIR" "$S3_LOG_BASE/$TIMESTAMP" --progress
+aws s3 sync "$LOCAL_LOG_DIR" "$S3_LOG_BASE/$TIMESTAMP" --delete
 rm -rf "$LOCAL_LOG_DIR"
 
 echo "✅ Logs synced to S3"
