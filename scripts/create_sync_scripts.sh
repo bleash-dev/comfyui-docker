@@ -129,9 +129,3 @@ EOF
 chmod +x "$NETWORK_VOLUME/scripts/signal_handler.sh"
 
 echo "✅ Sync scripts created"
-done
-EOF
-
-chmod +x "$NETWORK_VOLUME/scripts/signal_handler.sh"
-
-echo "✅ Sync scripts created"
