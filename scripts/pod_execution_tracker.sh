@@ -86,7 +86,6 @@ create_session_data() {
 
     # Default metrics values - these will be merged/overwritten if preserved data exists
     local comfyui_started_val="false"
-    local jupyter_started_val="false"
     local s3_mounted_val="false"
     local startup_completed_val="false"
 
@@ -127,7 +126,6 @@ create_session_data() {
     "metrics": {
         "startup_completed": $startup_completed_val,
         "comfyui_started": $comfyui_started_val,
-        "jupyter_started": $jupyter_started_val,
         "s3_connected": $s3_connected_val
     },
     "timestamps": {
@@ -155,7 +153,6 @@ update_session_metric() {
         create_session_data "running" # Fallback, status is a guess here
         # Manual update for specific metric without jq is complex, this is a simplification
         if [ "$metric_name" = "comfyui_started" ]; then sed -i "s/\"comfyui_started\": .*,/\"comfyui_started\": $metric_value,/" "$LOCAL_TRACKING_FILE"; fi
-        if [ "$metric_name" = "jupyter_started" ]; then sed -i "s/\"jupyter_started\": .*,/\"jupyter_started\": $metric_value,/" "$LOCAL_TRACKING_FILE"; fi
 
     fi
 }
@@ -242,7 +239,6 @@ EOF
         gpu: .pod_info.gpu,
         services: {
             comfyui_started: (.metrics.comfyui_started // false),
-            jupyter_started: (.metrics.jupyter_started // false)
         }
     }' "$LOCAL_TRACKING_FILE")
 
@@ -327,7 +323,6 @@ sync_tracking_data
 
 monitor_services() {
     local comfyui_started_flag=false
-    local jupyter_started_flag=false
     
     echo "🏃 Starting service monitoring..."
     while true; do
@@ -337,16 +332,10 @@ monitor_services() {
             comfyui_started_flag=true
         fi
         
-        if [ "$jupyter_started_flag" = false ] && pgrep -f "jupyter.*lab.*--port.*8888" >/dev/null; then
-            echo "📊 Jupyter service detected as started"
-            update_session_metric "jupyter_started" "true"
-            jupyter_started_flag=true
-        fi
-        
         # Condition: S3 setup must be done AND ( .setup_complete file exists OR both services are up)
         if [ "$s3_setup_done" = true ] && \
            ( [ -f "$NETWORK_VOLUME/.setup_complete" ] || \
-             ( [ "$comfyui_started_flag" = true ] && [ "$jupyter_started_flag" = true ] ) ); then
+             ( [ "$comfyui_started_flag" = true ] ) ); then
             update_timestamp "services_ready"
             create_session_data "running"
             sync_tracking_data

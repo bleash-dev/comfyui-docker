@@ -24,49 +24,11 @@ if [ ! -d "$COMFYUI_VENV" ]; then
     $PYTHON_CMD -m venv "$COMFYUI_VENV"
 fi
 
-# Setup Jupyter config - store directly in network volume
-network_jupyter_dir="$NETWORK_VOLUME/.jupyter"
-if [ ! -d "$network_jupyter_dir" ]; then
-    mkdir -p "$network_jupyter_dir"
-    . $JUPYTER_VENV/bin/activate
-    jupyter notebook --generate-config --config-dir="$network_jupyter_dir"
-    cat > "$network_jupyter_dir/jupyter_notebook_config.py" << 'EOF'
-c.ServerApp.token = ''
-c.ServerApp.password = ''
-c.ServerApp.allow_origin = '*'
-c.ServerApp.ip = '0.0.0.0'
-c.ServerApp.port = 8888
-c.ServerApp.open_browser = False
-c.ServerApp.allow_root = True
-EOF
-    deactivate
-fi
-
 # Setup ComfyUI config - store directly in network volume
 network_comfyui_config="$NETWORK_VOLUME/.comfyui"
 mkdir -p "$network_comfyui_config"
 
 echo "✅ Configuration directories created directly in network volume"
-
-# Fix symbolic link creation for Jupyter config
-if [ -L "$CONFIG_ROOT/.jupyter" ]; then
-    # If it's already a symlink, remove it
-    rm -f "$CONFIG_ROOT/.jupyter"
-elif [ -d "$CONFIG_ROOT/.jupyter" ]; then
-    # If it's a directory, backup and remove it
-    mv "$CONFIG_ROOT/.jupyter" "$CONFIG_ROOT/.jupyter.backup.$(date +%s)" 2>/dev/null || rm -rf "$CONFIG_ROOT/.jupyter"
-fi
-ln -sf "$network_jupyter_dir" "$CONFIG_ROOT/.jupyter"
-
-# Fix symbolic link creation for ComfyUI config
-if [ -L "$CONFIG_ROOT/.comfyui" ]; then
-    # If it's already a symlink, remove it
-    rm -f "$CONFIG_ROOT/.comfyui"
-elif [ -d "$CONFIG_ROOT/.comfyui" ]; then
-    # If it's a directory, backup and remove it
-    mv "$CONFIG_ROOT/.comfyui" "$CONFIG_ROOT/.comfyui.backup.$(date +%s)" 2>/dev/null || rm -rf "$CONFIG_ROOT/.comfyui"
-fi
-ln -sf "$network_comfyui_config" "$CONFIG_ROOT/.comfyui"
 
 # Setup ComfyUI installation
 comfyui_dir="$NETWORK_VOLUME/ComfyUI"
@@ -406,11 +368,6 @@ fi
 echo "✅ Download tools setup complete"
 echo "📚 Run: $NETWORK_VOLUME/scripts/download_helper.sh for usage examples"
 
-# Start JupyterLab with custom config directory
-echo "Starting JupyterLab..."
-. $JUPYTER_VENV/bin/activate
-JUPYTER_CONFIG_DIR="$network_jupyter_dir" jupyter lab --ip 0.0.0.0 --port 8888 --no-browser --allow-root &
-deactivate
 
 # Add standard tools to consolidated requirements
 echo "# Standard tools requirements" >> "$CONSOLIDATED_REQUIREMENTS"

@@ -4,10 +4,12 @@ set -eo pipefail
 echo "=== ComfyUI Container Startup - $(date) ==="
 echo "🔍 Starting ComfyUI Setup with S3 Integration..."
 
-# Set default Python version
+# Set default Python version and config root
 export PYTHON_VERSION="${PYTHON_VERSION:-3.10}"
 export PYTHON_CMD="${PYTHON_CMD:-python${PYTHON_VERSION}}"
+export CONFIG_ROOT="${CONFIG_ROOT:-/root}"
 echo "Python Version: $($PYTHON_CMD --version)"
+echo "Config Root: $CONFIG_ROOT"
 
 # Set default script directory
 export SCRIPT_DIR="${SCRIPT_DIR:-/scripts}"
@@ -36,19 +38,6 @@ fi
 
 # Export NETWORK_VOLUME for all child processes
 export NETWORK_VOLUME
-
-# Remove any broken symbolic links from previous runs
-echo "🔧 Cleaning up any symlinks..."
-if [ -f "$SCRIPT_DIR/fix_symlinks.sh" ]; then
-    bash "$SCRIPT_DIR/fix_symlinks.sh"
-fi
-
-# Set AWS config to use network volume directly
-export AWS_CONFIG_FILE="$NETWORK_VOLUME/.aws/config"
-export AWS_SHARED_CREDENTIALS_FILE="$NETWORK_VOLUME/.aws/credentials"
-
-# Set Jupyter config to use network volume directly
-export JUPYTER_CONFIG_DIR="$NETWORK_VOLUME/.jupyter"
 
 # Enable comprehensive logging
 STARTUP_LOG="$NETWORK_VOLUME/.startup.log"
@@ -101,14 +90,7 @@ echo "✅ S3 storage setup script completed."
 
 # Update environment variables to use the mounted network volume paths
 export COMFYUI_VENV="$NETWORK_VOLUME/venv/comfyui"
-export JUPYTER_VENV="$NETWORK_VOLUME/venv/jupyter" # If Jupyter is used
-export PATH="$COMFYUI_VENV/bin:$JUPYTER_VENV/bin:$PATH" # Add Jupyter only if JUPYTER_VENV is non-empty
-
-echo "🐍 ComfyUI Venv path set to: $COMFYUI_VENV"
-if [ -n "$JUPYTER_VENV" ]; then # Assuming JUPYTER_VENV might be optional
-    echo "📊 Jupyter Venv path set to: $JUPYTER_VENV"
-fi
-echo "PATH updated."
+export PATH="$COMFYUI_VENV/bin:$PATH"
 
 
 # Verify that required scripts were created by setup_rclone.sh (or other setup steps)

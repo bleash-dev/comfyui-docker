@@ -193,7 +193,7 @@ show_recent_sessions() {
             "\n  Duration: \(.duration_human // "00:00:00")" +
             "\n  Status: \(.status // "N/A")" +
             "\n  Type: \(.pod_type // "N/A") - GPU: \(.gpu // "none")" +
-            "\n  Services: ComfyUI=\((.services.comfyui_started // false) | tostring), Jupyter=\((.services.jupyter_started // false) | tostring)"
+            "\n  Services: ComfyUI=\((.services.comfyui_started // false) | tostring)"
         ' "$all_sessions_file"
         echo "-----------------------------------------"
     else
@@ -219,7 +219,6 @@ show_current_session_local() {
         echo "Last Update: $(jq -r '.session.last_update // "N/A"' "$local_current_session_file")"
         echo "--- Metrics ---"
         echo "ComfyUI Started: $(jq -r '.metrics.comfyui_started // false' "$local_current_session_file")"
-        echo "Jupyter Started: $(jq -r '.metrics.jupyter_started // false' "$local_current_session_file")"
         echo "S3 Connected: $(jq -r '.metrics.s3_connected // false' "$local_current_session_file")"
         echo "--- Pod Info ---"
         echo "Type: $(jq -r '.pod_info.type // "N/A"' "$local_current_session_file")"

@@ -18,7 +18,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Create virtual environment paths (these will be updated at runtime)
 ENV VENV_DIR=/opt/venv
 ENV COMFYUI_VENV=$VENV_DIR/comfyui
-ENV JUPYTER_VENV=$VENV_DIR/jupyter
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
