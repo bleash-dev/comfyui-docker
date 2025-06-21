@@ -60,13 +60,20 @@ echo "✅ AWS CLI configuration created."
 echo "🔍 Testing S3 connection to bucket '$AWS_BUCKET_NAME'..."
 
 # First try to get bucket location
-if ! aws s3api get-bucket-location --bucket "$AWS_BUCKET_NAME" >/dev/null 2>&1; then
+echo "   Attempting bucket location test..."
+if ! bucket_location_output=$(aws s3api get-bucket-location --bucket "$AWS_BUCKET_NAME" 2>&1); then
     echo "❌ CRITICAL: Failed basic connectivity test to S3 bucket '$AWS_BUCKET_NAME'."
+    echo "   Bucket location test error output:"
+    echo "   $bucket_location_output"
     echo "   Trying alternative connection test..."
     
     # Fallback test: try to list bucket contents
-    if ! aws s3 ls "s3://$AWS_BUCKET_NAME/" >/dev/null 2>&1; then
+    echo "   Attempting bucket list test..."
+    if ! bucket_list_output=$(aws s3 ls "s3://$AWS_BUCKET_NAME/" 2>&1); then
         echo "❌ CRITICAL: All S3 connection tests failed for bucket '$AWS_BUCKET_NAME'."
+        echo "   Bucket list test error output:"
+        echo "   $bucket_list_output"
+        echo ""
         echo "   Please check:"
         echo "   - AWS credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)"
         echo "   - Bucket name is correct: '$AWS_BUCKET_NAME'"
@@ -74,16 +81,19 @@ if ! aws s3api get-bucket-location --bucket "$AWS_BUCKET_NAME" >/dev/null 2>&1; 
         echo "   - Bucket exists and you have access permissions"
         echo "   - Network connectivity to AWS S3"
         
-        # Try to give more specific error information
-        echo "🔍 Attempting diagnostic test..."
-        aws s3 ls "s3://$AWS_BUCKET_NAME/" --debug 2>&1 | head -10 || true
+        # Try to give more specific error information with debug output
+        echo "🔍 Attempting diagnostic test with debug output..."
+        aws s3 ls "s3://$AWS_BUCKET_NAME/" --debug 2>&1 | head -20 || true
         
         exit 1
     else
         echo "✅ S3 connection successful (via fallback test)."
+        echo "   Bucket list output preview:"
+        echo "   $(echo "$bucket_list_output" | head -3)"
     fi
 else
     echo "✅ S3 connection successful (bucket accessible)."
+    echo "   Bucket location: $(echo "$bucket_location_output" | jq -r '.LocationConstraint // "us-east-1"' 2>/dev/null || echo "unknown")"
 fi
 
 # Additional test: try to create and read a test file to verify write permissions
@@ -94,21 +104,26 @@ test_local_file="/tmp/.aws_test"
 
 echo "$test_file_content" > "$test_local_file"
 
-if aws s3 cp "$test_local_file" "$test_s3_path" >/dev/null 2>&1; then
+echo "   Attempting to write test file..."
+if upload_output=$(aws s3 cp "$test_local_file" "$test_s3_path" 2>&1); then
+    echo "   Test file upload successful, attempting to read back..."
     # Verify we can read it back
-    if downloaded_content=$(aws s3 cp "$test_s3_path" - 2>/dev/null) && \
+    if downloaded_content=$(aws s3 cp "$test_s3_path" - 2>&1) && \
        [ "$downloaded_content" = "$test_file_content" ]; then
         echo "✅ S3 write/read permissions verified."
         # Clean up test file
         aws s3 rm "$test_s3_path" >/dev/null 2>&1 || true
     else
         echo "⚠️ WARNING: S3 write successful but read verification failed."
+        echo "   Read error output: $downloaded_content"
         echo "   This may indicate permission issues or eventual consistency delays."
         # Still clean up test file
         aws s3 rm "$test_s3_path" >/dev/null 2>&1 || true
     fi
 else
     echo "⚠️ WARNING: S3 write test failed."
+    echo "   Write error output:"
+    echo "   $upload_output"
     echo "   You have read access but may not have write permissions."
     echo "   Some features requiring S3 uploads may not work."
     echo "   Proceeding with setup anyway..."
