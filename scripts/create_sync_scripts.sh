@@ -10,7 +10,7 @@ cat > "$NETWORK_VOLUME/scripts/sync_user_data.sh" << 'EOF'
 
 echo "🔄 Syncing user data to S3 (archived)..."
 
-EXCLUDE_SHARED_FOLDERS=("venv" ".comfyui") 
+EXCLUDE_SHARED_FOLDERS=("venv" ".comfyui" ".cache") 
 EXCLUDE_COMFYUI_SHARED_FOLDERS=("models" "custom_nodes")
 
 COMFYUI_POD_SPECIFIC_ARCHIVE_NAME="comfyui_pod_specific_data.tar.gz"
@@ -142,13 +142,13 @@ echo "🔄 Syncing user-shared data to S3 (archived)..."
 S3_USER_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/shared"
 S3_USER_COMFYUI_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/ComfyUI/shared"
 
-USER_SHARED_FOLDERS_TO_ARCHIVE=("venv" ".comfyui")
+USER_SHARED_FOLDERS_TO_ARCHIVE=("venv" ".comfyui" ".cache")
 COMFYUI_USER_SHARED_FOLDERS_TO_ARCHIVE=("custom_nodes") 
 
 echo "📦 Syncing user-shared folder archives..."
 for folder_name in "${USER_SHARED_FOLDERS_TO_ARCHIVE[@]}"; do
     local_folder_path="$NETWORK_VOLUME/$folder_name"
-    # Ensure archive_name is filesystem-safe, especially for ".comfyui" -> "_comfyui.tar.gz"
+    # Ensure archive_name is filesystem-safe, especially for ".comfyui" -> "_comfyui.tar.gz" and ".cache" -> "_cache.tar.gz"
     # Replacing leading dot with underscore for the archive filename.
     # Using parameter expansion for this.
     safe_folder_name="${folder_name#.}" 

@@ -3,8 +3,11 @@ set -eo pipefail
 
 echo "🔧 Setting up AWS S3 storage (sync-only operations)..."
 
-# Set default script directory
+# Set default script directory and config root
 export SCRIPT_DIR="${SCRIPT_DIR:-/scripts}"
+export CONFIG_ROOT="${CONFIG_ROOT:-/root}"
+
+echo "📁 Using Config Root: $CONFIG_ROOT"
 
 # Validate that NETWORK_VOLUME was set by start.sh
 if [ -z "$NETWORK_VOLUME" ]; then
@@ -33,13 +36,15 @@ done
 echo "✅ Environment variables validated."
 echo "   Bucket: $AWS_BUCKET_NAME, Region: $AWS_REGION, User: $POD_USER_NAME, Pod: $POD_ID"
 
-# Configure AWS CLI - store directly in network volume
+# Configure AWS CLI
 echo "📝 Configuring AWS CLI..."
-AWS_CONFIG_DIR="$NETWORK_VOLUME/.aws"
-export AWS_CONFIG_FILE="$AWS_CONFIG_DIR/config"
-export AWS_SHARED_CREDENTIALS_FILE="$AWS_CONFIG_DIR/credentials"
+AWS_CONFIG_ROOT="$CONFIG_ROOT/.aws"
+export AWS_CONFIG_FILE="$AWS_CACHE_DIR/config"
+export AWS_SHARED_CREDENTIALS_FILE="$AWS_CACHE_DIR/credentials"
 
-mkdir -p "$AWS_CONFIG_DIR"
+mkdir -p "$(dirname "$AWS_CONFIG_FILE")"
+mkdir -p "$(dirname "$AWS_SHARED_CREDENTIALS_FILE")"
+mkdir -p "$AWS_CONFIG_ROOT"
 
 cat > "$AWS_CONFIG_FILE" << EOF
 [default]
@@ -57,7 +62,28 @@ EOF
 chmod 600 "$AWS_CONFIG_FILE"
 chmod 600 "$AWS_SHARED_CREDENTIALS_FILE"
 
-echo "✅ AWS CLI configuration created at: $AWS_CONFIG_DIR"
+# Create symlink to config root for easy access
+rm -rf "$AWS_CONFIG_ROOT"
+ln -sf "$AWS_CACHE_DIR" "$AWS_CONFIG_ROOT"
+
+echo "✅ AWS CLI configuration created."
+echo "📁 AWS config accessible at: $AWS_CONFIG_ROOT"
+
+# Setup cache directory symlink to ensure it's stored in network volume
+echo "📁 Setting up cache directory symlink..."
+NETWORK_CACHE_DIR="$NETWORK_VOLUME/.cache"
+ROOT_CACHE_DIR="$CONFIG_ROOT/.cache"
+
+mkdir -p "$NETWORK_CACHE_DIR"
+
+# Remove existing cache dir and create symlink if it doesn't exist or isn't a symlink
+if [ ! -L "$ROOT_CACHE_DIR" ]; then
+    [ -d "$ROOT_CACHE_DIR" ] && rm -rf "$ROOT_CACHE_DIR"
+    ln -sf "$NETWORK_CACHE_DIR" "$ROOT_CACHE_DIR"
+    echo "✅ Cache directory symlinked: $ROOT_CACHE_DIR -> $NETWORK_CACHE_DIR"
+else
+    echo "✅ Cache directory symlink already exists"
+fi
 
 # Test AWS S3 connection
 echo "🔍 Testing S3 connection to bucket '$AWS_BUCKET_NAME'..."

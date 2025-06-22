@@ -68,7 +68,7 @@ OTHER_POD_SPECIFIC_ARCHIVE_S3_PATH="$S3_POD_BASE/other_pod_specific_data.tar.gz"
 
 S3_USER_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/shared"
 # CORRECTED to match upload script for .comfyui -> _comfyui.tar.gz
-USER_SHARED_ARCHIVE_FILES=("venv.tar.gz" "_comfyui.tar.gz") 
+USER_SHARED_ARCHIVE_FILES=("venv.tar.gz" "_comfyui.tar.gz" "_cache.tar.gz") 
 
 S3_USER_COMFYUI_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/ComfyUI/shared"
 COMFYUI_USER_SHARED_ARCHIVE_FILES=("custom_nodes.tar.gz") 
