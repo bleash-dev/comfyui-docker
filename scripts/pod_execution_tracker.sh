@@ -117,7 +117,8 @@ create_session_data() {
     },
     "pod_info": {
         "type": "$pod_type",
-        "gpu": "$gpu_info",
+        "gpu": "$GPU_TYPE",
+        "gpu_info": "$gpu_info",
         "instance_type": "$instance_type",
         "hostname": "$(hostname)",
         "template_id": "${THIS_POD_TEMPLATE_ID:-unknown}",

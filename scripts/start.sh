@@ -41,11 +41,22 @@ export NETWORK_VOLUME
 
 # Enable comprehensive logging
 STARTUP_LOG="$NETWORK_VOLUME/.startup.log"
-touch "$STARTUP_LOG"
-chmod 664 "$STARTUP_LOG"
 
-exec 1> >(tee -a "$STARTUP_LOG")
-exec 2> >(tee -a "$STARTUP_LOG" >&2)
+# Ensure the startup log file exists and is writable
+if ! touch "$STARTUP_LOG" 2>/dev/null; then
+    echo "⚠️ WARNING: Could not create startup log at $STARTUP_LOG, using fallback"
+    STARTUP_LOG="/tmp/startup_fallback.log"
+    touch "$STARTUP_LOG"
+fi
+chmod 664 "$STARTUP_LOG" 2>/dev/null || true
+
+# Set up logging redirection only if STARTUP_LOG is valid
+if [ -n "$STARTUP_LOG" ] && [ -f "$STARTUP_LOG" ]; then
+    exec 1> >(tee -a "$STARTUP_LOG")
+    exec 2> >(tee -a "$STARTUP_LOG" >&2)
+else
+    echo "⚠️ WARNING: Startup log setup failed, continuing without file logging"
+fi
 
 echo "----------------------------------------------------"
 echo "Startup Log initiated: $STARTUP_LOG"
