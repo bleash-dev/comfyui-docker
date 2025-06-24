@@ -41,7 +41,7 @@ cd $NETWORK_VOLUME/ComfyUI
 export COMFYUI_ENABLE_CORS=true
 export COMFYUI_CORS_ORIGIN="*"
 
-$PYTHON_CMD main.py --listen 0.0.0.0 --port 8080 \\
+$PYTHON_CMD main.py --listen 0.0.0.0 --port 8080 --enable-cors-header --cors-header "*" \\
     > >(tee -a "$COMFYUI_LOG") \\
     2> >(tee -a "$COMFYUI_ERROR_LOG" >&2)
 EOF
