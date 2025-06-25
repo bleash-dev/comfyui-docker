@@ -7,6 +7,7 @@ echo "🔧 Setting up ComfyUI components..."
 export SCRIPT_DIR="${SCRIPT_DIR:-/scripts}"
 export PYTHON_VERSION="${PYTHON_VERSION:-3.10}"
 export PYTHON_CMD="${PYTHON_CMD:-python${PYTHON_VERSION}}"
+export COMFYUI_GIT="https://github.com/bleash-dev/vf-comfyui-cors.git"
 
 echo "📝 Using Python: $PYTHON_CMD ($($PYTHON_CMD --version))"
 
@@ -62,7 +63,7 @@ if [ -d "$comfyui_dir" ]; then
             rm -rf "$comfyui_dir"
             echo "Installing ComfyUI..."
             . $COMFYUI_VENV/bin/activate
-            git clone https://github.com/comfyanonymous/ComfyUI "$comfyui_dir"
+            git clone $COMFYUI_GIT "$comfyui_dir"
             cd "$comfyui_dir"
             pip install --no-cache-dir -r requirements.txt
             pip install --no-cache-dir torch==${PYTORCH_VERSION:-2.4.0} torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
@@ -78,7 +79,7 @@ if [ -d "$comfyui_dir" ]; then
             mv "$comfyui_dir" "$backup_dir"
             
             echo "Installing fresh ComfyUI..."
-            git clone https://github.com/comfyanonymous/ComfyUI "$comfyui_dir"
+            git clone $COMFYUI_GIT "$comfyui_dir"
             cd "$comfyui_dir"
             
             # Add ComfyUI requirements to consolidated file
@@ -91,7 +92,7 @@ if [ -d "$comfyui_dir" ]; then
     fi
 else
     echo "Installing ComfyUI..."
-    git clone https://github.com/comfyanonymous/ComfyUI "$comfyui_dir"
+    git clone $COMFYUI_GIT "$comfyui_dir"
     cd "$comfyui_dir"
     
     # Add ComfyUI requirements to consolidated file
