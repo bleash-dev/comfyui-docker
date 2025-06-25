@@ -90,10 +90,33 @@ while true; do
 done
 EOF
 
+cat > "$NETWORK_VOLUME/scripts/model_discovery_daemon_runner.sh" << EOF
+#!/bin/bash
+# Model discovery daemon with proper signal handling
+
+handle_model_discovery_signal() {
+    echo "📢 Model discovery daemon received signal, stopping..."
+    exit 0
+}
+
+trap handle_model_discovery_signal SIGTERM SIGINT SIGQUIT
+
+# Wait for ComfyUI to be ready before starting model discovery
+echo "⏳ Waiting for ComfyUI to be ready..."
+while ! curl -f http://localhost:8080 >/dev/null 2>&1; do
+    sleep 5
+done
+echo "✅ ComfyUI is ready, starting model discovery..."
+
+# Run the model discovery script
+"\$NETWORK_VOLUME/scripts/model_discovery.sh"
+EOF
+
 chmod +x "$NETWORK_VOLUME/scripts/sync_daemon_runner.sh"
 chmod +x "$NETWORK_VOLUME/scripts/sync_shared_daemon_runner.sh"
 chmod +x "$NETWORK_VOLUME/scripts/log_sync_daemon_runner.sh"
 chmod +x "$NETWORK_VOLUME/scripts/global_shared_sync_daemon_runner.sh"
+chmod +x "$NETWORK_VOLUME/scripts/model_discovery_daemon_runner.sh"
 
 # Start sync daemon for periodic data synchronization (pod-specific data)
 nohup bash "$NETWORK_VOLUME/scripts/sync_daemon_runner.sh" > "$NETWORK_VOLUME/.sync_daemon.log" 2>&1 &
@@ -125,9 +148,16 @@ GLOBAL_SHARED_SYNC_PID=$!
 echo "global_shared_sync_daemon:$GLOBAL_SHARED_SYNC_PID" >> "$BACKGROUND_PIDS_FILE"
 echo "  🌐 Global shared models sync daemon started (PID: $GLOBAL_SHARED_SYNC_PID)"
 
+# Start model discovery daemon
+nohup bash "$NETWORK_VOLUME/scripts/model_discovery_daemon_runner.sh" > "$NETWORK_VOLUME/.model_discovery.log" 2>&1 &
+MODEL_DISCOVERY_PID=$!
+echo "model_discovery_daemon:$MODEL_DISCOVERY_PID" >> "$BACKGROUND_PIDS_FILE"
+echo "  🔍 Model discovery daemon started (PID: $MODEL_DISCOVERY_PID)"
+
 echo "✅ Background services started (sync-only mode)"
 echo "  📄 Pod-specific data sync: every $((SYNC_INTERVAL_USER_DATA / 60)) minutes"
 echo "  🔄 User-shared data sync: every $((SYNC_INTERVAL_SHARED_DATA / 60)) minutes"
 echo "  🌐 Global shared models sync: every $((SYNC_INTERVAL_GLOBAL_MODELS / 60)) minutes (no delete)"
 echo "  📊 Log sync: every $((SYNC_INTERVAL_LOGS / 60)) minutes"
-echo "  📝 All PIDs stored in: $BACKGROUND_PIDS_FILE"
+echo "  � Model discovery: starts after ComfyUI is ready"
+echo "  �📝 All PIDs stored in: $BACKGROUND_PIDS_FILE"
