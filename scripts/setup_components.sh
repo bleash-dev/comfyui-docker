@@ -121,40 +121,15 @@ else
     echo "👍 Custom nodes directory ($custom_nodes_dir) already exists."
 fi
 
+# Define custom nodes to install
+declare -A CUSTOM_NODES=(
+    ["ComfyUI-Manager"]="https://github.com/ltdrdata/ComfyUI-Manager.git"
+    ["Comfyui-FileSytem-Manager"]="https://github.com/bleash-dev/Comfyui-FileSytem-Manager.git"
+    ["Comfyui-Idle-Checker"]="https://github.com/bleash-dev/Comfyui-Idle-Checker.git"
+    ["ComfyUI-Auth-Manager"]="https://github.com/bleash-dev/ComfyUI-Auth-Manager.git"
+)
 
-# Setup ComfyUI Manager
-manager_dir="$custom_nodes_dir/ComfyUI-Manager"
-if [ ! -d "$manager_dir" ]; then
-    echo "Installing ComfyUI Manager..."
-    cd "$custom_nodes_dir"
-    git clone https://github.com/ltdrdata/ComfyUI-Manager.git
-    
-    # Add ComfyUI Manager requirements to consolidated file
-    if [ -f "ComfyUI-Manager/requirements.txt" ]; then
-        echo "# ComfyUI-Manager requirements" >> "$CONSOLIDATED_REQUIREMENTS"
-        cat "ComfyUI-Manager/requirements.txt" >> "$CONSOLIDATED_REQUIREMENTS"
-        echo "" >> "$CONSOLIDATED_REQUIREMENTS"
-    fi
-else
-    echo "✅ ComfyUI Manager already exists"
-    cd "$manager_dir"
-    echo "Updating ComfyUI Manager..."
-    git pull || echo "⚠️ Git pull failed, continuing with existing version"
-    
-    # Add ComfyUI Manager requirements to consolidated file
-    if [ -f "requirements.txt" ]; then
-        echo "# ComfyUI-Manager requirements" >> "$CONSOLIDATED_REQUIREMENTS"
-        cat "requirements.txt" >> "$CONSOLIDATED_REQUIREMENTS"
-        echo "" >> "$CONSOLIDATED_REQUIREMENTS"
-    fi
-fi
-
-filesystem_manager_dir="$custom_nodes_dir/Comfyui-FileSytem-Manager"
-idle_checker_dir="$custom_nodes_dir/Comfyui-Idle-Checker"
-
-
-# --- Change to the custom_nodes directory ---
-# This cd is now safe because we've ensured the directory exists or exited if creation failed.
+# Change to the custom_nodes directory
 cd "$custom_nodes_dir"
 if [ $? -ne 0 ]; then
     echo "❌ ERROR: Failed to change directory to $custom_nodes_dir even after creation check. Exiting."
@@ -162,41 +137,33 @@ if [ $? -ne 0 ]; then
 fi
 echo "➡️  Currently in directory: $(pwd)"
 
-# Install Comfyui-FileSytem-Manager
-if [ -d "$filesystem_manager_dir" ] && [ -f "$filesystem_manager_dir/__init__.py" ]; then
-    echo "✅ Comfyui-FileSytem-Manager already exists (from mounted storage)"
-    cd "$filesystem_manager_dir"
-    git pull || echo "⚠️ Git pull failed, continuing with existing version"
-    cd "$custom_nodes_dir"
-else
-    echo "Installing Comfyui-FileSytem-Manager..."
-    git clone https://github.com/bleash-dev/Comfyui-FileSytem-Manager.git
-fi
+# Install each custom node
+for node_name in "${!CUSTOM_NODES[@]}"; do
+    node_url="${CUSTOM_NODES[$node_name]}"
+    node_dir="$custom_nodes_dir/$node_name"
+    
+    echo "🔧 Processing custom node: $node_name"
+    
+    if [ -d "$node_dir" ] && [ -f "$node_dir/__init__.py" ]; then
+        echo "✅ $node_name already exists (from mounted storage)"
+        cd "$node_dir"
+        echo "🔄 Updating $node_name..."
+        git pull || echo "⚠️ Git pull failed for $node_name, continuing with existing version"
+        cd "$custom_nodes_dir"
+    else
+        echo "📥 Installing $node_name..."
+        git clone "$node_url" "$node_name" || echo "⚠️ Git clone failed for $node_name"
+    fi
+    
+    # Add requirements to consolidated file if they exist
+    if [ -f "$node_dir/requirements.txt" ]; then
+        echo "📋 Adding requirements from $node_name to consolidated file"
+        echo "# $node_name requirements" >> "$CONSOLIDATED_REQUIREMENTS"
+        cat "$node_dir/requirements.txt" >> "$CONSOLIDATED_REQUIREMENTS"
+        echo "" >> "$CONSOLIDATED_REQUIREMENTS"
+    fi
+done
 
-# Add Comfyui-FileSytem-Manager requirements to consolidated file
-if [ -f "$filesystem_manager_dir/requirements.txt" ]; then
-    echo "# Comfyui-FileSytem-Manager requirements" >> "$CONSOLIDATED_REQUIREMENTS"
-    cat "$filesystem_manager_dir/requirements.txt" >> "$CONSOLIDATED_REQUIREMENTS"
-    echo "" >> "$CONSOLIDATED_REQUIREMENTS"
-fi
-
-# Install Comfyui-Idle-Checker
-if [ -d "$idle_checker_dir" ] && [ -f "$idle_checker_dir/__init__.py" ]; then
-    echo "✅ Comfyui-Idle-Checker already exists (from mounted storage)"
-    cd "$idle_checker_dir"
-    git pull || echo "⚠️ Git pull failed, continuing with existing version"
-    cd "$custom_nodes_dir"
-else
-    echo "Installing Comfyui-Idle-Checker..."
-    git clone https://github.com/bleash-dev/Comfyui-Idle-Checker.git
-fi
-
-# Add Comfyui-Idle-Checker requirements to consolidated file
-if [ -f "$idle_checker_dir/requirements.txt" ]; then
-    echo "# Comfyui-Idle-Checker requirements" >> "$CONSOLIDATED_REQUIREMENTS"
-    cat "$idle_checker_dir/requirements.txt" >> "$CONSOLIDATED_REQUIREMENTS"
-    echo "" >> "$CONSOLIDATED_REQUIREMENTS"
-fi
 echo "✅ Additional custom nodes setup complete"
 
 # Setup download tools
@@ -435,25 +402,20 @@ if [ -s "$CONSOLIDATED_REQUIREMENTS" ]; then
     # Run custom installation scripts after pip install
     echo "🔧 Running custom installation scripts..."
     
-    # FileSystem Manager install
-    if [ -f "$filesystem_manager_dir/install.py" ]; then
-        echo "Running Comfyui-FileSytem-Manager installation..."
-        cd "$filesystem_manager_dir"
-        python install.py || echo "⚠️ Comfyui-FileSytem-Manager install.py failed"
-        cd "$custom_nodes_dir"
-    fi
-    
-    # Idle Checker install
-    if [ -f "$idle_checker_dir/install.py" ]; then
-        echo "Running Comfyui-Idle-Checker installation..."
-        cd "$idle_checker_dir"
-        python install.py || echo "⚠️ Comfyui-Idle-Checker install.py failed"
-        cd "$custom_nodes_dir"
-    fi
+    # Run install.py for predefined custom nodes
+    for node_name in "${!CUSTOM_NODES[@]}"; do
+        node_dir="$custom_nodes_dir/$node_name"
+        if [ -f "$node_dir/install.py" ]; then
+            echo "Running install.py for $node_name..."
+            cd "$node_dir"
+            python install.py || echo "⚠️ $node_name install.py failed"
+            cd "$custom_nodes_dir"
+        fi
+    done
     
     # Run install.py for any custom nodes from nodes.txt
     if [ -f "$NETWORK_VOLUME/ComfyUI/nodes.txt" ]; then
-        echo "Running install.py scripts for custom nodes..."
+        echo "Running install.py scripts for custom nodes from nodes.txt..."
         while IFS= read -r repo_url; do
             [[ -z "$repo_url" || "$repo_url" =~ ^[[:space:]]*# ]] && continue
             repo_name=$(basename "$repo_url" .git)
