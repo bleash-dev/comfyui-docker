@@ -133,10 +133,33 @@ fi
 # Setup additional custom nodes
 echo "📝 Setting up additional custom nodes..."
 custom_nodes_dir="$NETWORK_VOLUME/ComfyUI/custom_nodes"
+
+if [ ! -d "$custom_nodes_dir" ]; then
+    echo "🛠️ Custom nodes directory ($custom_nodes_dir) does not exist. Creating it..."
+    mkdir -p "$custom_nodes_dir"
+    if [ $? -ne 0 ]; then
+        echo "❌ ERROR: Failed to create custom nodes directory: $custom_nodes_dir. Exiting."
+        exit 1
+    else
+        echo "✅ Successfully created custom nodes directory: $custom_nodes_dir"
+    fi
+else
+    echo "👍 Custom nodes directory ($custom_nodes_dir) already exists."
+fi
+
 filesystem_manager_dir="$custom_nodes_dir/Comfyui-FileSytem-Manager"
 idle_checker_dir="$custom_nodes_dir/Comfyui-Idle-Checker"
 
 cd "$custom_nodes_dir"
+
+# --- Change to the custom_nodes directory ---
+# This cd is now safe because we've ensured the directory exists or exited if creation failed.
+cd "$custom_nodes_dir"
+if [ $? -ne 0 ]; then
+    echo "❌ ERROR: Failed to change directory to $custom_nodes_dir even after creation check. Exiting."
+    exit 1
+fi
+echo "➡️  Currently in directory: $(pwd)"
 
 # Install Comfyui-FileSytem-Manager
 if [ -d "$filesystem_manager_dir" ] && [ -f "$filesystem_manager_dir/__init__.py" ]; then
