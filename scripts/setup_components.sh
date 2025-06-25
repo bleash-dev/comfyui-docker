@@ -7,7 +7,7 @@ echo "🔧 Setting up ComfyUI components..."
 export SCRIPT_DIR="${SCRIPT_DIR:-/scripts}"
 export PYTHON_VERSION="${PYTHON_VERSION:-3.10}"
 export PYTHON_CMD="${PYTHON_CMD:-python${PYTHON_VERSION}}"
-export COMFYUI_GIT="https://github.com/bleash-dev/vf-comfyui-cors.git"
+export COMFYUI_GIT="https://github.com/gilons/vf-comfyui-cors.git"
 
 echo "📝 Using Python: $PYTHON_CMD ($($PYTHON_CMD --version))"
 
