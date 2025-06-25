@@ -81,7 +81,7 @@ S3_GLOBAL_MODELS_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/global_shared/models"
 MODELS_BASE_DIR="$NETWORK_VOLUME/ComfyUI/models"
 
 # Discovery interval (in seconds)
-DISCOVERY_INTERVAL="${MODEL_DISCOVERY_INTERVAL:-300}" # 5 minutes default
+DISCOVERY_INTERVAL="${MODEL_DISCOVERY_INTERVAL:-30}" # 30 seconds default
 
 discover_local_models() {
     echo "📊 Discovering local models in $MODELS_BASE_DIR..."
