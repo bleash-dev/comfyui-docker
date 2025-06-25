@@ -103,11 +103,30 @@ else
     fi
 fi
 
+
+# Setup additional custom nodes
+echo "📝 Setting up additional custom nodes..."
+custom_nodes_dir="$NETWORK_VOLUME/ComfyUI/custom_nodes"
+
+if [ ! -d "$custom_nodes_dir" ]; then
+    echo "🛠️ Custom nodes directory ($custom_nodes_dir) does not exist. Creating it..."
+    mkdir -p "$custom_nodes_dir"
+    if [ $? -ne 0 ]; then
+        echo "❌ ERROR: Failed to create custom nodes directory: $custom_nodes_dir. Exiting."
+        exit 1
+    else
+        echo "✅ Successfully created custom nodes directory: $custom_nodes_dir"
+    fi
+else
+    echo "👍 Custom nodes directory ($custom_nodes_dir) already exists."
+fi
+
+
 # Setup ComfyUI Manager
-manager_dir="$NETWORK_VOLUME/ComfyUI/custom_nodes/ComfyUI-Manager"
+manager_dir="$custom_nodes_dir/ComfyUI-Manager"
 if [ ! -d "$manager_dir" ]; then
     echo "Installing ComfyUI Manager..."
-    cd "$NETWORK_VOLUME/ComfyUI/custom_nodes"
+    cd "$custom_nodes_dir"
     git clone https://github.com/ltdrdata/ComfyUI-Manager.git
     
     # Add ComfyUI Manager requirements to consolidated file
@@ -130,27 +149,9 @@ else
     fi
 fi
 
-# Setup additional custom nodes
-echo "📝 Setting up additional custom nodes..."
-custom_nodes_dir="$NETWORK_VOLUME/ComfyUI/custom_nodes"
-
-if [ ! -d "$custom_nodes_dir" ]; then
-    echo "🛠️ Custom nodes directory ($custom_nodes_dir) does not exist. Creating it..."
-    mkdir -p "$custom_nodes_dir"
-    if [ $? -ne 0 ]; then
-        echo "❌ ERROR: Failed to create custom nodes directory: $custom_nodes_dir. Exiting."
-        exit 1
-    else
-        echo "✅ Successfully created custom nodes directory: $custom_nodes_dir"
-    fi
-else
-    echo "👍 Custom nodes directory ($custom_nodes_dir) already exists."
-fi
-
 filesystem_manager_dir="$custom_nodes_dir/Comfyui-FileSytem-Manager"
 idle_checker_dir="$custom_nodes_dir/Comfyui-Idle-Checker"
 
-cd "$custom_nodes_dir"
 
 # --- Change to the custom_nodes directory ---
 # This cd is now safe because we've ensured the directory exists or exited if creation failed.
