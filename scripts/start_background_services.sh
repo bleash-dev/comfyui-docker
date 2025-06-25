@@ -101,11 +101,6 @@ handle_model_discovery_signal() {
 
 trap handle_model_discovery_signal SIGTERM SIGINT SIGQUIT
 
-# Wait for ComfyUI to be ready before starting model discovery
-echo "⏳ Waiting for ComfyUI to be ready..."
-while ! curl -f http://localhost:8080 >/dev/null 2>&1; do
-    sleep 5
-done
 echo "✅ ComfyUI is ready, starting model discovery..."
 
 # Run the model discovery script
