@@ -169,120 +169,126 @@ chmod +x "$NETWORK_VOLUME/scripts/model_discovery.sh"
 # Remote model sync script
 cat > "$NETWORK_VOLUME/scripts/sync_remote_models.sh" << 'EOF'
 #!/bin/bash
-# Sync models from S3 global shared storage based on availability
-set -e -u -o pipefail
+# Sync models from S3 based on a JSON manifest file.
 
 # These variables are expected to be set in the environment:
 # NETWORK_VOLUME, AWS_BUCKET_NAME
 
-LOCAL_MODELS_CACHE="$NETWORK_VOLUME/.cache/local-models.json"
-S3_GLOBAL_MODELS_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/global_shared/models"
-MODELS_BASE_DIR="$NETWORK_VOLUME/ComfyUI/models"
-REMOTE_MODELS_LIST_TMP=$(mktemp) # Temporary file for remote model list
+LOCAL_MODELS_MANIFEST="$NETWORK_VOLUME/.cache/local-models.json"
+# The base directory for models is now derived from the manifest itself.
+# This makes the script more flexible.
 
-# Ensure temp file is cleaned up
-trap 'rm -f "$REMOTE_MODELS_LIST_TMP"' EXIT SIGINT SIGTERM
+# Ensure jq is installed
+if ! command -v jq &> /dev/null; then
+    echo "❌ Error: 'jq' command not found. Please install jq to parse the JSON manifest."
+    exit 1
+fi
 
-# Create models directory if it doesn't exist
-mkdir -p "$MODELS_BASE_DIR"
+# Ensure the manifest file exists
+if [ ! -f "$LOCAL_MODELS_MANIFEST" ]; then
+    echo "❌ Error: Model manifest file not found at $LOCAL_MODELS_MANIFEST"
+    exit 1
+fi
 
-list_remote_models() {
-    echo "📋 Listing available models in S3 ($S3_GLOBAL_MODELS_BASE)..."
-    
-    local s3_prefix_in_bucket
-    s3_prefix_in_bucket=$(echo "$S3_GLOBAL_MODELS_BASE" | sed "s|^s3://$AWS_BUCKET_NAME/||")
-    # Ensure it ends with a slash if it's not empty, for proper listing and stripping
-    if [[ -n "$s3_prefix_in_bucket" && "${s3_prefix_in_bucket: -1}" != "/" ]]; then
-        s3_prefix_in_bucket+="/"
-    fi
+sync_from_manifest() {
+    echo "📋 Reading model manifest from: $LOCAL_MODELS_MANIFEST"
 
-    # List objects, extract keys, strip common prefix, filter out "directory" objects
-    aws s3api list-objects-v2 --bucket "$AWS_BUCKET_NAME" --prefix "$s3_prefix_in_bucket" \
-        --query 'Contents[?Size > `0`].[Key]' --output text | \
-        sed "s|^$s3_prefix_in_bucket||" > "$REMOTE_MODELS_LIST_TMP"
-    
-    local remote_count=0
-    if [ -s "$REMOTE_MODELS_LIST_TMP" ]; then # Check if file is not empty
-        remote_count=$(wc -l < "$REMOTE_MODELS_LIST_TMP")
-    fi
-    echo "📊 Found $remote_count models available remotely"
-}
+    local model_count
+    model_count=$(jq '. | length' "$LOCAL_MODELS_MANIFEST")
+    echo "📊 Manifest contains $model_count models to check."
 
-sync_missing_models() {
-    echo "🔄 Syncing missing models from S3..."
-    
-    if [ ! -f "$LOCAL_MODELS_CACHE" ]; then
-        echo "⚠️ Local models cache ($LOCAL_MODELS_CACHE) not found. Consider running model discovery first or use '--all'."
-        echo "If you proceed, this will compare against files on disk, not the cache."
-        # Fallback to syncing all if cache is missing is handled by --all, or could be added here
-    fi
-    
     local synced_count=0
+    local skipped_count=0
     local failed_count=0
-    
-    if [ ! -s "$REMOTE_MODELS_LIST_TMP" ]; then
-        echo "ℹ️ No remote models to process for sync."
-        return
-    fi
+    local not_found_count=0
 
-    while IFS= read -r remote_rel_path; do
-        # Skip empty lines that might result from s3 api/sed if no objects found
-        [ -z "$remote_rel_path" ] && continue
+    # Use jq to iterate over each model object in the JSON array
+    # The 'c' flag is for compact output, and 'r' is for raw string output (no quotes)
+    jq -c '.[]' "$LOCAL_MODELS_MANIFEST" | while IFS= read -r model_json; do
+        # Extract details for each model using jq
+        local model_name s3_locator local_path
+        model_name=$(echo "$model_json" | jq -r '.model_name')
+        s3_locator=$(echo "$model_json" | jq -r '.s3_locator')
+        local_path=$(echo "$model_json" | jq -r '.local_path') # This is the full local path
 
-        local local_path="$MODELS_BASE_DIR/$remote_rel_path"
+        # Skip entries that look like placeholders or are invalid
+        if [ "$model_name" = ".global_shared_info" ] || [ -z "$s3_locator" ] || [ -z "$local_path" ]; then
+            echo "  ⏩ Skipping invalid or placeholder entry: $model_name"
+            continue
+        fi
         
-        # Check if model already exists locally
-        if [ ! -f "$local_path" ]; then
-            echo "  📥 Syncing missing model: $remote_rel_path to $local_path"
+        # Prepend the network volume to get the absolute path
+        local full_local_path="$NETWORK_VOLUME/$local_path"
+
+        if [ -f "$full_local_path" ]; then
+            # echo "  👍 Model already exists, skipping: $model_name"
+            ((skipped_count++))
+        else
+            echo "  📥 Syncing missing model: $model_name"
+            echo "     from: $s3_locator"
+            echo "     to:   $full_local_path"
             
-            # Create directory structure
-            mkdir -p "$(dirname "$local_path")"
+            # Check if the object exists in S3 before trying to download
+            if ! aws s3api head-object --bucket "$(echo "$s3_locator" | cut -d/ -f3)" --key "$(echo "$s3_locator" | cut -d/ -f4-)" &> /dev/null; then
+                 echo "  ❌ S3 object not found: $s3_locator"
+                 ((not_found_count++))
+                 continue
+            fi
             
-            # Download from S3
-            if aws s3 cp "$S3_GLOBAL_MODELS_BASE/$remote_rel_path" "$local_path" --only-show-errors; then
-                echo "  ✅ Successfully synced: $remote_rel_path"
+            # Create the destination directory
+            mkdir -p "$(dirname "$full_local_path")"
+            
+            # Download the file from S3
+            if aws s3 cp "$s3_locator" "$full_local_path" --only-show-errors; then
+                echo "  ✅ Successfully synced: $model_name"
                 ((synced_count++))
             else
-                echo "  ❌ Failed to sync: $remote_rel_path (AWS CLI exit code: $?)"
+                echo "  ❌ Failed to sync: $model_name (AWS CLI exit code: $?)"
                 ((failed_count++))
             fi
         fi
-    done < "$REMOTE_MODELS_LIST_TMP"
-    
-    echo "✅ Sync process completed. Synced $synced_count new models from S3."
+    done
+
+    echo "---"
+    echo "✅ Sync process completed."
+    echo "   - Synced: $synced_count new models."
+    echo "   - Skipped (already exist): $skipped_count models."
     if [ "$failed_count" -gt 0 ]; then
-        echo "⚠️ $failed_count models failed to sync."
+        echo "   - ⚠️ Failed: $failed_count models."
+    fi
+    if [ "$not_found_count" -gt 0 ]; then
+        echo "   - ⚠️ Not Found in S3: $not_found_count models."
     fi
 }
 
-sync_all_models() {
-    echo "🔄 Syncing all available models from S3 (full sync)..."
-    echo "   Source: $S3_GLOBAL_MODELS_BASE/"
-    echo "   Destination: $MODELS_BASE_DIR/"
+sync_all_from_s3() {
+    echo "🔄 Syncing ALL available models from S3 (full sync)..."
+    local s3_global_models_base="s3://$AWS_BUCKET_NAME/pod_sessions/global_shared/models"
+    # Note: The local path from the manifest is ignored here. We sync to a common root.
+    # The original script put everything in ComfyUI/models. Let's make that explicit.
+    local models_base_dir="$NETWORK_VOLUME/ComfyUI/models"
+    mkdir -p "$models_base_dir"
+
+    echo "   Source: $s3_global_models_base/"
+    echo "   Destination: $models_base_dir/"
     
-    # Sync entire models directory
-    if aws s3 sync "$S3_GLOBAL_MODELS_BASE/" "$MODELS_BASE_DIR/" --only-show-errors; then
+    if aws s3 sync "$s3_global_models_base/" "$models_base_dir/" --only-show-errors; then
         echo "✅ Full model sync completed."
     else
         echo "❌ Full model sync failed. Check AWS CLI errors above."
-        # s3 sync doesn't return non-zero for all failures, only-show-errors helps
     fi
 }
 
+
 echo "🌐 Starting remote model sync..."
 
-# Check if we should sync missing models or all models
+# Check if we should sync based on manifest or sync all from S3
 if [ "${1:-}" = "--all" ]; then
-    # For --all, we don't strictly need list_remote_models if sync_all_models just syncs everything.
-    # However, listing can be good for logging.
-    list_remote_models # Populates REMOTE_MODELS_LIST_TMP for info, but sync_all_models doesn't use it
-    sync_all_models
+    sync_all_from_s3
 else
-    list_remote_models # This must run first to populate REMOTE_MODELS_LIST_TMP
-    sync_missing_models
+    sync_from_manifest
 fi
 
-# Temp file is cleaned by trap
 echo "✨ Remote model sync finished."
 EOF
 chmod +x "$NETWORK_VOLUME/scripts/sync_remote_models.sh"
