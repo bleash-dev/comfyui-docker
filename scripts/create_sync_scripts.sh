@@ -97,7 +97,7 @@ find "$NETWORK_VOLUME" -mindepth 1 -maxdepth 1 -type d | while read -r dir_path;
         continue
     fi
     
-    if [[ "$folder_name" =~ ^\. ]] && [[ "$folder_name" != ".comfyui" ]]; then 
+    if [[ "$folder_name" =~ ^\. ]] && [[ "$folder_name" != ".comfyui" ]] && [[ "$folder_name" != ".git" ]]; then 
         echo "    ⏭️ Skipping hidden folder: $folder_name"
         continue
     fi
