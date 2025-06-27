@@ -4,10 +4,10 @@
 echo "🚀 Starting background services..."
 
 # Set default sync intervals (in seconds) if not provided via environment
-export SYNC_INTERVAL_USER_DATA="${SYNC_INTERVAL_USER_DATA:-300}"        # 5 minutes
-export SYNC_INTERVAL_SHARED_DATA="${SYNC_INTERVAL_SHARED_DATA:-600}"     # 10 minutes
-export SYNC_INTERVAL_GLOBAL_MODELS="${SYNC_INTERVAL_GLOBAL_MODELS:-300}" # 5 minutes
-export SYNC_INTERVAL_LOGS="${SYNC_INTERVAL_LOGS:-180}"                   # 3 minutes
+export SYNC_INTERVAL_USER_DATA="${SYNC_INTERVAL_USER_DATA:-60}"        # 5 minutes
+export SYNC_INTERVAL_SHARED_DATA="${SYNC_INTERVAL_SHARED_DATA:-60}"     # 10 minutes
+export SYNC_INTERVAL_GLOBAL_MODELS="${SYNC_INTERVAL_GLOBAL_MODELS:-60}" # 5 minutes
+export SYNC_INTERVAL_LOGS="${SYNC_INTERVAL_LOGS:-60}"                   # 3 minutes
 
 echo "📋 Sync intervals configured:"
 echo "  📄 User data sync: every $((SYNC_INTERVAL_USER_DATA / 60)) minutes"
