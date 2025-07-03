@@ -39,6 +39,40 @@ jobs:
       with:
         registry: public.ecr.aws
 
+    - name: Create ECR repository if it doesn't exist
+      run: |
+        echo "🔍 Checking if ECR repository exists..."
+        echo "Registry alias: ${{ env.PUBLIC_REGISTRY_ALIAS }}"
+        echo "Repository name: ${{ env.IMAGE_NAME }}"
+        echo "Full image path: public.ecr.aws/${{ env.PUBLIC_REGISTRY_ALIAS }}/${{ env.IMAGE_NAME }}"
+        
+        # First, verify we can access ECR
+        echo "🔐 Testing ECR access..."
+        aws ecr-public describe-registries --region us-east-1 || {
+          echo "❌ Cannot access ECR public registries. Check AWS credentials and permissions."
+          exit 1
+        }
+        
+        # Check if repository exists
+        if ! aws ecr-public describe-repositories --repository-names ${{ env.IMAGE_NAME }} --region us-east-1 >/dev/null 2>&1; then
+          echo "📝 Creating ECR Public repository: ${{ env.IMAGE_NAME }}"
+          aws ecr-public create-repository \
+            --repository-name ${{ env.IMAGE_NAME }} \
+            --region us-east-1 \
+            --repository-catalog-data \
+            description="ComfyUI Docker image with S3 sync and model management" \
+            architectures=ARM64,x86-64 \
+            operatingSystems=Linux \
+            usageText="docker run -p 8080:8080 public.ecr.aws/${{ env.PUBLIC_REGISTRY_ALIAS }}/${{ env.IMAGE_NAME }}:latest"
+          
+          echo "✅ Repository created successfully"
+          
+          # Verify the repository was created
+          aws ecr-public describe-repositories --repository-names ${{ env.IMAGE_NAME }} --region us-east-1
+        else
+          echo "✅ ECR repository already exists: ${{ env.IMAGE_NAME }}"
+        fi
+
     - name: Extract Docker metadata
       id: meta
       uses: docker/metadata-action@v5
