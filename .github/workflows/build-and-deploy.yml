@@ -42,9 +42,7 @@ jobs:
     - name: Create ECR repository if it doesn't exist
       run: |
         echo "🔍 Checking if ECR repository exists..."
-        echo "Registry alias: ${{ env.PUBLIC_REGISTRY_ALIAS }}"
         echo "Repository name: ${{ env.IMAGE_NAME }}"
-        echo "Full image path: public.ecr.aws/${{ env.PUBLIC_REGISTRY_ALIAS }}/${{ env.IMAGE_NAME }}"
         
         # First, verify we can access ECR
         echo "🔐 Testing ECR access..."
@@ -58,12 +56,7 @@ jobs:
           echo "📝 Creating ECR Public repository: ${{ env.IMAGE_NAME }}"
           aws ecr-public create-repository \
             --repository-name ${{ env.IMAGE_NAME }} \
-            --region us-east-1 \
-            --repository-catalog-data \
-            description="ComfyUI Docker image with S3 sync and model management" \
-            architectures=ARM64,x86-64 \
-            operatingSystems=Linux \
-            usageText="docker run -p 8080:8080 public.ecr.aws/${{ env.PUBLIC_REGISTRY_ALIAS }}/${{ env.IMAGE_NAME }}:latest"
+            --region us-east-1
           
           echo "✅ Repository created successfully"
           
