@@ -8,44 +8,47 @@ on:
   workflow_dispatch:
 
 env:
-  REGISTRY: ghcr.io
-  # Use organization name instead of repository owner
-  IMAGE_NAME: bleash-dev/comfyui-docker
+  AWS_REGION: us-east-1
+  IMAGE_NAME: comfyui-docker
+  PUBLIC_REGISTRY_ALIAS: viralcommunity/comfyui-docker  # e.g., 'abc123xyz' from public.ecr.aws/<alias>
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     environment: ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+
     permissions:
+      id-token: write
       contents: read
-      packages: write
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    - name: Configure AWS credentials via OIDC
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        role-to-assume: ${{ secrets.GH_ROLE_ARN }}
+        aws-region: ${{ env.AWS_REGION }}
+
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Log in to Container Registry
+    - name: Log in to Amazon ECR Public
       uses: docker/login-action@v3
       with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+        registry: public.ecr.aws
 
-    - name: Extract metadata
+    - name: Extract Docker metadata
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        images: public.ecr.aws/${{ env.PUBLIC_REGISTRY_ALIAS }}/${{ env.IMAGE_NAME }}
         tags: |
-          type=ref,event=branch
-          type=ref,event=pr
-          type=sha,prefix={{branch}}-
+          type=sha,prefix=main-
           type=raw,value=latest,enable={{is_default_branch}}
 
-    - name: Build and push Docker image
+    - name: Build and push Docker image to ECR Public
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -71,45 +74,11 @@ jobs:
         chmod +x ./scripts/update_runpod_template.sh
         ./scripts/update_runpod_template.sh
 
-    - name: Generate deployment info
+    - name: Deployment Summary
       if: github.event_name != 'pull_request'
       run: |
-        echo "## 🚀 Deployment Information" >> $GITHUB_STEP_SUMMARY
+        echo "## 🚀 Docker Image Deployed to Amazon ECR Public" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### Docker Image Built and Pushed Successfully!" >> $GITHUB_STEP_SUMMARY
+        echo "**Image:** \`public.ecr.aws/${{ env.PUBLIC_REGISTRY_ALIAS }}/${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Organization Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 🔒 Private Package - Authentication Required" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Create PAT for RunPod:**" >> $GITHUB_STEP_SUMMARY
-        echo "1. Go to GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)" >> $GITHUB_STEP_SUMMARY
-        echo "2. Generate new token with scope: \`read:packages\`" >> $GITHUB_STEP_SUMMARY
-        echo "3. Copy the token for RunPod authentication" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### RunPod Template Settings:" >> $GITHUB_STEP_SUMMARY
-        echo "- **Container Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **Registry Username:** \`your-github-username\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **Registry Password:** \`your-pat-token\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **Expose HTTP Ports:** \`8080\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **Container Start Command:** \`/start.sh\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **Volume Mount Path:** \`/workspace\` (recommended)" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### Access URLs (when deployed):" >> $GITHUB_STEP_SUMMARY
-        echo "- **ComfyUI:** \`https://your-pod-id-3000.proxy.runpod.net\`" >> $GITHUB_STEP_SUMMARY
-        echo "- **Jupyter Lab:** \`https://your-pod-id-8888.proxy.runpod.net\`" >> $GITHUB_STEP_SUMMARY
-
-        if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-          echo "### 🎯 RunPod Template Auto-Updated!" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Your RunPod template has been automatically updated with the latest Docker image." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Template ID:** \`${{ secrets.RUNPOD_TEMPLATE_ID }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Updated Image:** \`${{ fromJSON(steps.meta.outputs.json).tags[0] }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 🚀 Ready to Deploy!" >> $GITHUB_STEP_SUMMARY
-          echo "1. Go to RunPod → Templates" >> $GITHUB_STEP_SUMMARY
-          echo "2. Find your updated template" >> $GITHUB_STEP_SUMMARY
-          echo "3. Click **Deploy** to start a new pod with the latest image" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-        fi
+        echo "You can use this image in RunPod **without any authentication**." >> $GITHUB_STEP_SUMMARY
