@@ -10,7 +10,7 @@ on:
 env:
   AWS_REGION: us-east-1
   IMAGE_NAME: comfyui-docker
-  PUBLIC_REGISTRY_ALIAS: viralcommunity  # e.g., 'abc123xyz' from public.ecr.aws/<alias>
+  PUBLIC_REGISTRY_ALIAS: p1c2v8t9  # e.g., 'abc123xyz' from public.ecr.aws/<alias>
 
 jobs:
   build-and-push:
@@ -90,16 +90,6 @@ jobs:
           PYTHON_VERSION=3.10
           PYTORCH_VERSION=2.4.0
           COMFYUI_VERSION=master
-
-    - name: Update RunPod Template
-      if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-      env:
-        RUNPOD_API_KEY: ${{ secrets.RUN_POD_TOKEN }}
-        RUNPOD_TEMPLATE_ID: ${{ secrets.THIS_POD_TEMPLATE_ID }}
-        DOCKER_IMAGE_TAG: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
-      run: |
-        chmod +x ./scripts/update_runpod_template.sh
-        ./scripts/update_runpod_template.sh
 
     - name: Deployment Summary
       if: github.event_name != 'pull_request'
