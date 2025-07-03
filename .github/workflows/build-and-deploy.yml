@@ -10,7 +10,7 @@ on:
 env:
   AWS_REGION: us-east-1
   IMAGE_NAME: comfyui-docker
-  PUBLIC_REGISTRY_ALIAS: viralcommunity/comfyui-docker  # e.g., 'abc123xyz' from public.ecr.aws/<alias>
+  PUBLIC_REGISTRY_ALIAS: viralcommunity  # e.g., 'abc123xyz' from public.ecr.aws/<alias>
 
 jobs:
   build-and-push:
