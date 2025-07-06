@@ -21,6 +21,7 @@ COMFYUI_HAS_DATA_TO_SYNC=false
 if [[ -d "$NETWORK_VOLUME/ComfyUI" ]]; then
     echo "📦 Preparing ComfyUI pod-specific data for archival..."
     
+    shopt -s dotglob
     for item_path in "$NETWORK_VOLUME/ComfyUI"/*; do
         item_name=$(basename "$item_path")
         is_excluded=false
