@@ -218,7 +218,7 @@ sync_from_manifest() {
         fi
         
         # Prepend the network volume to get the absolute path
-        local full_local_path="$NETWORK_VOLUME/$local_path"
+        local full_local_path="$NETWORK_VOLUME/ComfyUI/$local_path"
 
         if [ -f "$full_local_path" ]; then
             # echo "  👍 Model already exists, skipping: $model_name"
