@@ -34,6 +34,12 @@ RUN apt-get update && apt-get install -y \
     libxrandr-dev \
     libxinerama-dev \
     libxcursor-dev \
+    libnss3\                                     
+    libatk1.0-0\                                 
+    libatk-bridge2.0-0\                          
+    libatspi2.0-0\                               
+    libxcomposite1\                              
+    libxdamage1\
     libxi-dev \
     libgl1-mesa-dev \
     libglu1-mesa-dev \
