@@ -36,7 +36,8 @@ RUN apt-get update && apt-get install -y \
     libxcursor-dev \
     libnss3\                                     
     libatk1.0-0\                                 
-    libatk-bridge2.0-0\                          
+    libatk-bridge2.0-0 \
+    libcups2 \                  
     libatspi2.0-0\                               
     libxcomposite1\                              
     libxdamage1\
