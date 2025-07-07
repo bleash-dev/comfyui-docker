@@ -223,15 +223,15 @@ else
 fi
 
 # Sync remote models after cache restoration
-echo "🌐 Starting initial remote model sync..."
-if [ -f "$NETWORK_VOLUME/scripts/sync_remote_models.sh" ]; then
-    # Run in background to avoid blocking startup
-    nohup bash "$NETWORK_VOLUME/scripts/sync_remote_models.sh" > "$NETWORK_VOLUME/.initial_model_sync.log" 2>&1 &
-    INITIAL_SYNC_PID=$!
-    echo "📊 Initial model sync started in background (PID: $INITIAL_SYNC_PID)"
-    echo "📝 Check progress: tail -f $NETWORK_VOLUME/.initial_model_sync.log"
-else
-    echo "⚠️ Remote model sync script not found, skipping initial sync"
-fi
+# echo "🌐 Starting initial remote model sync..."
+# if [ -f "$NETWORK_VOLUME/scripts/sync_remote_models.sh" ]; then
+#     # Run in background to avoid blocking startup
+#     nohup bash "$NETWORK_VOLUME/scripts/sync_remote_models.sh" > "$NETWORK_VOLUME/.initial_model_sync.log" 2>&1 &
+#     INITIAL_SYNC_PID=$!
+#     echo "📊 Initial model sync started in background (PID: $INITIAL_SYNC_PID)"
+#     echo "📝 Check progress: tail -f $NETWORK_VOLUME/.initial_model_sync.log"
+# else
+#     echo "⚠️ Remote model sync script not found, skipping initial sync"
+# fi
 
 echo "✅ AWS S3 setup completed successfully! (sync-only mode)"

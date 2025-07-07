@@ -5,6 +5,7 @@ echo "=== ComfyUI Container Startup - $(date) ==="
 echo "🔍 Starting ComfyUI Setup with S3 Integration..."
 
 # Set default Python version and config root
+export 
 export PYTHON_VERSION="${PYTHON_VERSION:-3.10}"
 export PYTHON_CMD="${PYTHON_CMD:-python${PYTHON_VERSION}}"
 export CONFIG_ROOT="${CONFIG_ROOT:-/root}"
