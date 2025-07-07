@@ -61,8 +61,8 @@ mkdir -p "\$(dirname "\$COMFYUI_LOG")"
 
 echo "🏁 Executing: \$PYTHON_CMD main.py --listen 0.0.0.0 --port 8080 --enable-cors-header \"*\""
 
-xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
-PYTORCH_ENABLE_INDUCTOR=0 \$PYTHON_CMD main.py --listen 0.0.0.0 --port 8080 --enable-cors-header "*" \\
+PYTORCH_ENABLE_INDUCTOR=0 xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
+\$PYTHON_CMD main.py --listen 0.0.0.0 --port 8080 --enable-cors-header "*" \\
     > >(tee -a "\$COMFYUI_LOG") \\
     2> >(tee -a "\$COMFYUI_ERROR_LOG" >&2)
 EOF
