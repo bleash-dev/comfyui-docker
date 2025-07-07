@@ -33,6 +33,7 @@ RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
     libxrandr-dev \
     libxinerama-dev \
+    xvfb \
     libxcursor-dev \
     libnss3\                                     
     libatk1.0-0\                                 
