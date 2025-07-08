@@ -129,6 +129,14 @@ declare -A CUSTOM_NODES=(
     ["ComfyUI-Auth-Manager"]="https://github.com/bleash-dev/ComfyUI-Auth-Manager.git"
 )
 
+# Add premium custom nodes if IS_PREMIUM is enabled
+if [ "${IS_PREMIUM,,}" = "true" ]; then
+    echo "🌟 Premium features enabled - adding premium custom nodes..."
+    CUSTOM_NODES["ComfyUI-Copilot"]="https://github.com/gilons/ComfyUI-Copilot.git"
+else
+    echo "📦 Standard installation - premium nodes not included"
+fi
+
 # Change to the custom_nodes directory
 cd "$custom_nodes_dir"
 if [ $? -ne 0 ]; then
