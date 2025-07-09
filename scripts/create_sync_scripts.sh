@@ -328,39 +328,45 @@ chmod +x "$NETWORK_VOLUME/scripts/sync_global_shared_models.sh"
 # ComfyUI assets sync script (input/output directories)
 cat > "$NETWORK_VOLUME/scripts/sync_comfyui_assets.sh" << 'EOF'
 #!/bin/bash
-# Sync ComfyUI input/output directories to S3 (one-way: pod to S3 only)
+# Sync ComfyUI input/output directories to S3 (one-way: pod to S3 only, with deletions)
 
 echo "📁 Syncing ComfyUI assets to S3..."
 S3_ASSETS_BASE="s3://$AWS_BUCKET_NAME/assets/$POD_ID"
 LOCAL_INPUT_DIR="$NETWORK_VOLUME/ComfyUI/input"
 LOCAL_OUTPUT_DIR="$NETWORK_VOLUME/ComfyUI/output"
 
-# Sync input directory
+# Sync input directory (with delete to reflect local deletions)
 if [[ -d "$LOCAL_INPUT_DIR" ]]; then
-    if [[ -n "$(find "$LOCAL_INPUT_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
-        echo "  📤 Syncing input assets to S3..."
-        s3_input_path="$S3_ASSETS_BASE/input/"
-        aws s3 sync "$LOCAL_INPUT_DIR" "$s3_input_path" --only-show-errors || \
-            echo "  ❌ Failed to sync input assets"
-    else
-        echo "  📭 Skipping empty input directory"
-    fi
+    echo "  📤 Syncing input assets to S3 (with deletions)..."
+    s3_input_path="$S3_ASSETS_BASE/input/"
+    aws s3 sync "$LOCAL_INPUT_DIR" "$s3_input_path" --delete --only-show-errors || \
+        echo "  ❌ Failed to sync input assets"
 else
     echo "ℹ️ No input directory found at $LOCAL_INPUT_DIR"
+    # If local directory doesn't exist, optionally delete all S3 content
+    s3_input_path="$S3_ASSETS_BASE/input/"
+    if aws s3 ls "$s3_input_path" >/dev/null 2>&1; then
+        echo "  �️ Local input directory missing, cleaning S3 input directory..."
+        aws s3 rm "$s3_input_path" --recursive --only-show-errors || \
+            echo "  ⚠️ Failed to clean S3 input directory"
+    fi
 fi
 
-# Sync output directory
+# Sync output directory (with delete to reflect local deletions)
 if [[ -d "$LOCAL_OUTPUT_DIR" ]]; then
-    if [[ -n "$(find "$LOCAL_OUTPUT_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
-        echo "  📤 Syncing output assets to S3..."
-        s3_output_path="$S3_ASSETS_BASE/output/"
-        aws s3 sync "$LOCAL_OUTPUT_DIR" "$s3_output_path" --only-show-errors || \
-            echo "  ❌ Failed to sync output assets"
-    else
-        echo "  📭 Skipping empty output directory"
-    fi
+    echo "  📤 Syncing output assets to S3 (with deletions)..."
+    s3_output_path="$S3_ASSETS_BASE/output/"
+    aws s3 sync "$LOCAL_OUTPUT_DIR" "$s3_output_path" --delete --only-show-errors || \
+        echo "  ❌ Failed to sync output assets"
 else
     echo "ℹ️ No output directory found at $LOCAL_OUTPUT_DIR"
+    # If local directory doesn't exist, optionally delete all S3 content
+    s3_output_path="$S3_ASSETS_BASE/output/"
+    if aws s3 ls "$s3_output_path" >/dev/null 2>&1; then
+        echo "  �️ Local output directory missing, cleaning S3 output directory..."
+        aws s3 rm "$s3_output_path" --recursive --only-show-errors || \
+            echo "  ⚠️ Failed to clean S3 output directory"
+    fi
 fi
 
 echo "✅ ComfyUI assets sync completed"
