@@ -21,7 +21,15 @@ mkdir -p "$LOCAL_LOG_DIR"
 [ -f "$NETWORK_VOLUME/.startup.log" ] && cp "$NETWORK_VOLUME/.startup.log" "$LOCAL_LOG_DIR/"
 [ -f "$NETWORK_VOLUME/.pod_tracker.log" ] && cp "$NETWORK_VOLUME/.pod_tracker.log" "$LOCAL_LOG_DIR/"
 [ -f "$NETWORK_VOLUME/ComfyUI/comfyui.log" ] && cp "$NETWORK_VOLUME/ComfyUI/comfyui.log" "$LOCAL_LOG_DIR/"
-[ -f "$NETWORK_VOLUME/.user-script-logs.log" ] && cp "$NETWORK_VOLUME/.user-script-logs.log" "$LOCAL_LOG_DIR/"
+
+# Collect user script logs (always include in every sync batch)
+if [ -f "$NETWORK_VOLUME/.user-script-logs.log" ]; then
+    # Create timestamped copy to preserve history
+    TIMESTAMP=$(date +%H-%M-%S)
+    cp "$NETWORK_VOLUME/.user-script-logs.log" "$LOCAL_LOG_DIR/user-script-logs-$TIMESTAMP.log"
+    # Also include the main file
+    cp "$NETWORK_VOLUME/.user-script-logs.log" "$LOCAL_LOG_DIR/"
+fi
 
 # Collect all sync logs
 [ -f "$NETWORK_VOLUME/.sync_daemon.log" ] && cp "$NETWORK_VOLUME/.sync_daemon.log" "$LOCAL_LOG_DIR/"
