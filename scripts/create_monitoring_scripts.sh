@@ -12,7 +12,7 @@ cat > "$NETWORK_VOLUME/scripts/sync_logs.sh" << 'EOF'
 # Sync logs to S3
 
 LOG_DATE=$(date +%Y-%m-%d)
-S3_LOG_BASE="s3://$AWS_BUCKET_NAME/pod_logs/$POD_USER_NAME/logs/$LOG_DATE"
+S3_LOG_BASE="s3://$AWS_BUCKET_NAME/pod_logs/$POD_ID/logs/$LOG_DATE"
 LOCAL_LOG_DIR="/tmp/log_collection"
 
 mkdir -p "$LOCAL_LOG_DIR"
