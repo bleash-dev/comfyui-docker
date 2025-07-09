@@ -331,7 +331,7 @@ cat > "$NETWORK_VOLUME/scripts/sync_comfyui_assets.sh" << 'EOF'
 # Sync ComfyUI input/output directories to S3 (one-way: pod to S3 only)
 
 echo "📁 Syncing ComfyUI assets to S3..."
-S3_ASSETS_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/assets"
+S3_ASSETS_BASE="s3://$AWS_BUCKET_NAME/assets/$POD_USER_NAME"
 LOCAL_INPUT_DIR="$NETWORK_VOLUME/ComfyUI/input"
 LOCAL_OUTPUT_DIR="$NETWORK_VOLUME/ComfyUI/output"
 
