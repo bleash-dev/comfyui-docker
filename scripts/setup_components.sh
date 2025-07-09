@@ -194,6 +194,43 @@ if [ -s "$CONSOLIDATED_REQUIREMENTS" ]; then
         pip install --no-cache-dir torch==${PYTORCH_VERSION:-2.4.0} torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
     fi
     
+    # Install user-specified PIP packages (after consolidated requirements)
+    if [ -n "${PIP_PACKAGES:-}" ]; then
+        USER_SCRIPT_LOG="$NETWORK_VOLUME/.user-script-logs.log"
+        echo "📦 Installing user-specified PIP packages..." | tee -a "$USER_SCRIPT_LOG"
+        echo "=== PIP PACKAGE INSTALLATION START - $(date) ===" >> "$USER_SCRIPT_LOG"
+        echo "Requested packages: $PIP_PACKAGES" | tee -a "$USER_SCRIPT_LOG"
+        
+        # Convert comma-separated list to array
+        IFS=',' read -ra PIP_ARRAY <<< "$PIP_PACKAGES"
+        
+        # Clean package names (remove spaces)
+        CLEAN_PIP_PACKAGES=()
+        for pkg in "${PIP_ARRAY[@]}"; do
+            cleaned=$(echo "$pkg" | xargs)  # Remove leading/trailing spaces
+            if [ -n "$cleaned" ]; then
+                CLEAN_PIP_PACKAGES+=("$cleaned")
+            fi
+        done
+        
+        if [ ${#CLEAN_PIP_PACKAGES[@]} -gt 0 ]; then
+            echo "Installing PIP packages: ${CLEAN_PIP_PACKAGES[*]}" | tee -a "$USER_SCRIPT_LOG"
+            
+            if pip install --no-cache-dir "${CLEAN_PIP_PACKAGES[@]}" >> "$USER_SCRIPT_LOG" 2>&1; then
+                echo "✅ PIP packages installed successfully: ${CLEAN_PIP_PACKAGES[*]}" | tee -a "$USER_SCRIPT_LOG"
+            else
+                echo "❌ ERROR: Some PIP packages failed to install. Check log for details." | tee -a "$USER_SCRIPT_LOG"
+                echo "⚠️ Continuing with startup despite PIP installation errors..." | tee -a "$USER_SCRIPT_LOG"
+            fi
+        else
+            echo "⚠️ No valid PIP packages found after cleaning" | tee -a "$USER_SCRIPT_LOG"
+        fi
+        echo "=== PIP PACKAGE INSTALLATION END - $(date) ===" >> "$USER_SCRIPT_LOG"
+        echo ""
+    else
+        echo "ℹ️ No user-specified PIP packages to install (PIP_PACKAGES not set)"
+    fi
+    
     # Run custom installation scripts after pip install
     echo "🔧 Running custom installation scripts..."
     

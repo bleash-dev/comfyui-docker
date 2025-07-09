@@ -4,7 +4,7 @@
 echo "🚀 Starting background services..."
 
 # Set default sync intervals (in seconds) if not provided via environment
-export SYNC_INTERVAL_USER_DATA="${SYNC_INTERVAL_USER_DATA:-60}"        # 5 minutes
+export SYNC_INTERVAL_USER_DATA="${SYNC_INTERVAL_USER_DATA:-60}"               # 5 minutes
 export SYNC_INTERVAL_SHARED_DATA="${SYNC_INTERVAL_SHARED_DATA:-60}"     # 10 minutes
 export SYNC_INTERVAL_GLOBAL_MODELS="${SYNC_INTERVAL_GLOBAL_MODELS:-60}" # 5 minutes
 export SYNC_INTERVAL_LOGS="${SYNC_INTERVAL_LOGS:-60}"                   # 3 minutes
@@ -107,10 +107,28 @@ echo "✅ ComfyUI is ready, starting model discovery..."
 "\$NETWORK_VOLUME/scripts/model_discovery.sh"
 EOF
 
+cat > "$NETWORK_VOLUME/scripts/comfyui_assets_sync_daemon_runner.sh" << EOF
+#!/bin/bash
+# ComfyUI assets sync daemon with proper signal handling
+
+handle_assets_sync_signal() {
+    echo "📢 ComfyUI assets sync daemon received signal, stopping..."
+    exit 0
+}
+
+trap handle_assets_sync_signal SIGTERM SIGINT SIGQUIT
+
+while true; do
+    "\$NETWORK_VOLUME/scripts/sync_comfyui_assets.sh" || echo "⚠️ ComfyUI assets sync failed, continuing..."
+    sleep $SYNC_INTERVAL_GLOBAL_MODELS
+done
+EOF
+
 chmod +x "$NETWORK_VOLUME/scripts/sync_daemon_runner.sh"
 chmod +x "$NETWORK_VOLUME/scripts/sync_shared_daemon_runner.sh"
 chmod +x "$NETWORK_VOLUME/scripts/log_sync_daemon_runner.sh"
 chmod +x "$NETWORK_VOLUME/scripts/global_shared_sync_daemon_runner.sh"
+chmod +x "$NETWORK_VOLUME/scripts/comfyui_assets_sync_daemon_runner.sh"
 chmod +x "$NETWORK_VOLUME/scripts/model_discovery_daemon_runner.sh"
 
 # Start sync daemon for periodic data synchronization (pod-specific data)
@@ -142,6 +160,12 @@ nohup bash "$NETWORK_VOLUME/scripts/global_shared_sync_daemon_runner.sh" > "$NET
 GLOBAL_SHARED_SYNC_PID=$!
 echo "global_shared_sync_daemon:$GLOBAL_SHARED_SYNC_PID" >> "$BACKGROUND_PIDS_FILE"
 echo "  🌐 Global shared models sync daemon started (PID: $GLOBAL_SHARED_SYNC_PID)"
+
+# Start ComfyUI assets sync daemon (same interval as global models)
+nohup bash "$NETWORK_VOLUME/scripts/comfyui_assets_sync_daemon_runner.sh" > "$NETWORK_VOLUME/.comfyui_assets_sync_daemon.log" 2>&1 &
+COMFYUI_ASSETS_SYNC_PID=$!
+echo "comfyui_assets_sync_daemon:$COMFYUI_ASSETS_SYNC_PID" >> "$BACKGROUND_PIDS_FILE"
+echo "  📁 ComfyUI assets sync daemon started (PID: $COMFYUI_ASSETS_SYNC_PID)"
 
 # Start model discovery daemon
 nohup bash "$NETWORK_VOLUME/scripts/model_discovery_daemon_runner.sh" > "$NETWORK_VOLUME/.model_discovery.log" 2>&1 &

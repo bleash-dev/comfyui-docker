@@ -11,7 +11,7 @@ cat > "$NETWORK_VOLUME/scripts/sync_user_data.sh" << 'EOF'
 echo "🔄 Syncing user data to S3 (archived)..."
 
 EXCLUDE_SHARED_FOLDERS=("venv" ".comfyui" ".cache") 
-EXCLUDE_COMFYUI_SHARED_FOLDERS=("models" "custom_nodes")
+EXCLUDE_COMFYUI_SHARED_FOLDERS=("models" "custom_nodes" ".browser-sessions")
 
 COMFYUI_POD_SPECIFIC_ARCHIVE_NAME="comfyui_pod_specific_data.tar.gz"
 S3_COMFYUI_POD_SPECIFIC_PATH="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/$COMFYUI_POD_SPECIFIC_ARCHIVE_NAME"
@@ -245,6 +245,7 @@ echo "🔄 Performing final data sync..."
 [ -f "$NETWORK_VOLUME/scripts/sync_user_data.sh" ] && "$NETWORK_VOLUME/scripts/sync_user_data.sh"
 [ -f "$NETWORK_VOLUME/scripts/sync_user_shared_data.sh" ] && "$NETWORK_VOLUME/scripts/sync_user_shared_data.sh"
 [ -f "$NETWORK_VOLUME/scripts/sync_global_shared_models.sh" ] && "$NETWORK_VOLUME/scripts/sync_global_shared_models.sh"
+[ -f "$NETWORK_VOLUME/scripts/sync_comfyui_assets.sh" ] && "$NETWORK_VOLUME/scripts/sync_comfyui_assets.sh"
 
 pkill -f "aws" 2>/dev/null || true
 echo "✅ Graceful shutdown completed"
@@ -279,30 +280,92 @@ chmod +x "$NETWORK_VOLUME/scripts/signal_handler.sh"
 # Global shared models sync script (sync_global_shared_models.sh - from previous correct version)
 cat > "$NETWORK_VOLUME/scripts/sync_global_shared_models.sh" << 'EOF'
 #!/bin/bash
-# Sync global shared models to S3 (without delete to preserve shared resources)
+# Sync global shared models and browser session to S3 (without delete to preserve shared resources)
 
-echo "🌐 Syncing global shared models to S3..."
+echo "🌐 Syncing global shared resources to S3..."
 S3_GLOBAL_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/global_shared/models"
+S3_BROWSER_SESSIONS_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/global_shared/.browser-session"
 LOCAL_MODELS_BASE="$NETWORK_VOLUME/ComfyUI/models"
+LOCAL_BROWSER_SESSIONS_BASE="$NETWORK_VOLUME/ComfyUI/.browser-session"
 
+# Sync models
 if [[ ! -d "$LOCAL_MODELS_BASE" ]]; then
-    echo "⏭️ No models directory found at $LOCAL_MODELS_BASE"; exit 0
+    echo "⏭️ No models directory found at $LOCAL_MODELS_BASE"
+else
+    echo "📁 Syncing global shared model folders..."
+    for model_dir in "$LOCAL_MODELS_BASE"/*; do
+        if [[ -d "$model_dir" ]]; then
+            folder_name=$(basename "$model_dir")
+            if [[ -n "$(find "$model_dir" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+                echo "  📤 Syncing global models/$folder_name to S3..."
+                s3_folder_path="$S3_GLOBAL_SHARED_BASE/$folder_name/"
+                aws s3 sync "$model_dir" "$s3_folder_path" --only-show-errors || \
+                    echo "  ❌ Failed to sync global models/$folder_name"
+            else echo "  📭 Skipping empty models folder: $folder_name"; fi
+        fi
+    done
 fi
-echo "📁 Syncing global shared model folders..."
-for model_dir in "$LOCAL_MODELS_BASE"/*; do
-    if [[ -d "$model_dir" ]]; then
-        folder_name=$(basename "$model_dir")
-        if [[ -n "$(find "$model_dir" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
-            echo "  📤 Syncing global models/$folder_name to S3..."
-            s3_folder_path="$S3_GLOBAL_SHARED_BASE/$folder_name/"
-            aws s3 sync "$model_dir" "$s3_folder_path" --only-show-errors || \
-                echo "  ❌ Failed to sync global models/$folder_name"
-        else echo "  📭 Skipping empty models folder: $folder_name"; fi
+
+# Sync browser sessions
+if [[ -d "$LOCAL_BROWSER_SESSIONS_BASE" ]]; then
+    if [[ -n "$(find "$LOCAL_BROWSER_SESSIONS_BASE" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+        echo "🌐 Syncing global shared browser sessions to S3..."
+        echo "  📤 Syncing browser sessions to $S3_BROWSER_SESSIONS_BASE/"
+        aws s3 sync "$LOCAL_BROWSER_SESSIONS_BASE" "$S3_BROWSER_SESSIONS_BASE/" --only-show-errors || \
+            echo "  ❌ Failed to sync global browser sessions"
+    else
+        echo "  📭 Skipping empty browser sessions directory"
     fi
-done
-echo "✅ Global shared models sync completed"
+else
+    echo "ℹ️ No browser sessions directory found at $LOCAL_BROWSER_SESSIONS_BASE"
+fi
+
+echo "✅ Global shared resources sync completed"
 EOF
 
 chmod +x "$NETWORK_VOLUME/scripts/sync_global_shared_models.sh"
+
+# ComfyUI assets sync script (input/output directories)
+cat > "$NETWORK_VOLUME/scripts/sync_comfyui_assets.sh" << 'EOF'
+#!/bin/bash
+# Sync ComfyUI input/output directories to S3 (one-way: pod to S3 only)
+
+echo "📁 Syncing ComfyUI assets to S3..."
+S3_ASSETS_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/assets"
+LOCAL_INPUT_DIR="$NETWORK_VOLUME/ComfyUI/input"
+LOCAL_OUTPUT_DIR="$NETWORK_VOLUME/ComfyUI/output"
+
+# Sync input directory
+if [[ -d "$LOCAL_INPUT_DIR" ]]; then
+    if [[ -n "$(find "$LOCAL_INPUT_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+        echo "  📤 Syncing input assets to S3..."
+        s3_input_path="$S3_ASSETS_BASE/input/"
+        aws s3 sync "$LOCAL_INPUT_DIR" "$s3_input_path" --only-show-errors || \
+            echo "  ❌ Failed to sync input assets"
+    else
+        echo "  📭 Skipping empty input directory"
+    fi
+else
+    echo "ℹ️ No input directory found at $LOCAL_INPUT_DIR"
+fi
+
+# Sync output directory
+if [[ -d "$LOCAL_OUTPUT_DIR" ]]; then
+    if [[ -n "$(find "$LOCAL_OUTPUT_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+        echo "  📤 Syncing output assets to S3..."
+        s3_output_path="$S3_ASSETS_BASE/output/"
+        aws s3 sync "$LOCAL_OUTPUT_DIR" "$s3_output_path" --only-show-errors || \
+            echo "  ❌ Failed to sync output assets"
+    else
+        echo "  📭 Skipping empty output directory"
+    fi
+else
+    echo "ℹ️ No output directory found at $LOCAL_OUTPUT_DIR"
+fi
+
+echo "✅ ComfyUI assets sync completed"
+EOF
+
+chmod +x "$NETWORK_VOLUME/scripts/sync_comfyui_assets.sh"
 
 echo "✅ Sync scripts created"

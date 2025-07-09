@@ -16,6 +16,58 @@ echo "Config Root: $CONFIG_ROOT"
 export SCRIPT_DIR="${SCRIPT_DIR:-/scripts}"
 echo "📁 Using script directory: $SCRIPT_DIR"
 
+# Setup user script logging
+USER_SCRIPT_LOG="$NETWORK_VOLUME/.user-script-logs.log"
+mkdir -p "$(dirname "$USER_SCRIPT_LOG")"
+touch "$USER_SCRIPT_LOG"
+chmod 664 "$USER_SCRIPT_LOG" 2>/dev/null || true
+
+# Install user-specified APT packages early (before everything else)
+if [ -n "${APT_PACKAGES:-}" ]; then
+    echo "📦 Installing user-specified APT packages..." | tee -a "$USER_SCRIPT_LOG"
+    echo "=== APT PACKAGE INSTALLATION START - $(date) ===" >> "$USER_SCRIPT_LOG"
+    echo "Requested packages: $APT_PACKAGES" | tee -a "$USER_SCRIPT_LOG"
+    
+    # Convert comma-separated list to array
+    IFS=',' read -ra APT_ARRAY <<< "$APT_PACKAGES"
+    
+    # Clean package names (remove spaces)
+    CLEAN_APT_PACKAGES=()
+    for pkg in "${APT_ARRAY[@]}"; do
+        cleaned=$(echo "$pkg" | xargs)  # Remove leading/trailing spaces
+        if [ -n "$cleaned" ]; then
+            CLEAN_APT_PACKAGES+=("$cleaned")
+        fi
+    done
+    
+    if [ ${#CLEAN_APT_PACKAGES[@]} -gt 0 ]; then
+        echo "Installing: ${CLEAN_APT_PACKAGES[*]}" | tee -a "$USER_SCRIPT_LOG"
+        
+        # Update package list
+        echo "Updating APT package list..." | tee -a "$USER_SCRIPT_LOG"
+        if apt-get update -qq >> "$USER_SCRIPT_LOG" 2>&1; then
+            echo "✅ APT package list updated successfully" | tee -a "$USER_SCRIPT_LOG"
+        else
+            echo "⚠️ WARNING: APT package list update failed, proceeding anyway" | tee -a "$USER_SCRIPT_LOG"
+        fi
+        
+        # Install packages
+        echo "Installing APT packages..." | tee -a "$USER_SCRIPT_LOG"
+        if apt-get install -y --no-install-recommends "${CLEAN_APT_PACKAGES[@]}" >> "$USER_SCRIPT_LOG" 2>&1; then
+            echo "✅ APT packages installed successfully: ${CLEAN_APT_PACKAGES[*]}" | tee -a "$USER_SCRIPT_LOG"
+        else
+            echo "❌ ERROR: Some APT packages failed to install. Check log for details." | tee -a "$USER_SCRIPT_LOG"
+            echo "⚠️ Continuing with startup despite APT installation errors..." | tee -a "$USER_SCRIPT_LOG"
+        fi
+    else
+        echo "⚠️ No valid APT packages found after cleaning" | tee -a "$USER_SCRIPT_LOG"
+    fi
+    echo "=== APT PACKAGE INSTALLATION END - $(date) ===" >> "$USER_SCRIPT_LOG"
+    echo ""
+else
+    echo "ℹ️ No user-specified APT packages to install (APT_PACKAGES not set)" | tee -a "$USER_SCRIPT_LOG"
+fi
+
 # Detect network volume location EARLY - only if NETWORK_VOLUME is not already set
 if [ -z "$NETWORK_VOLUME" ]; then
     echo "🔧 Detecting network volume location..."

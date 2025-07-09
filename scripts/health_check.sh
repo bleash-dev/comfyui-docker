@@ -51,6 +51,36 @@ else
     echo "⚠️ S3 connectivity issues detected"
 fi
 
+# Check global shared directories
+if [ -d "$NETWORK_VOLUME/ComfyUI/models" ]; then
+    model_count=$(find "$NETWORK_VOLUME/ComfyUI/models" -type f | wc -l)
+    echo "✅ Global models directory available ($model_count files)"
+else
+    echo "⚠️ Global models directory not found"
+fi
+
+if [ -d "$NETWORK_VOLUME/ComfyUI/.browser-sessions" ]; then
+    session_count=$(find "$NETWORK_VOLUME/ComfyUI/.browser-sessions" -type f | wc -l)
+    echo "✅ Global browser sessions directory available ($session_count files)"
+else
+    echo "⚠️ Global browser sessions directory not found"
+fi
+
+# Check ComfyUI input/output directories
+if [ -d "$NETWORK_VOLUME/ComfyUI/input" ]; then
+    input_count=$(find "$NETWORK_VOLUME/ComfyUI/input" -type f | wc -l)
+    echo "✅ ComfyUI input directory available ($input_count files)"
+else
+    echo "ℹ️ ComfyUI input directory not found (will be created when needed)"
+fi
+
+if [ -d "$NETWORK_VOLUME/ComfyUI/output" ]; then
+    output_count=$(find "$NETWORK_VOLUME/ComfyUI/output" -type f | wc -l)
+    echo "✅ ComfyUI output directory available ($output_count files)"
+else
+    echo "ℹ️ ComfyUI output directory not found (will be created when needed)"
+fi
+
 # Check last sync time
 if [ -f "$NETWORK_VOLUME/.sync_daemon.log" ]; then
     last_sync=$(tail -5 "$NETWORK_VOLUME/.sync_daemon.log" | grep "User data sync completed" | tail -1)

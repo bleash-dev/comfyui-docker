@@ -204,6 +204,37 @@ cat > "$models_dir/.global_shared_info" << EOF
 EOF
 echo "✅ Created global shared directory structure: $models_dir"
 
+# Setup global shared browser session directory and sync from S3
+echo "🌐 Setting up global shared browser session..."
+browser_sessions_dir="$NETWORK_VOLUME/ComfyUI/.browser-session"
+s3_browser_sessions_base="s3://$AWS_BUCKET_NAME/pod_sessions/global_shared/.browser-session"
+
+mkdir -p "$browser_sessions_dir"
+
+echo "📥 Syncing global shared browser session from S3..."
+if aws s3 ls "$s3_browser_sessions_base/" >/dev/null 2>&1; then
+    echo "  📥 Downloading browser session from $s3_browser_sessions_base/"
+    if aws s3 sync "$s3_browser_sessions_base/" "$browser_sessions_dir/" --only-show-errors; then
+        echo "  ✅ Browser session synced successfully"
+    else
+        echo "  ⚠️ WARNING: Failed to sync browser session from S3, starting with empty directory"
+    fi
+else
+    echo "  ℹ️ No existing browser sessions found in S3, starting with empty directory"
+fi
+
+# Create metadata file for browser sessions
+cat > "$browser_sessions_dir/.global_shared_info" << EOF
+{
+    "type": "global_shared_browser_session",
+    "s3_path": "$s3_browser_sessions_base/",
+    "sync_strategy": "periodic",
+    "last_synced": "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)",
+    "note": "Global shared browser session, synced periodically with models"
+}
+EOF
+echo "✅ Created global shared browser session directory: $browser_sessions_dir"
+
 # Sync user-specific data from S3
 USER_SYNC_SCRIPT_PATH=""
 if [ -f "$NETWORK_VOLUME/scripts/sync_user_data_from_s3.sh" ]; then
