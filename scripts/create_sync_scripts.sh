@@ -8,7 +8,16 @@ cat > "$NETWORK_VOLUME/scripts/sync_user_data.sh" << 'EOF'
 #!/bin/bash
 # Sync user-specific data to S3 by zipping and uploading archives
 
-echo "🔄 Syncing user data to S3 (archived)..."
+# Source the sync lock manager, API client, and model sync integration for progress notifications
+source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
+source "$NETWORK_VOLUME/scripts/api_client.sh"
+source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
+
+sync_user_data_internal() {
+    echo "🔄 Syncing user data to S3 (archived)..."
+    
+    # Send initial progress notification
+    notify_sync_progress "user_data" "PROGRESS" 0
 
 EXCLUDE_SHARED_FOLDERS=("venv" ".comfyui" ".cache") 
 EXCLUDE_COMFYUI_SHARED_FOLDERS=("models" "custom_nodes" ".browser-sessions")
@@ -20,6 +29,7 @@ COMFYUI_HAS_DATA_TO_SYNC=false
 
 if [[ -d "$NETWORK_VOLUME/ComfyUI" ]]; then
     echo "📦 Preparing ComfyUI pod-specific data for archival..."
+    notify_sync_progress "user_data" "PROGRESS" 10
     
     shopt -s dotglob
     for item_path in "$NETWORK_VOLUME/ComfyUI"/*; do
@@ -52,14 +62,22 @@ if [[ -d "$NETWORK_VOLUME/ComfyUI" ]]; then
         fi
     done
     
+    notify_sync_progress "user_data" "PROGRESS" 30
+    
     if [[ "$COMFYUI_HAS_DATA_TO_SYNC" == "true" ]]; then
         echo "  🗜️ Compressing ComfyUI pod-specific data..."
         TEMP_ARCHIVE_PATH="/tmp/$COMFYUI_POD_SPECIFIC_ARCHIVE_NAME"
         (cd "$TEMP_COMFYUI_STAGING_DIR" && tar -czf "$TEMP_ARCHIVE_PATH" .)
         
+        notify_sync_progress "user_data" "PROGRESS" 40
+        
         echo "  📤 Uploading $COMFYUI_POD_SPECIFIC_ARCHIVE_NAME to S3..."
-        aws s3 cp "$TEMP_ARCHIVE_PATH" "$S3_COMFYUI_POD_SPECIFIC_PATH" --only-show-errors || \
+        # Use the enhanced upload function with progress tracking
+        if upload_file_with_progress "$TEMP_ARCHIVE_PATH" "$S3_COMFYUI_POD_SPECIFIC_PATH" "user_data" 1 2; then
+            echo "  ✅ Successfully uploaded $COMFYUI_POD_SPECIFIC_ARCHIVE_NAME"
+        else
             echo "  ❌ Failed to sync $COMFYUI_POD_SPECIFIC_ARCHIVE_NAME"
+        fi
         rm -f "$TEMP_ARCHIVE_PATH"
     else
         echo "  ℹ️ No ComfyUI pod-specific data found to sync."
@@ -70,6 +88,7 @@ fi
 rm -rf "$TEMP_COMFYUI_STAGING_DIR"
 echo "--- ComfyUI pod-specific sync finished ---"
 
+notify_sync_progress "user_data" "PROGRESS" 50
 
 OTHER_POD_SPECIFIC_ARCHIVE_NAME="other_pod_specific_data.tar.gz"
 S3_OTHER_POD_SPECIFIC_PATH="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/$OTHER_POD_SPECIFIC_ARCHIVE_NAME"
@@ -117,9 +136,15 @@ if [[ "$OTHER_HAS_DATA_TO_SYNC" == "true" ]]; then
     TEMP_ARCHIVE_PATH="/tmp/$OTHER_POD_SPECIFIC_ARCHIVE_NAME"
     (cd "$TEMP_OTHER_STAGING_DIR" && tar -czf "$TEMP_ARCHIVE_PATH" .)
     
+    notify_sync_progress "user_data" "PROGRESS" 80
+    
     echo "  📤 Uploading $OTHER_POD_SPECIFIC_ARCHIVE_NAME to S3..."
-    aws s3 cp "$TEMP_ARCHIVE_PATH" "$S3_OTHER_POD_SPECIFIC_PATH" --only-show-errors || \
+    # Use the enhanced upload function with progress tracking
+    if upload_file_with_progress "$TEMP_ARCHIVE_PATH" "$S3_OTHER_POD_SPECIFIC_PATH" "user_data" 2 2; then
+        echo "  ✅ Successfully uploaded $OTHER_POD_SPECIFIC_ARCHIVE_NAME"
+    else
         echo "  ❌ Failed to sync $OTHER_POD_SPECIFIC_ARCHIVE_NAME"
+    fi
     rm -f "$TEMP_ARCHIVE_PATH"
 else
     echo "  ℹ️ No other pod-specific data found to sync."
@@ -127,7 +152,12 @@ fi
 rm -rf "$TEMP_OTHER_STAGING_DIR"
 echo "--- Other pod-specific sync finished ---"
 
+notify_sync_progress "user_data" "DONE" 100
 echo "✅ User data archive sync completed"
+}
+
+# Execute sync with lock management
+execute_with_sync_lock "user_data" "sync_user_data_internal"
 EOF
 
 chmod +x "$NETWORK_VOLUME/scripts/sync_user_data.sh"
@@ -138,7 +168,17 @@ cat > "$NETWORK_VOLUME/scripts/sync_user_shared_data.sh" << 'EOF'
 # Sync user-shared data to S3 (data that persists across different pods for the same user)
 # This script will zip each specified shared folder individually.
 
-echo "🔄 Syncing user-shared data to S3 (archived)..."
+# Source the sync lock manager, API client, and model sync integration for progress notifications
+source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
+source "$NETWORK_VOLUME/scripts/api_client.sh"
+source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
+
+sync_user_shared_data_internal() {
+    echo "🔄 Syncing user-shared data to S3 (archived)..."
+    
+    # Send initial progress notification and ensure tools are available
+    notify_sync_progress "user_shared" "PROGRESS" 0
+    ensure_progress_tools
 
 S3_USER_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/shared"
 S3_USER_COMFYUI_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/ComfyUI/shared"
@@ -146,7 +186,11 @@ S3_USER_COMFYUI_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/C
 USER_SHARED_FOLDERS_TO_ARCHIVE=("venv" ".comfyui" ".cache")
 COMFYUI_USER_SHARED_FOLDERS_TO_ARCHIVE=("custom_nodes") 
 
-echo "📦 Syncing user-shared folder archives..."
+# Calculate total folders to process for progress tracking
+total_folders=$((${#USER_SHARED_FOLDERS_TO_ARCHIVE[@]} + ${#COMFYUI_USER_SHARED_FOLDERS_TO_ARCHIVE[@]}))
+processed_folders=0
+
+echo "📦 Syncing user-shared folder archives ($total_folders folders total)..."
 for folder_name in "${USER_SHARED_FOLDERS_TO_ARCHIVE[@]}"; do
     local_folder_path="$NETWORK_VOLUME/$folder_name"
     # Ensure archive_name is filesystem-safe, especially for ".comfyui" -> "_comfyui.tar.gz" and ".cache" -> "_cache.tar.gz"
@@ -168,8 +212,12 @@ for folder_name in "${USER_SHARED_FOLDERS_TO_ARCHIVE[@]}"; do
             tar -czf "$temp_archive_path" -C "$NETWORK_VOLUME" "$folder_name" # folder_name here is correct (e.g. ".comfyui")
             
             echo "    📤 Uploading $archive_name to $s3_archive_destination..."
-            aws s3 cp "$temp_archive_path" "$s3_archive_destination" --only-show-errors || \
+            # Use enhanced upload with progress tracking
+            if upload_file_with_progress "$temp_archive_path" "$s3_archive_destination" "user_shared" $((processed_folders + 1)) "$total_folders"; then
+                echo "    ✅ Successfully uploaded user-shared/$archive_name"
+            else
                 echo "    ❌ Failed to sync user-shared/$archive_name"
+            fi
             rm -f "$temp_archive_path"
         else
             echo "    📭 Skipping empty user-shared folder: $folder_name"
@@ -177,6 +225,12 @@ for folder_name in "${USER_SHARED_FOLDERS_TO_ARCHIVE[@]}"; do
     else
         echo "    ⏭️ Skipping non-existent user-shared folder: $folder_name"
     fi
+    
+    processed_folders=$((processed_folders + 1))
+    
+    # Update progress based on completed folders
+    local progress=$((processed_folders * 50 / total_folders))
+    notify_sync_progress "user_shared" "PROGRESS" "$progress"
 done
 
 echo "📦 Syncing ComfyUI user-shared folder archives..."
@@ -194,8 +248,12 @@ for folder_name in "${COMFYUI_USER_SHARED_FOLDERS_TO_ARCHIVE[@]}"; do
             tar -czf "$temp_archive_path" -C "$NETWORK_VOLUME/ComfyUI" "$folder_name"
             
             echo "    📤 Uploading $archive_name to $s3_archive_destination..."
-            aws s3 cp "$temp_archive_path" "$s3_archive_destination" --only-show-errors || \
+            # Use enhanced upload with progress tracking
+            if upload_file_with_progress "$temp_archive_path" "$s3_archive_destination" "user_shared" $((processed_folders + 1)) "$total_folders"; then
+                echo "    ✅ Successfully uploaded ComfyUI-user-shared/$archive_name"
+            else
                 echo "    ❌ Failed to sync ComfyUI-user-shared/$archive_name"
+            fi
             rm -f "$temp_archive_path"
         else
             echo "    📭 Skipping empty ComfyUI-user-shared folder: $folder_name"
@@ -203,9 +261,20 @@ for folder_name in "${COMFYUI_USER_SHARED_FOLDERS_TO_ARCHIVE[@]}"; do
     else
         echo "    ⏭️ Skipping non-existent ComfyUI-user-shared folder: $folder_name"
     fi
+    
+    processed_folders=$((processed_folders + 1))
+    
+    # Update progress - ComfyUI folders are the second half (50-100%)
+    local progress=$((50 + (processed_folders - ${#USER_SHARED_FOLDERS_TO_ARCHIVE[@]}) * 50 / ${#COMFYUI_USER_SHARED_FOLDERS_TO_ARCHIVE[@]}))
+    notify_sync_progress "user_shared" "PROGRESS" "$progress"
 done
 
+notify_sync_progress "user_shared" "DONE" 100
 echo "✅ User-shared data archive sync completed"
+}
+
+# Execute sync with lock management
+execute_with_sync_lock "user_shared" "sync_user_shared_data_internal"
 EOF
 
 chmod +x "$NETWORK_VOLUME/scripts/sync_user_shared_data.sh"
@@ -216,6 +285,11 @@ cat > "$NETWORK_VOLUME/scripts/graceful_shutdown.sh" << 'EOF'
 # Graceful shutdown with data sync (no mounting)
 
 echo "🛑 Graceful shutdown initiated at $(date)"
+
+# Source sync lock manager for cleanup
+if [ -f "$NETWORK_VOLUME/scripts/sync_lock_manager.sh" ]; then
+    source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
+fi
 
 if [ -f "/tmp/pod_tracker.pid" ]; then
     POD_TRACKER_PID=$(cat /tmp/pod_tracker.pid)
@@ -241,11 +315,20 @@ else
 fi
 
 echo "🔄 Performing final data sync..."
+# Use shorter timeout for final sync to avoid hanging shutdown
+export SYNC_LOCK_TIMEOUT=60  # 1 minute timeout for shutdown syncs
 [ -f "$NETWORK_VOLUME/scripts/sync_logs.sh" ] && "$NETWORK_VOLUME/scripts/sync_logs.sh"
 [ -f "$NETWORK_VOLUME/scripts/sync_user_data.sh" ] && "$NETWORK_VOLUME/scripts/sync_user_data.sh"
 [ -f "$NETWORK_VOLUME/scripts/sync_user_shared_data.sh" ] && "$NETWORK_VOLUME/scripts/sync_user_shared_data.sh"
 [ -f "$NETWORK_VOLUME/scripts/sync_global_shared_models.sh" ] && "$NETWORK_VOLUME/scripts/sync_global_shared_models.sh"
 [ -f "$NETWORK_VOLUME/scripts/sync_comfyui_assets.sh" ] && "$NETWORK_VOLUME/scripts/sync_comfyui_assets.sh"
+[ -f "$NETWORK_VOLUME/scripts/sync_pod_metadata.sh" ] && "$NETWORK_VOLUME/scripts/sync_pod_metadata.sh"
+
+# Force cleanup any remaining sync locks
+if [ -d "$NETWORK_VOLUME/.sync_locks" ]; then
+    echo "🧹 Cleaning up any remaining sync locks..."
+    rm -rf "$NETWORK_VOLUME/.sync_locks"
+fi
 
 pkill -f "aws" 2>/dev/null || true
 echo "✅ Graceful shutdown completed"
@@ -277,50 +360,64 @@ EOF
 
 chmod +x "$NETWORK_VOLUME/scripts/signal_handler.sh"
 
-# Global shared models sync script (sync_global_shared_models.sh - from previous correct version)
+# Global shared models sync script (sync_global_shared_models.sh - with model sync integration)
 cat > "$NETWORK_VOLUME/scripts/sync_global_shared_models.sh" << 'EOF'
 #!/bin/bash
-# Sync global shared models and browser session to S3 (without delete to preserve shared resources)
+# Sync global shared models and browser session to S3 with API integration and progress reporting
 
-echo "🌐 Syncing global shared resources to S3..."
-S3_GLOBAL_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/global_shared/models"
-S3_BROWSER_SESSIONS_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/global_shared/.browser-session"
-LOCAL_MODELS_BASE="$NETWORK_VOLUME/ComfyUI/models"
-LOCAL_BROWSER_SESSIONS_BASE="$NETWORK_VOLUME/ComfyUI/.browser-session"
+# Source the sync lock manager and model sync integration
+source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
+source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
 
-# Sync models
-if [[ ! -d "$LOCAL_MODELS_BASE" ]]; then
-    echo "⏭️ No models directory found at $LOCAL_MODELS_BASE"
-else
-    echo "📁 Syncing global shared model folders..."
-    for model_dir in "$LOCAL_MODELS_BASE"/*; do
-        if [[ -d "$model_dir" ]]; then
-            folder_name=$(basename "$model_dir")
-            if [[ -n "$(find "$model_dir" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
-                echo "  📤 Syncing global models/$folder_name to S3..."
-                s3_folder_path="$S3_GLOBAL_SHARED_BASE/$folder_name/"
-                aws s3 sync "$model_dir" "$s3_folder_path" --only-show-errors || \
-                    echo "  ❌ Failed to sync global models/$folder_name"
-            else echo "  📭 Skipping empty models folder: $folder_name"; fi
-        fi
-    done
-fi
+sync_global_shared_models_internal() {
+    echo "🌐 Syncing global shared resources to S3..."
+    
+    S3_GLOBAL_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/global_shared/models"
+    S3_BROWSER_SESSIONS_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/global_shared/.browser-session"
+    LOCAL_MODELS_BASE="$NETWORK_VOLUME/ComfyUI/models"
+    LOCAL_BROWSER_SESSIONS_BASE="$NETWORK_VOLUME/ComfyUI/.browser-session"
 
-# Sync browser sessions
-if [[ -d "$LOCAL_BROWSER_SESSIONS_BASE" ]]; then
-    if [[ -n "$(find "$LOCAL_BROWSER_SESSIONS_BASE" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
-        echo "🌐 Syncing global shared browser sessions to S3..."
-        echo "  📤 Syncing browser sessions to $S3_BROWSER_SESSIONS_BASE/"
-        aws s3 sync "$LOCAL_BROWSER_SESSIONS_BASE" "$S3_BROWSER_SESSIONS_BASE/" --only-show-errors || \
-            echo "  ❌ Failed to sync global browser sessions"
+    # Send initial progress notification
+    notify_model_sync_progress "global_shared" "PROGRESS" 0
+
+    # Sync models with API integration using batch processing
+    if [[ ! -d "$LOCAL_MODELS_BASE" ]]; then
+        echo "⏭️ No models directory found at $LOCAL_MODELS_BASE"
+        notify_model_sync_progress "global_shared" "PROGRESS" 80
     else
-        echo "  📭 Skipping empty browser sessions directory"
+        echo "📁 Processing global shared models with API integration..."
+        
+        # Use batch processing for models - this handles API checks, config updates, and progress
+        if batch_process_models "$LOCAL_MODELS_BASE" "$S3_GLOBAL_SHARED_BASE" "global_shared"; then
+            echo "✅ Model batch processing and sync completed successfully"
+        else
+            echo "⚠️ Model batch processing completed with some errors"
+        fi
+        
+        notify_model_sync_progress "global_shared" "PROGRESS" 80
     fi
-else
-    echo "ℹ️ No browser sessions directory found at $LOCAL_BROWSER_SESSIONS_BASE"
-fi
 
-echo "✅ Global shared resources sync completed"
+    # Sync browser sessions (non-model data)
+    if [[ -d "$LOCAL_BROWSER_SESSIONS_BASE" ]]; then
+        if [[ -n "$(find "$LOCAL_BROWSER_SESSIONS_BASE" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+            echo "🌐 Syncing global shared browser sessions to S3..."
+            echo "  📤 Syncing browser sessions to $S3_BROWSER_SESSIONS_BASE/"
+            aws s3 sync "$LOCAL_BROWSER_SESSIONS_BASE" "$S3_BROWSER_SESSIONS_BASE/" --only-show-errors || \
+                echo "  ❌ Failed to sync global browser sessions"
+        else
+            echo "  📭 Skipping empty browser sessions directory"
+        fi
+    else
+        echo "ℹ️ No browser sessions directory found at $LOCAL_BROWSER_SESSIONS_BASE"
+    fi
+
+    # Send completion notification
+    notify_model_sync_progress "global_shared" "DONE" 100
+    echo "✅ Global shared resources sync completed"
+}
+
+# Execute sync with lock management
+execute_with_sync_lock "global_shared" "sync_global_shared_models_internal"
 EOF
 
 chmod +x "$NETWORK_VOLUME/scripts/sync_global_shared_models.sh"
@@ -330,7 +427,17 @@ cat > "$NETWORK_VOLUME/scripts/sync_comfyui_assets.sh" << 'EOF'
 #!/bin/bash
 # Sync ComfyUI input/output directories to S3 (one-way: pod to S3 only, with deletions)
 
-echo "📁 Syncing ComfyUI assets to S3..."
+# Source the sync lock manager, API client, and model sync integration for progress notifications
+source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
+source "$NETWORK_VOLUME/scripts/api_client.sh"
+source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
+
+sync_comfyui_assets_internal() {
+    echo "📁 Syncing ComfyUI assets to S3..."
+    
+    # Send initial progress notification and ensure tools are available
+    notify_sync_progress "user_assets" "PROGRESS" 0
+    ensure_progress_tools
 S3_ASSETS_BASE="s3://$AWS_BUCKET_NAME/assets/$POD_ID"
 LOCAL_INPUT_DIR="$NETWORK_VOLUME/ComfyUI/input"
 LOCAL_OUTPUT_DIR="$NETWORK_VOLUME/ComfyUI/output"
@@ -338,40 +445,135 @@ LOCAL_OUTPUT_DIR="$NETWORK_VOLUME/ComfyUI/output"
 # Sync input directory (with delete to reflect local deletions)
 if [[ -d "$LOCAL_INPUT_DIR" ]]; then
     echo "  📤 Syncing input assets to S3 (with deletions)..."
+    notify_sync_progress "user_assets" "PROGRESS" 25
     s3_input_path="$S3_ASSETS_BASE/input/"
-    aws s3 sync "$LOCAL_INPUT_DIR" "$s3_input_path" --delete --only-show-errors || \
+    
+    # Use enhanced directory sync with progress tracking
+    if sync_directory_with_progress "$LOCAL_INPUT_DIR" "$s3_input_path" "user_assets" 25 25; then
+        echo "  ✅ Successfully synced input assets"
+    else
         echo "  ❌ Failed to sync input assets"
+    fi
 else
     echo "ℹ️ No input directory found at $LOCAL_INPUT_DIR"
+    notify_sync_progress "user_assets" "PROGRESS" 25
     # If local directory doesn't exist, optionally delete all S3 content
     s3_input_path="$S3_ASSETS_BASE/input/"
     if aws s3 ls "$s3_input_path" >/dev/null 2>&1; then
-        echo "  �️ Local input directory missing, cleaning S3 input directory..."
+        echo "  🗑️ Local input directory missing, cleaning S3 input directory..."
         aws s3 rm "$s3_input_path" --recursive --only-show-errors || \
             echo "  ⚠️ Failed to clean S3 input directory"
     fi
 fi
 
 # Sync output directory (with delete to reflect local deletions)
+notify_sync_progress "user_assets" "PROGRESS" 50
 if [[ -d "$LOCAL_OUTPUT_DIR" ]]; then
     echo "  📤 Syncing output assets to S3 (with deletions)..."
     s3_output_path="$S3_ASSETS_BASE/output/"
-    aws s3 sync "$LOCAL_OUTPUT_DIR" "$s3_output_path" --delete --only-show-errors || \
+    
+    # Use enhanced directory sync with progress tracking
+    if sync_directory_with_progress "$LOCAL_OUTPUT_DIR" "$s3_output_path" "user_assets" 50 40; then
+        echo "  ✅ Successfully synced output assets"
+    else
         echo "  ❌ Failed to sync output assets"
+    fi
 else
     echo "ℹ️ No output directory found at $LOCAL_OUTPUT_DIR"
     # If local directory doesn't exist, optionally delete all S3 content
     s3_output_path="$S3_ASSETS_BASE/output/"
     if aws s3 ls "$s3_output_path" >/dev/null 2>&1; then
-        echo "  �️ Local output directory missing, cleaning S3 output directory..."
+        echo "  🗑️ Local output directory missing, cleaning S3 output directory..."
         aws s3 rm "$s3_output_path" --recursive --only-show-errors || \
             echo "  ⚠️ Failed to clean S3 output directory"
     fi
 fi
 
+notify_sync_progress "user_assets" "DONE" 100
 echo "✅ ComfyUI assets sync completed"
+}
+
+# Execute sync with lock management
+execute_with_sync_lock "user_assets" "sync_comfyui_assets_internal"
 EOF
 
 chmod +x "$NETWORK_VOLUME/scripts/sync_comfyui_assets.sh"
+
+# Pod metadata sync script (model config and workflows)
+cat > "$NETWORK_VOLUME/scripts/sync_pod_metadata.sh" << 'EOF'
+#!/bin/bash
+# Sync pod metadata to S3 (model configuration and user workflows)
+
+# Source the sync lock manager, API client, and model sync integration for progress notifications
+source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
+source "$NETWORK_VOLUME/scripts/api_client.sh"
+source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
+
+sync_pod_metadata_internal() {
+    echo "📋 Syncing pod metadata to S3..."
+    
+    # Send initial progress notification and ensure tools are available
+    notify_sync_progress "pod_metadata" "PROGRESS" 0
+    ensure_progress_tools
+
+    S3_METADATA_BASE="s3://$AWS_BUCKET_NAME/metadata/$POD_ID"
+    LOCAL_MODEL_CONFIG="$NETWORK_VOLUME/ComfyUI/model-config.json"
+    LOCAL_WORKFLOWS_DIR="$NETWORK_VOLUME/ComfyUI/user/default/workflows"
+
+    # Sync model configuration file
+    if [[ -f "$LOCAL_MODEL_CONFIG" ]]; then
+        echo "  📤 Syncing model configuration to S3..."
+        notify_sync_progress "pod_metadata" "PROGRESS" 25
+        s3_config_path="$S3_METADATA_BASE/model-config.json"
+        
+        # Use enhanced upload with progress tracking
+        if upload_file_with_progress "$LOCAL_MODEL_CONFIG" "$s3_config_path" "pod_metadata" 1 2; then
+            echo "  ✅ Successfully synced model configuration"
+        else
+            echo "  ❌ Failed to sync model configuration"
+        fi
+    else
+        echo "ℹ️ No model configuration file found at $LOCAL_MODEL_CONFIG"
+        notify_sync_progress "pod_metadata" "PROGRESS" 25
+    fi
+
+    # Sync workflows directory
+    if [[ -d "$LOCAL_WORKFLOWS_DIR" ]]; then
+        if [[ -n "$(find "$LOCAL_WORKFLOWS_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+            echo "  📤 Syncing user workflows to S3..."
+            notify_sync_progress "pod_metadata" "PROGRESS" 50
+            s3_workflows_path="$S3_METADATA_BASE/workflows/"
+            
+            # Use enhanced directory sync with progress tracking
+            if sync_directory_with_progress "$LOCAL_WORKFLOWS_DIR" "$s3_workflows_path" "pod_metadata" 50 40; then
+                echo "  ✅ Successfully synced user workflows"
+            else
+                echo "  ❌ Failed to sync user workflows"
+            fi
+        else
+            echo "  📭 Skipping empty workflows directory"
+            notify_sync_progress "pod_metadata" "PROGRESS" 90
+        fi
+    else
+        echo "ℹ️ No workflows directory found at $LOCAL_WORKFLOWS_DIR"
+        notify_sync_progress "pod_metadata" "PROGRESS" 90
+        # If local directory doesn't exist, optionally clean S3 workflows directory
+        s3_workflows_path="$S3_METADATA_BASE/workflows/"
+        if aws s3 ls "$s3_workflows_path" >/dev/null 2>&1; then
+            echo "  🗑️ Local workflows directory missing, cleaning S3 workflows directory..."
+            aws s3 rm "$s3_workflows_path" --recursive --only-show-errors || \
+                echo "  ⚠️ Failed to clean S3 workflows directory"
+        fi
+    fi
+
+    notify_sync_progress "pod_metadata" "DONE" 100
+    echo "✅ Pod metadata sync completed"
+}
+
+# Execute sync with lock management
+execute_with_sync_lock "pod_metadata" "sync_pod_metadata_internal"
+EOF
+
+chmod +x "$NETWORK_VOLUME/scripts/sync_pod_metadata.sh"
 
 echo "✅ Sync scripts created"

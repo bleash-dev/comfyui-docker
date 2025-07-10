@@ -185,6 +185,54 @@ if [ -f "$SCRIPT_DIR/create_utility_scripts.sh" ]; then
     fi
     echo "  ✅ Utility scripts created/configured."
 fi
+
+if [ -f "$SCRIPT_DIR/create_sync_management_script.sh" ]; then
+    if ! bash "$SCRIPT_DIR/create_sync_management_script.sh"; then
+        echo "❌ CRITICAL: Failed to create sync management script."
+        exit 1
+    fi
+    echo "  ✅ Sync management script created/configured."
+fi
+
+if [ -f "$SCRIPT_DIR/create_api_client.sh" ]; then
+    if ! bash "$SCRIPT_DIR/create_api_client.sh"; then
+        echo "❌ CRITICAL: Failed to create API client."
+        exit 1
+    fi
+    echo "  ✅ API client created/configured."
+fi
+
+if [ -f "$SCRIPT_DIR/create_model_config_manager.sh" ]; then
+    if ! bash "$SCRIPT_DIR/create_model_config_manager.sh"; then
+        echo "❌ CRITICAL: Failed to create model config manager."
+        exit 1
+    fi
+    echo "  ✅ Model config manager created/configured."
+fi
+
+if [ -f "$SCRIPT_DIR/create_model_sync_integration.sh" ]; then
+    if ! bash "$SCRIPT_DIR/create_model_sync_integration.sh"; then
+        echo "❌ CRITICAL: Failed to create model sync integration."
+        exit 1
+    fi
+    echo "  ✅ Model sync integration created/configured."
+fi
+
+if [ -f "$SCRIPT_DIR/create_sync_lock_manager.sh" ]; then
+    if ! bash "$SCRIPT_DIR/create_sync_lock_manager.sh"; then
+        echo "❌ CRITICAL: Failed to create model sync integration."
+        exit 1
+    fi
+    echo "  ✅ Model sync integration created/configured."
+fi
+
+# Ensure sync lock manager exists
+if [ ! -f "$NETWORK_VOLUME/scripts/sync_lock_manager.sh" ]; then
+    echo "⚠️ Sync lock manager not found, creating it..."
+    bash "$NETWORK_VOLUME/scripts/create_sync_lock_manager.sh"
+fi
+
+
 echo "✅ Dynamic script creation completed."
 
 # Create global shared models directory structure (no mounting)

@@ -7,13 +7,15 @@ echo "🚀 Starting background services..."
 export SYNC_INTERVAL_USER_DATA="${SYNC_INTERVAL_USER_DATA:-60}"               # 5 minutes
 export SYNC_INTERVAL_SHARED_DATA="${SYNC_INTERVAL_SHARED_DATA:-60}"     # 10 minutes
 export SYNC_INTERVAL_GLOBAL_MODELS="${SYNC_INTERVAL_GLOBAL_MODELS:-60}" # 5 minutes
+export SYNC_INTERVAL_POD_METADATA="${SYNC_INTERVAL_POD_METADATA:-300}"  # 5 minutes
 export SYNC_INTERVAL_LOGS="${SYNC_INTERVAL_LOGS:-60}"                   # 3 minutes
 
 echo "📋 Sync intervals configured:"
 echo "  📄 User data sync: every $((SYNC_INTERVAL_USER_DATA / 60)) minutes"
 echo "  🔄 Shared data sync: every $((SYNC_INTERVAL_SHARED_DATA / 60)) minutes"
 echo "  🌐 Global models sync: every $((SYNC_INTERVAL_GLOBAL_MODELS / 60)) minutes"
-echo "  📊 Log sync: every $((SYNC_INTERVAL_LOGS / 60)) minutes"
+echo "  � Pod metadata sync: every $((SYNC_INTERVAL_POD_METADATA / 60)) minutes"
+echo "  �📊 Log sync: every $((SYNC_INTERVAL_LOGS / 60)) minutes"
 
 # Create PID file for all background processes
 BACKGROUND_PIDS_FILE="$NETWORK_VOLUME/.background_services.pids"
@@ -124,11 +126,29 @@ while true; do
 done
 EOF
 
+cat > "$NETWORK_VOLUME/scripts/pod_metadata_sync_daemon_runner.sh" << EOF
+#!/bin/bash
+# Pod metadata sync daemon with proper signal handling
+
+handle_pod_metadata_sync_signal() {
+    echo "📢 Pod metadata sync daemon received signal, stopping..."
+    exit 0
+}
+
+trap handle_pod_metadata_sync_signal SIGTERM SIGINT SIGQUIT
+
+while true; do
+    "\$NETWORK_VOLUME/scripts/sync_pod_metadata.sh" || echo "⚠️ Pod metadata sync failed, continuing..."
+    sleep $SYNC_INTERVAL_POD_METADATA
+done
+EOF
+
 chmod +x "$NETWORK_VOLUME/scripts/sync_daemon_runner.sh"
 chmod +x "$NETWORK_VOLUME/scripts/sync_shared_daemon_runner.sh"
 chmod +x "$NETWORK_VOLUME/scripts/log_sync_daemon_runner.sh"
 chmod +x "$NETWORK_VOLUME/scripts/global_shared_sync_daemon_runner.sh"
 chmod +x "$NETWORK_VOLUME/scripts/comfyui_assets_sync_daemon_runner.sh"
+chmod +x "$NETWORK_VOLUME/scripts/pod_metadata_sync_daemon_runner.sh"
 chmod +x "$NETWORK_VOLUME/scripts/model_discovery_daemon_runner.sh"
 
 # Start sync daemon for periodic data synchronization (pod-specific data)
@@ -167,6 +187,12 @@ COMFYUI_ASSETS_SYNC_PID=$!
 echo "comfyui_assets_sync_daemon:$COMFYUI_ASSETS_SYNC_PID" >> "$BACKGROUND_PIDS_FILE"
 echo "  📁 ComfyUI assets sync daemon started (PID: $COMFYUI_ASSETS_SYNC_PID)"
 
+# Start pod metadata sync daemon
+nohup bash "$NETWORK_VOLUME/scripts/pod_metadata_sync_daemon_runner.sh" > "$NETWORK_VOLUME/.pod_metadata_sync_daemon.log" 2>&1 &
+POD_METADATA_SYNC_PID=$!
+echo "pod_metadata_sync_daemon:$POD_METADATA_SYNC_PID" >> "$BACKGROUND_PIDS_FILE"
+echo "  📋 Pod metadata sync daemon started (PID: $POD_METADATA_SYNC_PID)"
+
 # Start model discovery daemon
 nohup bash "$NETWORK_VOLUME/scripts/model_discovery_daemon_runner.sh" > "$NETWORK_VOLUME/.model_discovery.log" 2>&1 &
 MODEL_DISCOVERY_PID=$!
@@ -177,6 +203,8 @@ echo "✅ Background services started (sync-only mode)"
 echo "  📄 Pod-specific data sync: every $((SYNC_INTERVAL_USER_DATA / 60)) minutes"
 echo "  🔄 User-shared data sync: every $((SYNC_INTERVAL_SHARED_DATA / 60)) minutes"
 echo "  🌐 Global shared models sync: every $((SYNC_INTERVAL_GLOBAL_MODELS / 60)) minutes (no delete)"
-echo "  📊 Log sync: every $((SYNC_INTERVAL_LOGS / 60)) minutes"
-echo "  � Model discovery: starts after ComfyUI is ready"
-echo "  �📝 All PIDs stored in: $BACKGROUND_PIDS_FILE"
+echo "  � ComfyUI assets sync: every $((SYNC_INTERVAL_GLOBAL_MODELS / 60)) minutes"
+echo "  📋 Pod metadata sync: every $((SYNC_INTERVAL_POD_METADATA / 60)) minutes"
+echo "  �📊 Log sync: every $((SYNC_INTERVAL_LOGS / 60)) minutes"
+echo "  🔍 Model discovery: starts after ComfyUI is ready"
+echo "  📝 All PIDs stored in: $BACKGROUND_PIDS_FILE"

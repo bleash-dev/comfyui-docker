@@ -11,6 +11,11 @@ cat > "$NETWORK_VOLUME/scripts/sync_logs.sh" << 'EOF'
 #!/bin/bash
 # Sync logs to S3
 
+# Source the sync lock manager
+source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
+
+sync_logs_internal() {
+
 LOG_DATE=$(date +%Y-%m-%d)
 S3_LOG_BASE="s3://$AWS_BUCKET_NAME/pod_logs/$POD_ID/logs/$LOG_DATE"
 LOCAL_LOG_DIR="/tmp/log_collection"
@@ -41,6 +46,11 @@ fi
 [ -f "$NETWORK_VOLUME/.model_discovery.log" ] && cp "$NETWORK_VOLUME/.model_discovery.log" "$LOCAL_LOG_DIR/"
 [ -f "$NETWORK_VOLUME/.initial_model_sync.log" ] && cp "$NETWORK_VOLUME/.initial_model_sync.log" "$LOCAL_LOG_DIR/"
 
+# Collect API and model management logs
+[ -f "$NETWORK_VOLUME/.api_client.log" ] && cp "$NETWORK_VOLUME/.api_client.log" "$LOCAL_LOG_DIR/"
+[ -f "$NETWORK_VOLUME/.model_config_manager.log" ] && cp "$NETWORK_VOLUME/.model_config_manager.log" "$LOCAL_LOG_DIR/"
+[ -f "$NETWORK_VOLUME/.model_sync_integration.log" ] && cp "$NETWORK_VOLUME/.model_sync_integration.log" "$LOCAL_LOG_DIR/"
+
 # Environment info
 cat > "$LOCAL_LOG_DIR/environment.log" << ENVEOF
 Timestamp: $(date)
@@ -59,6 +69,10 @@ aws s3 sync "$LOCAL_LOG_DIR" "$S3_LOG_BASE/$TIMESTAMP" --delete
 rm -rf "$LOCAL_LOG_DIR"
 
 echo "✅ Logs synced to S3"
+}
+
+# Execute sync with lock management
+execute_with_sync_lock "logs" "sync_logs_internal"
 EOF
 
 chmod +x "$NETWORK_VOLUME/scripts/sync_logs.sh"
