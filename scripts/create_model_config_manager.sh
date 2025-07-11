@@ -408,7 +408,7 @@ get_model_download_url() {
     local local_path="$1"
     
     local model_file
-    model_file=$(find_model_by_path "$local_path")
+    model_file=$(find_model_by_path "" "$local_path")
     
     if [ $? -eq 0 ] && [ -f "$model_file" ]; then
         local download_url
@@ -443,14 +443,14 @@ convert_to_symlink() {
     
     # Find the existing model
     local model_file
-    model_file=$(find_model_by_path "$local_path")
+    model_file=$(find_model_by_path "" "$local_path")
     
     if [ $? -eq 0 ] && [ -f "$model_file" ]; then
         local model_object
         model_object=$(cat "$model_file")
         rm -f "$model_file"
         
-        # Update model object for symlink
+        # Update model object for symlink - remove download URL and set symlink properties
         local timestamp
         timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")
         
@@ -461,7 +461,7 @@ convert_to_symlink() {
                 "originalS3Path": $s3Path,
                 "symLinkedFrom": $s3Path,
                 "lastUpdated": $timestamp
-            }')
+            } | del(.downloadLink)')
         
         # Update the config
         create_or_update_model "$group" "$model_object"

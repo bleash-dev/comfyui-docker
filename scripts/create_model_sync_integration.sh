@@ -222,23 +222,29 @@ process_model_for_sync() {
         return 1
     fi
     
+    # Early validation: Check if download URL is available before proceeding
+    local download_url
+    download_url=$(get_model_download_url "$local_path" 2>/dev/null || echo "")
+    
+    if [ -z "$download_url" ] || [ "$download_url" = "unknown" ]; then
+        log_model_sync "INFO" "Skipping model (no download URL in config): $(basename "$local_path")"
+        return 1
+    fi
+    
+    # Validate that the download URL is actually a valid URL format (HTTP/HTTPS/S3)
+    if ! echo "$download_url" | grep -qE '^(https?|s3)://[^[:space:]]+$'; then
+        log_model_sync "INFO" "Skipping model (invalid download URL format): $(basename "$local_path") (URL: $download_url)"
+        return 1
+    fi
+    
     log_model_sync "INFO" "Processing model for sync: $local_path"
     
     # Get model size
     local model_size
     model_size=$(stat -f%z "$local_path" 2>/dev/null || stat -c%s "$local_path" 2>/dev/null || echo "0")
     
-    # Try to get download URL from config
-    local download_url
-    download_url=$(get_model_download_url "$local_path" 2>/dev/null || echo "")
-    
-    if [ -z "$download_url" ]; then
-        download_url="unknown"
-        log_model_sync "WARN" "No download URL found in config for $local_path"
-    fi
-    
     # Check with API if we can sync this model
-    log_model_sync "INFO" "Checking sync permission for model: $destination_group/$(basename "$local_path")"
+    log_model_sync "INFO" "Checking sync permission for model: $destination_group, $local_path"
     
     local response_file
     response_file=$(mktemp)
@@ -468,8 +474,8 @@ should_process_file() {
         return 1
     fi
     
-    # Validate that the download URL is actually a valid URL
-    if ! echo "$download_url" | grep -qE '^https?://[^[:space:]]+$'; then
+    # Validate that the download URL is actually a valid URL (HTTP/HTTPS/S3)
+    if ! echo "$download_url" | grep -qE '^(https?|s3)://[^[:space:]]+$'; then
         log_model_sync "INFO" "Skipping file with invalid download URL format: $file_name (URL: $download_url)"
         return 1
     fi
@@ -546,7 +552,7 @@ batch_process_models() {
                     
                     if [ -n "$model_config_entry" ]; then
                         local is_symlink
-                        is_symlink=$(echo "$model_config_entry" | jq -r '.isSymLink // false')
+                        is_symlink=$(echo "$model_config_entry" | jq -r '.symLinkedFrom // false')
                         
                         if [ "$is_symlink" != "true" ]; then
                             log_model_sync "INFO" "Uploading model file: $relative_path"
