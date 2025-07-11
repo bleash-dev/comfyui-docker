@@ -166,7 +166,7 @@ chmod +x "$NETWORK_VOLUME/scripts/sync_user_data.sh"
 cat > "$NETWORK_VOLUME/scripts/sync_user_shared_data.sh" << 'EOF'
 #!/bin/bash
 # Sync user-shared data to S3 (data that persists across different pods for the same user)
-# This script will zip each specified shared folder individually.
+# This script first archives all relevant folders, then uploads with progress tracking.
 
 # Source the sync lock manager, API client, and model sync integration for progress notifications
 source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
@@ -175,101 +175,73 @@ source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
 
 sync_user_shared_data_internal() {
     echo "🔄 Syncing user-shared data to S3 (archived)..."
-    
+
     # Send initial progress notification and ensure tools are available
-    notify_sync_progress "user_shared" "PROGRESS" 0
+    notify_sync_progress "user_data" "PROGRESS" 0
 
-S3_USER_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/shared"
-S3_USER_COMFYUI_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/ComfyUI/shared"
+    S3_USER_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/shared"
+    S3_USER_COMFYUI_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/ComfyUI/shared"
 
-USER_SHARED_FOLDERS_TO_ARCHIVE=("venv" ".comfyui" ".cache")
-COMFYUI_USER_SHARED_FOLDERS_TO_ARCHIVE=("custom_nodes") 
+    USER_SHARED_FOLDERS_TO_ARCHIVE=("venv" ".comfyui" ".cache")
+    COMFYUI_USER_SHARED_FOLDERS_TO_ARCHIVE=("custom_nodes")
 
-# Calculate total folders to process for progress tracking
-total_folders=$((${#USER_SHARED_FOLDERS_TO_ARCHIVE[@]} + ${#COMFYUI_USER_SHARED_FOLDERS_TO_ARCHIVE[@]}))
-processed_folders=0
+    declare -A ARCHIVES_TO_UPLOAD
 
-echo "📦 Syncing user-shared folder archives ($total_folders folders total)..."
-for folder_name in "${USER_SHARED_FOLDERS_TO_ARCHIVE[@]}"; do
-    local_folder_path="$NETWORK_VOLUME/$folder_name"
-    # Ensure archive_name is filesystem-safe, especially for ".comfyui" -> "_comfyui.tar.gz" and ".cache" -> "_cache.tar.gz"
-    # Replacing leading dot with underscore for the archive filename.
-    # Using parameter expansion for this.
-    safe_folder_name="${folder_name#.}" 
-    if [[ "${folder_name}" == .* ]]; then # If it started with a dot
-        safe_folder_name="_${safe_folder_name}"
-    fi
-    archive_name="${safe_folder_name//\//_}.tar.gz"
+    echo "🗜️ Archiving user-shared folders..."
+    for folder_name in "${USER_SHARED_FOLDERS_TO_ARCHIVE[@]}"; do
+        local_folder_path="$NETWORK_VOLUME/$folder_name"
+        safe_folder_name="${folder_name#.}"
+        [[ "$folder_name" == .* ]] && safe_folder_name="_${safe_folder_name}"
+        archive_name="${safe_folder_name//\//_}.tar.gz"
+        temp_archive_path="/tmp/user_shared_${archive_name}"
 
-    temp_archive_path="/tmp/user_shared_${archive_name}"
-    s3_archive_destination="$S3_USER_SHARED_BASE/$archive_name"
-    
-    echo "  ℹ️ Checking user-shared folder: $folder_name (local: $local_folder_path)"
-    if [[ -d "$local_folder_path" ]]; then
-        if [[ -n "$(find "$local_folder_path" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
-            echo "    🗜️ Compressing user-shared/$folder_name..."
-            tar -czf "$temp_archive_path" -C "$NETWORK_VOLUME" "$folder_name" # folder_name here is correct (e.g. ".comfyui")
-            
-            echo "    📤 Uploading $archive_name to $s3_archive_destination..."
-            # Use enhanced upload with progress tracking
-            if upload_file_with_progress "$temp_archive_path" "$s3_archive_destination" "user_shared" $((processed_folders + 1)) "$total_folders"; then
-                echo "    ✅ Successfully uploaded user-shared/$archive_name"
-            else
-                echo "    ❌ Failed to sync user-shared/$archive_name"
-            fi
-            rm -f "$temp_archive_path"
+        if [[ -d "$local_folder_path" ]] && [[ -n "$(find "$local_folder_path" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+            echo "  🗜️ Compressing $folder_name..."
+            tar -czf "$temp_archive_path" -C "$NETWORK_VOLUME" "$folder_name"
+            ARCHIVES_TO_UPLOAD["$temp_archive_path"]="$S3_USER_SHARED_BASE/$archive_name"
         else
-            echo "    📭 Skipping empty user-shared folder: $folder_name"
+            echo "  ⏭️ Skipping $folder_name (missing or empty)"
         fi
-    else
-        echo "    ⏭️ Skipping non-existent user-shared folder: $folder_name"
-    fi
-    
-    processed_folders=$((processed_folders + 1))
-    
-    # Update progress based on completed folders
-    local progress=$((processed_folders * 50 / total_folders))
-    notify_sync_progress "user_shared" "PROGRESS" "$progress"
-done
+    done
 
-echo "📦 Syncing ComfyUI user-shared folder archives..."
-for folder_name in "${COMFYUI_USER_SHARED_FOLDERS_TO_ARCHIVE[@]}"; do
-    local_folder_path="$NETWORK_VOLUME/ComfyUI/$folder_name"
-    archive_name="${folder_name//\//_}.tar.gz"
-    temp_archive_path="/tmp/comfyui_shared_${archive_name}"
-    s3_archive_destination="$S3_USER_COMFYUI_SHARED_BASE/$archive_name"
+    echo "🗜️ Archiving ComfyUI-shared folders..."
+    for folder_name in "${COMFYUI_USER_SHARED_FOLDERS_TO_ARCHIVE[@]}"; do
+        local_folder_path="$NETWORK_VOLUME/ComfyUI/$folder_name"
+        archive_name="${folder_name//\//_}.tar.gz"
+        temp_archive_path="/tmp/comfyui_shared_${archive_name}"
 
-    echo "  ℹ️ Checking ComfyUI-user-shared folder: $folder_name (local: $local_folder_path)"
-    # THIS IS THE CORRECTED LINE:
-    if [[ -d "$local_folder_path" ]]; then 
-        if [[ -n "$(find "$local_folder_path" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
-            echo "    🗜️ Compressing ComfyUI-user-shared/$folder_name..."
+        if [[ -d "$local_folder_path" ]] && [[ -n "$(find "$local_folder_path" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+            echo "  🗜️ Compressing ComfyUI/$folder_name..."
             tar -czf "$temp_archive_path" -C "$NETWORK_VOLUME/ComfyUI" "$folder_name"
-            
-            echo "    📤 Uploading $archive_name to $s3_archive_destination..."
-            # Use enhanced upload with progress tracking
-            if upload_file_with_progress "$temp_archive_path" "$s3_archive_destination" "user_shared" $((processed_folders + 1)) "$total_folders"; then
-                echo "    ✅ Successfully uploaded ComfyUI-user-shared/$archive_name"
-            else
-                echo "    ❌ Failed to sync ComfyUI-user-shared/$archive_name"
-            fi
-            rm -f "$temp_archive_path"
+            ARCHIVES_TO_UPLOAD["$temp_archive_path"]="$S3_USER_COMFYUI_SHARED_BASE/$archive_name"
         else
-            echo "    📭 Skipping empty ComfyUI-user-shared folder: $folder_name"
+            echo "  ⏭️ Skipping ComfyUI/$folder_name (missing or empty)"
         fi
-    else
-        echo "    ⏭️ Skipping non-existent ComfyUI-user-shared folder: $folder_name"
-    fi
-    
-    processed_folders=$((processed_folders + 1))
-    
-    # Update progress - ComfyUI folders are the second half (50-100%)
-    local progress=$((50 + (processed_folders - ${#USER_SHARED_FOLDERS_TO_ARCHIVE[@]}) * 50 / ${#COMFYUI_USER_SHARED_FOLDERS_TO_ARCHIVE[@]}))
-    notify_sync_progress "user_shared" "PROGRESS" "$progress"
-done
+    done
 
-notify_sync_progress "user_shared" "DONE" 100
-echo "✅ User-shared data archive sync completed"
+    total_archives=${#ARCHIVES_TO_UPLOAD[@]}
+    processed_archives=0
+
+    echo "📤 Uploading archived user-shared data to S3 ($total_archives total)..."
+    for archive_path in "${!ARCHIVES_TO_UPLOAD[@]}"; do
+        s3_dest="${ARCHIVES_TO_UPLOAD[$archive_path]}"
+        archive_name="$(basename "$archive_path")"
+
+        echo "  📤 Uploading $archive_name to $s3_dest..."
+        if upload_file_with_progress "$archive_path" "$s3_dest" "user_data" $((processed_archives + 1)) "$total_archives"; then
+            echo "  ✅ Successfully uploaded $archive_name"
+        else
+            echo "  ❌ Failed to upload $archive_name"
+        fi
+        rm -f "$archive_path"
+
+        processed_archives=$((processed_archives + 1))
+        progress=$((processed_archives * 100 / total_archives))
+        notify_sync_progress "user_data" "PROGRESS" "$progress"
+    done
+
+    notify_sync_progress "user_data" "DONE" 100
+    echo "✅ User-shared data archive sync completed"
 }
 
 # Execute sync with lock management
