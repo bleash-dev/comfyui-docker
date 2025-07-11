@@ -41,7 +41,7 @@ show_help() {
     echo "  $0 run user_data               # Manually trigger user data sync"
     echo "  $0 run all                     # Run all sync operations"
     echo "  $0 unlock                      # Force release all stuck sync locks
-  $0 unlock user_data            # Force release user_data sync lock"
+    $0 unlock user_data            # Force release user_data sync lock"
     echo "  $0 test user_shared            # Test lock mechanism"
     echo "  $0 logs global_shared          # Show global shared sync logs"
 }

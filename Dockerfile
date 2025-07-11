@@ -35,6 +35,7 @@ RUN apt-get update && apt-get install -y \
     libxrandr-dev \
     libxinerama-dev \
     xvfb \
+    pv \
     libxcursor-dev \
     libnss3\                                     
     libatk1.0-0\                                 

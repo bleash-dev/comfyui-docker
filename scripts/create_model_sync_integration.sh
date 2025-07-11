@@ -29,29 +29,6 @@ log_model_sync() {
     echo "[$timestamp] [$level] Model Sync: $message" | tee -a "$MODEL_SYNC_LOG"
 }
 
-# Function to ensure progress tools are available
-ensure_progress_tools() {
-    # Try to install pv if not available (for better progress tracking)
-    if ! command -v pv >/dev/null 2>&1; then
-        log_model_sync "INFO" "Installing pv (pipe viewer) for better progress tracking..."
-        
-        # Try different package managers
-        if command -v apt-get >/dev/null 2>&1; then
-            apt-get update >/dev/null 2>&1 && apt-get install -y pv >/dev/null 2>&1
-        elif command -v yum >/dev/null 2>&1; then
-            yum install -y pv >/dev/null 2>&1
-        elif command -v apk >/dev/null 2>&1; then
-            apk add --no-cache pv >/dev/null 2>&1
-        fi
-        
-        if command -v pv >/dev/null 2>&1; then
-            log_model_sync "INFO" "Successfully installed pv for progress tracking"
-        else
-            log_model_sync "WARN" "Could not install pv, using fallback progress tracking"
-        fi
-    fi
-}
-
 # Function to upload file to S3 with progress tracking
 upload_file_with_progress() {
     local local_file="$1"
@@ -518,9 +495,6 @@ batch_process_models() {
     fi
     
     log_model_sync "INFO" "Starting batch processing of models in: $models_dir"
-    
-    # Ensure progress tracking tools are available
-    ensure_progress_tools
     
     # Send initial progress
     notify_model_sync_progress "$sync_type" "PROGRESS" 0

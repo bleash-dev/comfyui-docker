@@ -178,7 +178,6 @@ sync_user_shared_data_internal() {
     
     # Send initial progress notification and ensure tools are available
     notify_sync_progress "user_shared" "PROGRESS" 0
-    ensure_progress_tools
 
 S3_USER_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/shared"
 S3_USER_COMFYUI_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/ComfyUI/shared"
@@ -437,61 +436,60 @@ sync_comfyui_assets_internal() {
     
     # Send initial progress notification and ensure tools are available
     notify_sync_progress "user_assets" "PROGRESS" 0
-    ensure_progress_tools
-S3_ASSETS_BASE="s3://$AWS_BUCKET_NAME/assets/$POD_ID"
-LOCAL_INPUT_DIR="$NETWORK_VOLUME/ComfyUI/input"
-LOCAL_OUTPUT_DIR="$NETWORK_VOLUME/ComfyUI/output"
+    S3_ASSETS_BASE="s3://$AWS_BUCKET_NAME/assets/$POD_ID"
+    LOCAL_INPUT_DIR="$NETWORK_VOLUME/ComfyUI/input"
+    LOCAL_OUTPUT_DIR="$NETWORK_VOLUME/ComfyUI/output"
 
-# Sync input directory (with delete to reflect local deletions)
-if [[ -d "$LOCAL_INPUT_DIR" ]]; then
-    echo "  📤 Syncing input assets to S3 (with deletions)..."
-    notify_sync_progress "user_assets" "PROGRESS" 25
-    s3_input_path="$S3_ASSETS_BASE/input/"
-    
-    # Use enhanced directory sync with progress tracking
-    if sync_directory_with_progress "$LOCAL_INPUT_DIR" "$s3_input_path" "user_assets" 25 25; then
-        echo "  ✅ Successfully synced input assets"
+    # Sync input directory (with delete to reflect local deletions)
+    if [[ -d "$LOCAL_INPUT_DIR" ]]; then
+        echo "  📤 Syncing input assets to S3 (with deletions)..."
+        notify_sync_progress "user_assets" "PROGRESS" 25
+        s3_input_path="$S3_ASSETS_BASE/input/"
+        
+        # Use enhanced directory sync with progress tracking
+        if sync_directory_with_progress "$LOCAL_INPUT_DIR" "$s3_input_path" "user_assets" 25 25; then
+            echo "  ✅ Successfully synced input assets"
+        else
+            echo "  ❌ Failed to sync input assets"
+        fi
     else
-        echo "  ❌ Failed to sync input assets"
+        echo "ℹ️ No input directory found at $LOCAL_INPUT_DIR"
+        notify_sync_progress "user_assets" "PROGRESS" 25
+        # If local directory doesn't exist, optionally delete all S3 content
+        s3_input_path="$S3_ASSETS_BASE/input/"
+        if aws s3 ls "$s3_input_path" >/dev/null 2>&1; then
+            echo "  🗑️ Local input directory missing, cleaning S3 input directory..."
+            aws s3 rm "$s3_input_path" --recursive --only-show-errors || \
+                echo "  ⚠️ Failed to clean S3 input directory"
+        fi
     fi
-else
-    echo "ℹ️ No input directory found at $LOCAL_INPUT_DIR"
-    notify_sync_progress "user_assets" "PROGRESS" 25
-    # If local directory doesn't exist, optionally delete all S3 content
-    s3_input_path="$S3_ASSETS_BASE/input/"
-    if aws s3 ls "$s3_input_path" >/dev/null 2>&1; then
-        echo "  🗑️ Local input directory missing, cleaning S3 input directory..."
-        aws s3 rm "$s3_input_path" --recursive --only-show-errors || \
-            echo "  ⚠️ Failed to clean S3 input directory"
-    fi
-fi
 
-# Sync output directory (with delete to reflect local deletions)
-notify_sync_progress "user_assets" "PROGRESS" 50
-if [[ -d "$LOCAL_OUTPUT_DIR" ]]; then
-    echo "  📤 Syncing output assets to S3 (with deletions)..."
-    s3_output_path="$S3_ASSETS_BASE/output/"
-    
-    # Use enhanced directory sync with progress tracking
-    if sync_directory_with_progress "$LOCAL_OUTPUT_DIR" "$s3_output_path" "user_assets" 50 40; then
-        echo "  ✅ Successfully synced output assets"
+    # Sync output directory (with delete to reflect local deletions)
+    notify_sync_progress "user_assets" "PROGRESS" 50
+    if [[ -d "$LOCAL_OUTPUT_DIR" ]]; then
+        echo "  📤 Syncing output assets to S3 (with deletions)..."
+        s3_output_path="$S3_ASSETS_BASE/output/"
+        
+        # Use enhanced directory sync with progress tracking
+        if sync_directory_with_progress "$LOCAL_OUTPUT_DIR" "$s3_output_path" "user_assets" 50 40; then
+            echo "  ✅ Successfully synced output assets"
+        else
+            echo "  ❌ Failed to sync output assets"
+        fi
     else
-        echo "  ❌ Failed to sync output assets"
+        echo "ℹ️ No output directory found at $LOCAL_OUTPUT_DIR"
+        # If local directory doesn't exist, optionally delete all S3 content
+        s3_output_path="$S3_ASSETS_BASE/output/"
+        if aws s3 ls "$s3_output_path" >/dev/null 2>&1; then
+            echo "  🗑️ Local output directory missing, cleaning S3 output directory..."
+            aws s3 rm "$s3_output_path" --recursive --only-show-errors || \
+                echo "  ⚠️ Failed to clean S3 output directory"
+        fi
     fi
-else
-    echo "ℹ️ No output directory found at $LOCAL_OUTPUT_DIR"
-    # If local directory doesn't exist, optionally delete all S3 content
-    s3_output_path="$S3_ASSETS_BASE/output/"
-    if aws s3 ls "$s3_output_path" >/dev/null 2>&1; then
-        echo "  🗑️ Local output directory missing, cleaning S3 output directory..."
-        aws s3 rm "$s3_output_path" --recursive --only-show-errors || \
-            echo "  ⚠️ Failed to clean S3 output directory"
-    fi
-fi
 
-notify_sync_progress "user_assets" "DONE" 100
-echo "✅ ComfyUI assets sync completed"
-}
+    notify_sync_progress "user_assets" "DONE" 100
+    echo "✅ ComfyUI assets sync completed"
+    }
 
 # Execute sync with lock management
 execute_with_sync_lock "user_assets" "sync_comfyui_assets_internal"
@@ -514,7 +512,6 @@ sync_pod_metadata_internal() {
     
     # Send initial progress notification and ensure tools are available
     notify_sync_progress "pod_metadata" "PROGRESS" 0
-    ensure_progress_tools
 
     S3_METADATA_BASE="s3://$AWS_BUCKET_NAME/metadata/$POD_ID"
     LOCAL_MODEL_CONFIG="$NETWORK_VOLUME/ComfyUI/model-config.json"
