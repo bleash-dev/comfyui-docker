@@ -165,7 +165,7 @@ notify_sync_progress() {
     response_file=$(mktemp)
     
     local http_code
-    http_code=$(make_api_request "POST" "/pods/$POD_ID/log/sync-progress" "$payload" "$response_file")
+    http_code=$(make_api_request "POST" "/pods/$POD_ID/sync-progress" "$payload" "$response_file")
     
     if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
         log_api_activity "INFO" "Sync progress notification sent successfully: $sync_type $status $percentage%"
