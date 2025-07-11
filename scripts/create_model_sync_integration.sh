@@ -459,6 +459,48 @@ notify_model_sync_progress() {
     log_model_sync "INFO" "Progress notification sent: $full_sync_type $status $percentage%"
 }
 
+# Function to check if a file should be processed for sync
+should_process_file() {
+    local file_path="$1"
+    local file_name=$(basename "$file_path")
+    
+    # Skip hidden files and system files
+    if [[ "$file_name" =~ ^\. ]]; then
+        log_model_sync "INFO" "Skipping hidden file: $file_name"
+        return 1
+    fi
+    
+    # Skip common non-model files
+    case "$file_name" in
+        *.log|*.tmp|*.temp)
+            log_model_sync "INFO" "Skipping non-model file: $file_name"
+            return 1
+            ;;
+        *_info|*_metadata|*.info|*.metadata)
+            log_model_sync "INFO" "Skipping metadata file: $file_name"
+            return 1
+            ;;
+    esac
+    
+    # Check if file has a valid download URL in config
+    local download_url
+    download_url=$(get_model_download_url "$file_path" 2>/dev/null || echo "")
+    
+    if [ -z "$download_url" ] || [ "$download_url" = "unknown" ]; then
+        log_model_sync "INFO" "Skipping file without valid download URL in config: $file_name"
+        return 1
+    fi
+    
+    # Validate that the download URL is actually a valid URL
+    if ! echo "$download_url" | grep -qE '^https?://[^[:space:]]+$'; then
+        log_model_sync "INFO" "Skipping file with invalid download URL format: $file_name (URL: $download_url)"
+        return 1
+    fi
+    
+    log_model_sync "DEBUG" "File passed validation for processing: $file_name"
+    return 0
+}
+
 # Function to batch process models in a directory
 batch_process_models() {
     local models_dir="$1"
@@ -516,40 +558,45 @@ batch_process_models() {
         
         log_model_sync "INFO" "Processing model ($((processed_models + 1))/$total_models): $relative_path"
         
-        if process_model_for_sync "$model_file" "$s3_destination" "$destination_group"; then
-            successful_models=$((successful_models + 1))
-            log_model_sync "INFO" "Successfully processed model: $relative_path"
-            
-            # For upload/replace actions, perform the actual S3 upload with progress
-            if [ -f "$model_file" ]; then
-                # Check if this model should be uploaded (not symlinked)
-                local model_config_entry
-                model_config_entry=$(find_model_by_path "$destination_group" "$model_file")
+        # Check if this file should be processed (skip non-model files and files without proper config)
+        if should_process_file "$model_file"; then
+            if process_model_for_sync "$model_file" "$s3_destination" "$destination_group"; then
+                successful_models=$((successful_models + 1))
+                log_model_sync "INFO" "Successfully processed model: $relative_path"
                 
-                if [ -n "$model_config_entry" ]; then
-                    local is_symlink
-                    is_symlink=$(echo "$model_config_entry" | jq -r '.isSymLink // false')
+                # For upload/replace actions, perform the actual S3 upload with progress
+                if [ -f "$model_file" ]; then
+                    # Check if this model should be uploaded (not symlinked)
+                    local model_config_entry
+                    model_config_entry=$(find_model_by_path "$destination_group" "$model_file")
                     
-                    if [ "$is_symlink" != "true" ]; then
-                        log_model_sync "INFO" "Uploading model file: $relative_path"
+                    if [ -n "$model_config_entry" ]; then
+                        local is_symlink
+                        is_symlink=$(echo "$model_config_entry" | jq -r '.isSymLink // false')
                         
-                        # Calculate progress range for this file
-                        local base_progress=$((processed_models * 80 / total_models))
-                        local progress_range=$((80 / total_models))
-                        
-                        if upload_file_with_progress "$model_file" "$s3_destination" "$sync_type" "$processed_models" "$total_models"; then
-                            log_model_sync "INFO" "Successfully uploaded model: $relative_path"
+                        if [ "$is_symlink" != "true" ]; then
+                            log_model_sync "INFO" "Uploading model file: $relative_path"
+                            
+                            # Calculate progress range for this file
+                            local base_progress=$((processed_models * 80 / total_models))
+                            local progress_range=$((80 / total_models))
+                            
+                            if upload_file_with_progress "$model_file" "$s3_destination" "$sync_type" "$processed_models" "$total_models"; then
+                                log_model_sync "INFO" "Successfully uploaded model: $relative_path"
+                            else
+                                log_model_sync "ERROR" "Failed to upload model: $relative_path"
+                                successful_models=$((successful_models - 1))
+                            fi
                         else
-                            log_model_sync "ERROR" "Failed to upload model: $relative_path"
-                            successful_models=$((successful_models - 1))
+                            log_model_sync "INFO" "Model is symlinked, skipping upload: $relative_path"
                         fi
-                    else
-                        log_model_sync "INFO" "Model is symlinked, skipping upload: $relative_path"
                     fi
                 fi
+            else
+                log_model_sync "ERROR" "Failed to process model: $relative_path"
             fi
         else
-            log_model_sync "ERROR" "Failed to process model: $relative_path"
+            log_model_sync "INFO" "Skipped file (not eligible for sync): $relative_path"
         fi
         
         processed_models=$((processed_models + 1))
