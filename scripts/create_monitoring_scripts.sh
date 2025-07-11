@@ -42,6 +42,7 @@ fi
 [ -f "$NETWORK_VOLUME/.log_sync.log" ] && cp "$NETWORK_VOLUME/.log_sync.log" "$LOCAL_LOG_DIR/"
 [ -f "$NETWORK_VOLUME/.global_shared_sync_daemon.log" ] && cp "$NETWORK_VOLUME/.global_shared_sync_daemon.log" "$LOCAL_LOG_DIR/"
 [ -f "$NETWORK_VOLUME/.comfyui_assets_sync_daemon.log" ] && cp "$NETWORK_VOLUME/.comfyui_assets_sync_daemon.log" "$LOCAL_LOG_DIR/"
+[ -f "$NETWORK_VOLUME/.pod_metadata_sync_daemon.log" ] && cp "$NETWORK_VOLUME/.pod_metadata_sync_daemon.log" "$LOCAL_LOG_DIR/"
 [ -f "$NETWORK_VOLUME/.signal_handler.log" ] && cp "$NETWORK_VOLUME/.signal_handler.log" "$LOCAL_LOG_DIR/"
 [ -f "$NETWORK_VOLUME/.model_discovery.log" ] && cp "$NETWORK_VOLUME/.model_discovery.log" "$LOCAL_LOG_DIR/"
 [ -f "$NETWORK_VOLUME/.initial_model_sync.log" ] && cp "$NETWORK_VOLUME/.initial_model_sync.log" "$LOCAL_LOG_DIR/"
