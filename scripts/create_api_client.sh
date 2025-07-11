@@ -47,6 +47,8 @@ generate_hmac_signature() {
     local signature
     signature=$(echo -n "$payload" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET_KEY" -binary | xxd -p -c 256)
 
+    echo "HMAC signature generated: $signature"
+
     if [ -n "$__resultvar" ]; then
         eval "$__resultvar='$signature'"
     fi
