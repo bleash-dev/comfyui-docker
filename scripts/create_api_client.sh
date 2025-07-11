@@ -32,20 +32,26 @@ log_api_activity() {
 # Function to generate HMAC signature
 generate_hmac_signature() {
     local payload="$1"
-    
+
     if [ -z "$WEBHOOK_SECRET_KEY" ]; then
         log_api_activity "WARN" "WEBHOOK_SECRET_KEY environment variable is not set"
         return 1
     fi
-    
-    # Ensure we have the required tools
+
     if ! command -v openssl >/dev/null 2>&1; then
-        log_api_activity "ERROR" "openssl command not found, cannot generate HMAC signature"
+        log_api_activity "ERROR" "openssl command not found"
         return 1
     fi
+
+    if ! command -v jq >/dev/null 2>&1; then
+        log_api_activity "ERROR" "jq is required to compact JSON for HMAC"
+        return 1
+    fi
+
+    local compact_json
+    compact_json=$(echo "$payload" | jq -c .)
     
-    # Generate HMAC-SHA256 signature
-    echo -n "$payload" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET_KEY" -binary | xxd -p -c 256
+    echo -n "$compact_json" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET_KEY" | awk '{print $2}'
 }
 
 # Function to make authenticated API requests
