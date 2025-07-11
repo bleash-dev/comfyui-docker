@@ -287,7 +287,7 @@ fi
 
 echo "🔄 Performing final data sync..."
 # Use shorter timeout for final sync to avoid hanging shutdown
-export SYNC_LOCK_TIMEOUT=60  # 1 minute timeout for shutdown syncs
+export SYNC_LOCK_TIMEOUT=600  # 1 minute timeout for shutdown syncs
 [ -f "$NETWORK_VOLUME/scripts/sync_logs.sh" ] && "$NETWORK_VOLUME/scripts/sync_logs.sh"
 [ -f "$NETWORK_VOLUME/scripts/sync_user_data.sh" ] && "$NETWORK_VOLUME/scripts/sync_user_data.sh"
 [ -f "$NETWORK_VOLUME/scripts/sync_user_shared_data.sh" ] && "$NETWORK_VOLUME/scripts/sync_user_shared_data.sh"
@@ -513,12 +513,13 @@ sync_pod_metadata_internal() {
             notify_sync_progress "pod_metadata" "PROGRESS" 50
             s3_workflows_path="$S3_METADATA_BASE/workflows/"
             
-            # Use enhanced directory sync with progress tracking
-            if sync_directory_with_progress "$LOCAL_WORKFLOWS_DIR" "$s3_workflows_path" "pod_metadata" 50 40; then
+            # Use simple S3 sync for workflows
+            if aws s3 sync "$LOCAL_WORKFLOWS_DIR" "$s3_workflows_path" --delete --only-show-errors; then
                 echo "  ✅ Successfully synced user workflows"
             else
                 echo "  ❌ Failed to sync user workflows"
             fi
+            notify_sync_progress "pod_metadata" "PROGRESS" 90
         else
             echo "  📭 Skipping empty workflows directory"
             notify_sync_progress "pod_metadata" "PROGRESS" 90
