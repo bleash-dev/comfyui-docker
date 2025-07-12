@@ -165,15 +165,15 @@ create_or_update_model() {
         return 1
     fi
     
-    # Extract local path for identification
-    local local_path
-    local_path=$(echo "$model_object" | jq -r '.localPath // empty')
-    if [ -z "$local_path" ]; then
-        log_model_config "ERROR" "Model object must contain 'localPath' field"
+    # Extract model name for identification
+    local model_name
+    model_name=$(echo "$model_object" | jq -r '.modelName // empty')
+    if [ -z "$model_name" ]; then
+        log_model_config "ERROR" "Model object must contain 'modelName' field"
         return 1
     fi
     
-    log_model_config "INFO" "Creating/updating model in group '$group': $local_path"
+    log_model_config "INFO" "Creating/updating model in group '$group': $model_name"
     
     # Acquire lock
     if ! acquire_model_config_lock "update"; then
@@ -203,26 +203,22 @@ create_or_update_model() {
     
     # Create or update the group and model entry
     jq --arg group "$group" \
-       --arg localPath "$local_path" \
+       --arg modelName "$(echo "$model_object" | jq -r '.modelName // empty')" \
        --argjson modelObj "$model_object" \
        '
        # Initialize group if it does not exist
        if has($group) | not then
-           .[$group] = []
+           .[$group] = {}
        else
            .
        end |
-       # Find existing model by localPath and update, or append new one
-       .[$group] = (
-           .[$group] | 
-           map(if .localPath == $localPath then $modelObj else . end) |
-           if any(.localPath == $localPath) then . else . + [$modelObj] end
-       )
+       # Set the model in the group using modelName as key
+       .[$group][$modelName] = $modelObj
        ' "$MODEL_CONFIG_FILE" > "$temp_file"
     
     if [ $? -eq 0 ] && jq empty "$temp_file" 2>/dev/null; then
         mv "$temp_file" "$MODEL_CONFIG_FILE"
-        log_model_config "INFO" "Successfully updated model config for $group/$local_path"
+        log_model_config "INFO" "Successfully updated model config for $group/$model_name"
         
         # Release lock
         release_model_config_lock "update"
@@ -242,14 +238,14 @@ create_or_update_model() {
 # Function to delete a model from config
 delete_model() {
     local group="$1"
-    local model_local_path="$2"
+    local model_name="$2"
     
-    if [ -z "$group" ] || [ -z "$model_local_path" ]; then
-        log_model_config "ERROR" "Group and model local path are required for delete operation"
+    if [ -z "$group" ] || [ -z "$model_name" ]; then
+        log_model_config "ERROR" "Group and model name are required for delete operation"
         return 1
     fi
     
-    log_model_config "INFO" "Deleting model from group '$group': $model_local_path"
+    log_model_config "INFO" "Deleting model from group '$group': $model_name"
     
     # Acquire lock
     if ! acquire_model_config_lock "delete"; then
@@ -276,10 +272,10 @@ delete_model() {
     temp_file=$(mktemp)
     
     jq --arg group "$group" \
-       --arg localPath "$model_local_path" \
+       --arg modelName "$model_name" \
        '
        if has($group) then
-           .[$group] = (.[$group] | map(select(.localPath != $localPath)))
+           del(.[$group][$modelName])
        else
            .
        end
@@ -287,7 +283,7 @@ delete_model() {
     
     if [ $? -eq 0 ] && jq empty "$temp_file" 2>/dev/null; then
         mv "$temp_file" "$MODEL_CONFIG_FILE"
-        log_model_config "INFO" "Successfully deleted model from config: $group/$model_local_path"
+        log_model_config "INFO" "Successfully deleted model from config: $group/$model_name"
         
         # Release lock
         release_model_config_lock "delete"
@@ -340,21 +336,21 @@ find_model_by_path() {
         jq --arg group "$group" \
            --arg localPath "$local_path" \
            '
-           .[$group] // [] |
-           .[] |
-           select(.localPath == $localPath) |
-           . + {"directoryGroup": $group}
+           .[$group] // {} |
+           to_entries[] |
+           select(.value.localPath == $localPath) |
+           .value + {"directoryGroup": $group}
            ' "$MODEL_CONFIG_FILE" > "$output_file" 2>/dev/null
     else
         # Search across all groups
         jq --arg localPath "$local_path" \
            '
            to_entries[] | 
-           select(.value | type == "array") |
+           select(.value | type == "object") |
            {key: .key, models: .value} |
-           .models[] | 
-           select(.localPath == $localPath) |
-           . + {"directoryGroup": .key}
+           .models | to_entries[] |
+           select(.value.localPath == $localPath) |
+           .value + {"directoryGroup": .key}
            ' "$MODEL_CONFIG_FILE" > "$output_file" 2>/dev/null
     fi
     
@@ -389,7 +385,7 @@ list_models_in_group() {
     
     # Get all models in the group
     jq --arg group "$group" \
-       '.[$group] // []' "$MODEL_CONFIG_FILE" > "$output_file" 2>/dev/null
+       '.[$group] // {} | to_entries | map(.value)' "$MODEL_CONFIG_FILE" > "$output_file" 2>/dev/null
     
     if [ -s "$output_file" ]; then
         log_model_config "DEBUG" "Listed models in group: $group"
@@ -472,6 +468,81 @@ convert_to_symlink() {
     fi
 }
 
+# Function to remove model by local path
+remove_model_by_path() {
+    local local_path="$1"
+    
+    if [ -z "$local_path" ]; then
+        log_model_config "ERROR" "Local path is required for remove operation"
+        return 1
+    fi
+    
+    log_model_config "INFO" "Removing model by local path: $local_path"
+    
+    # Acquire lock
+    if ! acquire_model_config_lock "remove"; then
+        log_model_config "ERROR" "Failed to acquire lock for model removal"
+        return 1
+    fi
+    
+    # Set up trap to release lock on exit
+    trap "release_model_config_lock 'remove'" EXIT INT TERM QUIT
+    
+    # Initialize config if needed
+    initialize_model_config
+    
+    # Find the model first to get group and name
+    local model_found=false
+    local temp_file
+    temp_file=$(mktemp)
+    
+    # Search for model and remove it
+    jq --arg localPath "$local_path" '
+    . as $root |
+    reduce to_entries[] as $group ({}; 
+        if ($group.value | type == "object") then
+            .[$group.key] = (
+                $group.value | 
+                to_entries |
+                map(select(.value.localPath != $localPath)) |
+                from_entries
+            )
+        else
+            .[$group.key] = $group.value
+        end
+    )
+    ' "$MODEL_CONFIG_FILE" > "$temp_file"
+    
+    if [ $? -eq 0 ] && jq empty "$temp_file" 2>/dev/null; then
+        # Check if anything was actually removed
+        local original_count new_count
+        original_count=$(jq '[.. | objects | select(has("localPath")) | .localPath] | length' "$MODEL_CONFIG_FILE" 2>/dev/null || echo "0")
+        new_count=$(jq '[.. | objects | select(has("localPath")) | .localPath] | length' "$temp_file" 2>/dev/null || echo "0")
+        
+        if [ "$new_count" -lt "$original_count" ]; then
+            mv "$temp_file" "$MODEL_CONFIG_FILE"
+            log_model_config "INFO" "Successfully removed model from config: $local_path"
+            model_found=true
+        else
+            log_model_config "INFO" "Model not found in config: $local_path"
+            rm -f "$temp_file"
+        fi
+    else
+        log_model_config "ERROR" "Failed to update model config file during removal"
+        rm -f "$temp_file"
+    fi
+    
+    # Release lock
+    release_model_config_lock "remove"
+    trap - EXIT INT TERM QUIT
+    
+    if [ "$model_found" = true ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
 # Allow script to be sourced or called directly
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     # Called directly, show usage
@@ -482,11 +553,13 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     echo ""
     echo "Functions available:"
     echo "  create_or_update_model <group> <model_object_json>"
-    echo "  delete_model <group> <local_path>"
+    echo "  delete_model <group> <model_name>"
+    echo "  remove_model_by_path <local_path>"
     echo "  find_model_by_path [group] <local_path> [output_file]"
     echo "  list_models_in_group <group> [output_file]"
     echo "  get_model_download_url <local_path>"
     echo "  convert_to_symlink <group> <local_path> <existing_s3_path>"
+    echo "  remove_model_by_path <local_path>"
     echo ""
     echo "Configuration file: $MODEL_CONFIG_FILE"
     echo "Lock directory: $MODEL_CONFIG_LOCK_DIR"
