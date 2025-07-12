@@ -301,6 +301,79 @@ else
     echo "⚠️ WARNING: User data sync script not found. Skipping user data sync."
 fi
 
+# Sync metadata (workflows and model config) from S3
+echo "📋 Syncing ComfyUI metadata from S3..."
+S3_METADATA_BASE="s3://$AWS_BUCKET_NAME/metadata/$POD_ID"
+LOCAL_MODEL_CONFIG="$NETWORK_VOLUME/ComfyUI/models_config.json"
+LOCAL_WORKFLOWS_DIR="$NETWORK_VOLUME/ComfyUI/user/default/workflows"
+
+# Ensure workflows directory exists
+mkdir -p "$LOCAL_WORKFLOWS_DIR"
+
+# Sync model configuration file from S3
+echo "  📥 Syncing model configuration from S3..."
+s3_config_path="$S3_METADATA_BASE/models_config.json"
+
+# Remove existing local config file if it exists to ensure clean sync
+if [ -f "$LOCAL_MODEL_CONFIG" ]; then
+    echo "    🗑️ Removing existing local model config for clean sync"
+    rm -f "$LOCAL_MODEL_CONFIG"
+fi
+
+if aws s3 ls "$s3_config_path" >/dev/null 2>&1; then
+    echo "    📥 Downloading model config from $s3_config_path"
+    if aws s3 cp "$s3_config_path" "$LOCAL_MODEL_CONFIG" --only-show-errors; then
+        echo "    ✅ Model configuration synced successfully"
+        
+        # Validate the downloaded JSON
+        if ! jq empty "$LOCAL_MODEL_CONFIG" 2>/dev/null; then
+            echo "    ⚠️ WARNING: Downloaded model config is invalid JSON, initializing empty config"
+            echo '{}' > "$LOCAL_MODEL_CONFIG"
+        fi
+    else
+        echo "    ⚠️ WARNING: Failed to download model config from S3, initializing empty config"
+        echo '{}' > "$LOCAL_MODEL_CONFIG"
+    fi
+else
+    echo "    ℹ️ No existing model config found in S3, initializing empty config"
+    echo '{}' > "$LOCAL_MODEL_CONFIG"
+fi
+
+# Sync workflows directory from S3
+echo "  📥 Syncing user workflows from S3..."
+s3_workflows_path="$S3_METADATA_BASE/workflows/"
+
+if aws s3 ls "$s3_workflows_path" >/dev/null 2>&1; then
+    # Remove existing local workflows directory if it exists to ensure clean sync
+    if [ -d "$LOCAL_WORKFLOWS_DIR" ] && [ -n "$(find "$LOCAL_WORKFLOWS_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+        echo "    🗑️ Removing existing local workflows for clean sync"
+        rm -rf "$LOCAL_WORKFLOWS_DIR"
+        mkdir -p "$LOCAL_WORKFLOWS_DIR"
+    fi
+    
+    echo "    📥 Downloading workflows from $s3_workflows_path"
+    if aws s3 sync "$s3_workflows_path" "$LOCAL_WORKFLOWS_DIR/" --delete --only-show-errors; then
+        echo "    ✅ User workflows synced successfully"
+        
+        # Count downloaded workflows
+        workflow_count=$(find "$LOCAL_WORKFLOWS_DIR" -type f -name "*.json" | wc -l)
+        echo "    📊 Downloaded $workflow_count workflow files"
+    else
+        echo "    ⚠️ WARNING: Failed to sync workflows from S3, starting with empty directory"
+    fi
+else
+    echo "    ℹ️ No existing workflows found in S3"
+    # Remove all local workflows if nothing exists in S3
+    if [ -d "$LOCAL_WORKFLOWS_DIR" ] && [ -n "$(find "$LOCAL_WORKFLOWS_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+        echo "    🗑️ Removing all local workflows (none exist in S3)"
+        rm -rf "$LOCAL_WORKFLOWS_DIR"
+        mkdir -p "$LOCAL_WORKFLOWS_DIR"
+    fi
+    echo "    📁 Starting with empty workflows directory"
+fi
+
+echo "✅ ComfyUI metadata sync completed."
+
 # Sync remote models after cache restoration
 # echo "🌐 Starting initial remote model sync..."
 # if [ -f "$NETWORK_VOLUME/scripts/sync_remote_models.sh" ]; then

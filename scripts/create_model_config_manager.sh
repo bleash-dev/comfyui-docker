@@ -10,7 +10,7 @@ cat > "$NETWORK_VOLUME/scripts/model_config_manager.sh" << 'EOF'
 # Manages model-config.json with thread-safe operations
 
 # Configuration
-MODEL_CONFIG_FILE="$NETWORK_VOLUME/ComfyUI/model-config.json"
+MODEL_CONFIG_FILE="$NETWORK_VOLUME/ComfyUI/models_config.json"
 MODEL_CONFIG_LOCK_DIR="$NETWORK_VOLUME/.model_config_locks"
 MODEL_CONFIG_LOG="$NETWORK_VOLUME/.model_config_manager.log"
 MODEL_CONFIG_LOCK_TIMEOUT=600  # 1 minute timeout for config operations
