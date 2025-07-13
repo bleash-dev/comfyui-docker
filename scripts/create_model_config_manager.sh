@@ -197,6 +197,25 @@ create_or_update_model() {
         model_object=$(echo "$model_object" | jq ". + {\"uploadedAt\": \"$timestamp\"}")
     fi
     
+    # Strip S3 bucket prefix from s3OriginalPath and symLinkedFrom before saving locally
+    local s3_bucket_prefix="s3://$AWS_BUCKET_NAME"
+    model_object=$(echo "$model_object" | jq \
+        --arg bucketPrefix "$s3_bucket_prefix" \
+        '
+        # Strip bucket prefix from s3OriginalPath if it exists
+        if .s3OriginalPath and (.s3OriginalPath | startswith($bucketPrefix)) then
+            .s3OriginalPath = (.s3OriginalPath | sub($bucketPrefix; ""))
+        else
+            .
+        end |
+        # Strip bucket prefix from symLinkedFrom if it exists
+        if .symLinkedFrom and (.symLinkedFrom | startswith($bucketPrefix)) then
+            .symLinkedFrom = (.symLinkedFrom | sub($bucketPrefix; ""))
+        else
+            .
+        end
+        ')
+    
     # Update the config file
     local temp_file
     temp_file=$(mktemp)
@@ -450,8 +469,15 @@ convert_to_symlink() {
         local timestamp
         timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")
         
+        # Strip S3 bucket prefix from paths before saving locally
+        local s3_bucket_prefix="s3://$AWS_BUCKET_NAME"
+        local stripped_s3_path="$existing_model_s3_path"
+        if [[ "$existing_model_s3_path" == "$s3_bucket_prefix"* ]]; then
+            stripped_s3_path="${existing_model_s3_path#$s3_bucket_prefix}"
+        fi
+        
         model_object=$(echo "$model_object" | jq \
-            --arg s3Path "$existing_model_s3_path" \
+            --arg s3Path "$stripped_s3_path" \
             --arg timestamp "$timestamp" \
             '. + {
                 "originalS3Path": $s3Path,
@@ -567,16 +593,19 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     echo ""
     echo "Model object structure:"
     echo "  {"
-    echo "    \"originalS3Path\": \"s3://bucket/path/model.safetensors\","
+    echo "    \"originalS3Path\": \"/path/model.safetensors\",  # S3 path with bucket prefix stripped"
     echo "    \"localPath\": \"/path/to/local/model.safetensors\","
     echo "    \"modelName\": \"model_name\","
     echo "    \"modelSize\": 1234567890,"
     echo "    \"downloadUrl\": \"https://example.com/model.safetensors\","
-    echo "    \"symLinkedFrom\": \"s3://bucket/existing/path\" (optional),"
+    echo "    \"symLinkedFrom\": \"/existing/path\" (optional),  # S3 path with bucket prefix stripped"
     echo "    \"uploadedAt\": \"2023-07-10T12:00:00.000Z\","
     echo "    \"lastUpdated\": \"2023-07-10T12:00:00.000Z\","
     echo "    \"directoryGroup\": \"checkpoints\""
     echo "  }"
+    echo ""
+    echo "Note: s3OriginalPath and symLinkedFrom fields have the s3://bucket prefix stripped"
+    echo "      when stored in the local config file for portability."
     
     # Initialize if called directly
     initialize_model_config

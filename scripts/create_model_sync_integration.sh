@@ -804,7 +804,13 @@ sanitize_model_config() {
             rm -f "$target_model_file"
             
             if [ -n "$target_s3_path" ] && [ "$target_s3_path" != "null" ]; then
-                if convert_to_symlink "$group" "$path" "$target_s3_path"; then
+                # Reconstruct full S3 URL if the path is already stripped
+                local full_s3_path="$target_s3_path"
+                if [[ "$target_s3_path" != s3://* ]]; then
+                    full_s3_path="s3://$AWS_BUCKET_NAME$target_s3_path"
+                fi
+                
+                if convert_to_symlink "$group" "$path" "$full_s3_path"; then
                     converted_count=$((converted_count + 1))
                     log_model_sync "INFO" "Converted model to symlink: $path -> $target_s3_path"
                 else
