@@ -475,7 +475,7 @@ should_process_file() {
     rm -f "$temp_output"
     
     if [ -z "$download_url" ] || [ "$download_url" = "unknown" ]; then
-        log_model_sync "INFO" "Skipping file without valid download URL in config: $file_name"
+        log_model_sync "INFO" "Skipping file without valid download URL in config: $file_name $download_url"
         return 1
     fi
     
