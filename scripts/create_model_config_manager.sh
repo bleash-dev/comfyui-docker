@@ -408,7 +408,7 @@ get_model_download_url() {
     
     if [ $? -eq 0 ] && [ -f "$model_file" ]; then
         local download_url
-        download_url=$(jq -r '.downloadLink // empty' "$model_file" 2>/dev/null)
+        download_url=$(jq -r '.downloadUrl // empty' "$model_file" 2>/dev/null)
         rm -f "$model_file"
         
         if [ -n "$download_url" ] && [ "$download_url" != "null" ]; then
@@ -457,7 +457,7 @@ convert_to_symlink() {
                 "originalS3Path": $s3Path,
                 "symLinkedFrom": $s3Path,
                 "lastUpdated": $timestamp
-            } | del(.downloadLink)')
+            } | del(.downloadUrl)')
         
         # Update the config
         create_or_update_model "$group" "$model_object"
@@ -571,7 +571,7 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     echo "    \"localPath\": \"/path/to/local/model.safetensors\","
     echo "    \"modelName\": \"model_name\","
     echo "    \"modelSize\": 1234567890,"
-    echo "    \"downloadLink\": \"https://example.com/model.safetensors\","
+    echo "    \"downloadUrl\": \"https://example.com/model.safetensors\","
     echo "    \"symLinkedFrom\": \"s3://bucket/existing/path\" (optional),"
     echo "    \"uploadedAt\": \"2023-07-10T12:00:00.000Z\","
     echo "    \"lastUpdated\": \"2023-07-10T12:00:00.000Z\","
