@@ -375,7 +375,7 @@ find_model_by_path() {
     
     if [ -s "$output_file" ]; then
         log_model_config "DEBUG" "Found model with local path: $local_path"
-        cat "$output_file"
+        echo "$output_file"
         return 0
     else
         log_model_config "DEBUG" "No model found with local path: $local_path"
