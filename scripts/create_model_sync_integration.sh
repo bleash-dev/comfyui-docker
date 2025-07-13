@@ -533,7 +533,7 @@ notify_model_sync_progress() {
     local percentage="$3"
     
     # Add model-specific prefix to sync type
-    local full_sync_type="model_${sync_type}"
+    local full_sync_type="${sync_type}"
     
     notify_sync_progress "$full_sync_type" "$status" "$percentage"
     
