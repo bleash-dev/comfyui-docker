@@ -1,0 +1,36 @@
+{
+  "checkpoints": {
+    "test_model_1": {
+      "originalS3Path": "models/checkpoints/test_model_1.safetensors",
+      "localPath": "{{NETWORK_VOLUME}}/ComfyUI/models/checkpoints/test_model_1.safetensors",
+      "modelName": "test_model_1",
+      "modelSize": 2048576,
+      "downloadUrl": "https://example.com/test_model_1.safetensors",
+      "uploadedAt": "2023-07-10T12:00:00.000Z",
+      "lastUpdated": "2023-07-10T12:00:00.000Z",
+      "directoryGroup": "checkpoints"
+    },
+    "test_model_2": {
+      "originalS3Path": "models/checkpoints/test_model_2.safetensors",
+      "localPath": "{{NETWORK_VOLUME}}/ComfyUI/models/checkpoints/test_model_2.safetensors",
+      "modelName": "test_model_2",
+      "modelSize": 1024512,
+      "downloadUrl": "https://example.com/test_model_2.safetensors",
+      "uploadedAt": "2023-07-10T13:00:00.000Z",
+      "lastUpdated": "2023-07-10T13:00:00.000Z",
+      "directoryGroup": "checkpoints"
+    }
+  },
+  "loras": {
+    "test_lora_1": {
+      "originalS3Path": "models/loras/test_lora_1.safetensors",
+      "localPath": "{{NETWORK_VOLUME}}/ComfyUI/models/loras/test_lora_1.safetensors",
+      "modelName": "test_lora_1",
+      "modelSize": 512256,
+      "downloadUrl": "https://example.com/test_lora_1.safetensors",
+      "uploadedAt": "2023-07-10T14:00:00.000Z",
+      "lastUpdated": "2023-07-10T14:00:00.000Z",
+      "directoryGroup": "loras"
+    }
+  }
+}

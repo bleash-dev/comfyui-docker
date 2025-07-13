@@ -61,12 +61,12 @@ upload_file_with_progress() {
     
     local file_size
     file_size=$(stat -f%z "$local_file" 2>/dev/null || stat -c%s "$local_file" 2>/dev/null || echo "0")
-    local file_name=$(basename "$local_file")
+    local file_name=$(extract_model_name_from_path "$local_file")
     
     log_model_sync "INFO" "Uploading $file_name to S3 (${file_size} bytes)"
     
-    # Prepare metadata with download URL (required)
-    local metadata_args="--metadata downloadUrl=\"$download_url\""
+    # Prepare metadata with download URL (required) - escape URL for metadata
+    local metadata_args="--metadata downloadUrl=$download_url"
     log_model_sync "INFO" "Including download URL in metadata: $download_url"
     
     # Check if pv (pipe viewer) is available for better progress tracking
@@ -246,6 +246,8 @@ process_model_for_sync() {
     local download_url=""
     if get_model_download_url "$local_path" "$temp_output"; then
         download_url=$(<"$temp_output")
+        # Strip any newlines or extra whitespace
+        download_url=$(echo "$download_url" | tr -d '\n\r' | xargs)
     else
         download_url=""
     fi
@@ -253,13 +255,13 @@ process_model_for_sync() {
     rm -f "$temp_output"
     
     if [ -z "$download_url" ] || [ "$download_url" = "unknown" ]; then
-        log_model_sync "INFO" "Skipping model (no download URL in config): $(basename "$local_path")"
+        log_model_sync "INFO" "Skipping model (no download URL in config): $(extract_model_name_from_path "$local_path")"
         return 1
     fi
     
     # Validate that the download URL is actually a valid URL format (HTTP/HTTPS/S3)
     if ! echo "$download_url" | grep -qE '^(https?|s3)://[^[:space:]]+$'; then
-        log_model_sync "INFO" "Skipping model (invalid download URL format): $(basename "$local_path") (URL: $download_url)"
+        log_model_sync "INFO" "Skipping model (invalid download URL format): $(extract_model_name_from_path "$local_path") (URL: $download_url)"
         return 1
     fi
     
@@ -324,7 +326,7 @@ process_model_for_sync() {
         model_object=$(jq -n \
             --arg originalS3Path "$s3_destination" \
             --arg localPath "$local_path" \
-            --arg modelName "$(basename "$local_path")" \
+            --arg modelName "$(extract_model_name_from_path "$local_path")" \
             --argjson modelSize "$model_size" \
             --arg downloadUrl "$download_url" \
             --arg directoryGroup "$destination_group" \
@@ -358,7 +360,7 @@ process_model_for_sync() {
             log_model_sync "INFO" "Removing invalid model from local config: $reason"
             
             # Find and remove the model from config
-            local model_name=$(basename "$local_path")
+            local model_name=$(extract_model_name_from_path "$local_path")
             if remove_model_by_path "$local_path"; then
                 log_model_sync "INFO" "Successfully removed invalid model from config: $model_name"
             else
@@ -387,7 +389,7 @@ process_model_for_sync() {
                 model_object=$(jq -n \
                     --arg originalS3Path "$existing_s3_path" \
                     --arg localPath "$local_path" \
-                    --arg modelName "$(basename "$local_path")" \
+                    --arg modelName "$(extract_model_name_from_path "$local_path")" \
                     --argjson modelSize "$model_size" \
                     --arg downloadUrl "$download_url" \
                     --arg directoryGroup "$destination_group" \
@@ -441,7 +443,7 @@ notify_model_sync_progress() {
 # Function to check if a file should be processed for sync
 should_process_file() {
     local file_path="$1"
-    local file_name=$(basename "$file_path")
+    local file_name=$(extract_model_name_from_path "$file_path")
     
     # Skip hidden files and system files
     if [[ "$file_name" =~ ^\. ]]; then
@@ -466,8 +468,10 @@ should_process_file() {
     temp_output=$(mktemp)
 
     local download_url=""
-    if get_model_download_url "$local_path" "$temp_output"; then
+    if get_model_download_url "$file_path" "$temp_output"; then
         download_url=$(<"$temp_output")
+        # Strip any newlines or extra whitespace
+        download_url=$(echo "$download_url" | tr -d '\n\r' | xargs)
     else
         download_url=""
     fi
@@ -564,8 +568,10 @@ batch_process_models() {
                     temp_output=$(mktemp)
 
                     local download_url=""
-                    if get_model_download_url "$local_path" "$temp_output"; then
+                    if get_model_download_url "$model_file" "$temp_output"; then
                         download_url=$(<"$temp_output")
+                        # Strip any newlines or extra whitespace
+                        download_url=$(echo "$download_url" | tr -d '\n\r' | xargs)
                     else
                         download_url=""
                     fi
@@ -636,9 +642,9 @@ sanitize_model_config() {
     [
         to_entries[] |
         select(.value | type == "object") |
-        {group: .key, models: .value} |
-        .models | to_entries[] |
-        .value + {"directoryGroup": .group, "configKey": .key}
+        . as $parent |
+        .value | to_entries[] |
+        .value + {"directoryGroup": $parent.key, "configKey": .key}
     ]
     ' "$MODEL_CONFIG_FILE" > "$all_models_file" 2>/dev/null
     
@@ -809,47 +815,51 @@ sanitize_model_config() {
     
     # Apply removals
     local removed_count=0
-    for model_path in "${models_to_remove[@]}"; do
-        if remove_model_by_path "$model_path"; then
-            removed_count=$((removed_count + 1))
-            log_model_sync "INFO" "Removed model from config: $model_path"
-        fi
-    done
+    if [ ${#models_to_remove[@]} -gt 0 ]; then
+        for model_path in "${models_to_remove[@]}"; do
+            if remove_model_by_path "$model_path"; then
+                removed_count=$((removed_count + 1))
+                log_model_sync "INFO" "Removed model from config: $model_path"
+            fi
+        done
+    fi
     
     # Apply symlink conversions
     local converted_count=0
-    for conversion in "${models_to_convert[@]}"; do
-        IFS='|' read -r group path target <<< "$conversion"
-        
-        # Get the target model's S3 path from config
-        local target_model_file
-        target_model_file=$(find_model_by_path "" "$target")
-        
-        if [ $? -eq 0 ] && [ -f "$target_model_file" ]; then
-            local target_s3_path
-            target_s3_path=$(jq -r '.originalS3Path // ""' "$target_model_file" 2>/dev/null)
-            rm -f "$target_model_file"
+    if [ ${#models_to_convert[@]} -gt 0 ]; then
+        for conversion in "${models_to_convert[@]}"; do
+            IFS='|' read -r group path target <<< "$conversion"
             
-            if [ -n "$target_s3_path" ] && [ "$target_s3_path" != "null" ]; then
-                # Reconstruct full S3 URL if the path is already stripped
-                local full_s3_path="$target_s3_path"
-                if [[ "$target_s3_path" != s3://* ]]; then
-                    full_s3_path="s3://$AWS_BUCKET_NAME$target_s3_path"
-                fi
+            # Get the target model's S3 path from config
+            local target_model_file
+            target_model_file=$(find_model_by_path "" "$target")
+            
+            if [ $? -eq 0 ] && [ -f "$target_model_file" ]; then
+                local target_s3_path
+                target_s3_path=$(jq -r '.originalS3Path // ""' "$target_model_file" 2>/dev/null)
+                rm -f "$target_model_file"
                 
-                if convert_to_symlink "$group" "$path" "$full_s3_path"; then
-                    converted_count=$((converted_count + 1))
-                    log_model_sync "INFO" "Converted model to symlink: $path -> $target_s3_path"
+                if [ -n "$target_s3_path" ] && [ "$target_s3_path" != "null" ]; then
+                    # Reconstruct full S3 URL if the path is already stripped
+                    local full_s3_path="$target_s3_path"
+                    if [[ "$target_s3_path" != s3://* ]]; then
+                        full_s3_path="s3://$AWS_BUCKET_NAME$target_s3_path"
+                    fi
+                    
+                    if convert_to_symlink "$group" "$path" "$full_s3_path"; then
+                        converted_count=$((converted_count + 1))
+                        log_model_sync "INFO" "Converted model to symlink: $path -> $target_s3_path"
+                    else
+                        log_model_sync "ERROR" "Failed to convert model to symlink: $path"
+                    fi
                 else
-                    log_model_sync "ERROR" "Failed to convert model to symlink: $path"
+                    log_model_sync "ERROR" "Could not find S3 path for target model: $target"
                 fi
             else
-                log_model_sync "ERROR" "Could not find S3 path for target model: $target"
+                log_model_sync "ERROR" "Could not find target model in config: $target"
             fi
-        else
-            log_model_sync "ERROR" "Could not find target model in config: $target"
-        fi
-    done
+        done
+    fi
     
     log_model_sync "INFO" "Model config sanitization completed: removed $removed_count models, converted $converted_count to symlinks"
     

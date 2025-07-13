@@ -27,7 +27,53 @@ log_model_config() {
     shift
     local message="$*"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] [$level] Model Config: $message" | tee -a "$MODEL_CONFIG_LOG"
+    echo "[$timestamp] [$level] Model Config: $message" | tee -a "$MODEL_CONFIG_LOG" >&2
+}
+
+# Function to extract model name from file path using backend convention
+# Matches the extractModelName function from the backend:
+# - Looks for 'models/' pattern
+# - Removes the models prefix
+# - Skips the first part (group) and returns everything after
+# - Handles nested directories like: {group}/{subdir}/{modelName}
+extract_model_name_from_path() {
+    local file_path="$1"
+    
+    # Normalize path separators
+    local normalized_path="${file_path//\\//}"
+    
+    # Look for '/models/' pattern
+    local models_prefix="/models/"
+    local models_index
+    
+    if [[ "$normalized_path" == *"$models_prefix"* ]]; then
+        # Remove everything up to and including '/models/'
+        local after_models="${normalized_path#*$models_prefix}"
+        
+        # Split by '/' and get path parts
+        IFS='/' read -ra path_parts <<< "$after_models"
+        
+        if [ ${#path_parts[@]} -lt 2 ]; then
+            # If no group or model name, return the whole relative path
+            echo "$after_models"
+            return
+        fi
+        
+        # Skip the first part (group) and return everything after
+        # Handles nested dirs like: {group}/{subdir}/{modelName}
+        local result=""
+        for ((i=1; i<${#path_parts[@]}; i++)); do
+            if [ -n "$result" ]; then
+                result="${result}/${path_parts[i]}"
+            else
+                result="${path_parts[i]}"
+            fi
+        done
+        echo "$result"
+    else
+        # Fallback to basename for non-standard paths
+        basename "$file_path"
+    fi
 }
 
 # Function to acquire model config lock
@@ -142,8 +188,22 @@ initialize_model_config() {
         echo '{}' > "$MODEL_CONFIG_FILE"
     fi
     
-    # Validate JSON structure
-    if ! jq empty "$MODEL_CONFIG_FILE" 2>/dev/null; then
+    # Validate JSON structure - check if it's valid JSON
+    local json_valid=true
+    if ! jq empty "$MODEL_CONFIG_FILE" >/dev/null 2>&1; then
+        json_valid=false
+    fi
+    
+    # Also check if it's not empty but parses as null
+    if [ "$json_valid" = "true" ]; then
+        local parsed_content
+        parsed_content=$(jq -r '.' "$MODEL_CONFIG_FILE" 2>/dev/null)
+        if [ "$parsed_content" = "null" ] || [ -z "$parsed_content" ]; then
+            json_valid=false
+        fi
+    fi
+    
+    if [ "$json_valid" = "false" ]; then
         log_model_config "WARN" "Invalid JSON in model config file, reinitializing..."
         echo '{}' > "$MODEL_CONFIG_FILE"
     fi
@@ -197,14 +257,14 @@ create_or_update_model() {
         model_object=$(echo "$model_object" | jq ". + {\"uploadedAt\": \"$timestamp\"}")
     fi
     
-    # Strip S3 bucket prefix from s3OriginalPath and symLinkedFrom before saving locally
+    # Strip S3 bucket prefix from originalS3Path and symLinkedFrom before saving locally
     local s3_bucket_prefix="s3://$AWS_BUCKET_NAME/"
     model_object=$(echo "$model_object" | jq \
         --arg bucketPrefix "$s3_bucket_prefix" \
         '
-        # Strip bucket prefix from s3OriginalPath if it exists
-        if .s3OriginalPath and (.s3OriginalPath | startswith($bucketPrefix)) then
-            .s3OriginalPath = (.s3OriginalPath | sub($bucketPrefix; ""))
+        # Strip bucket prefix from originalS3Path if it exists
+        if .originalS3Path and (.originalS3Path | startswith($bucketPrefix)) then
+            .originalS3Path = (.originalS3Path | sub($bucketPrefix; ""))
         else
             .
         end |
@@ -219,6 +279,12 @@ create_or_update_model() {
     # Update the config file
     local temp_file
     temp_file=$(mktemp)
+    
+    # Validate JSON before processing
+    if ! echo "$model_object" | jq empty >/dev/null 2>&1; then
+        log_model_config "ERROR" "Invalid JSON for model object in create_or_update_model: $model_object" >&2
+        return 1
+    fi
     
     # Create or update the group and model entry
     jq --arg group "$group" \
@@ -323,7 +389,7 @@ delete_model() {
 find_model_by_path() {
     local group="$1"
     local local_path="$2"
-    local output_file="$3"
+    local output_file="${3:-}"
     
     # Support both old and new calling conventions
     if [ -z "$output_file" ] && [ -z "$local_path" ]; then
@@ -364,12 +430,12 @@ find_model_by_path() {
         # Search across all groups
         jq --arg localPath "$local_path" \
            '
-           to_entries[] | 
+           [to_entries[] | 
            select(.value | type == "object") |
            {key: .key, models: .value} |
            .models | to_entries[] |
            select(.value.localPath == $localPath) |
-           .value + {"directoryGroup": .key}
+           .value + {"directoryGroup": .key}][0] // empty
            ' "$MODEL_CONFIG_FILE" > "$output_file" 2>/dev/null
     fi
     
@@ -478,6 +544,13 @@ convert_to_symlink() {
         local stripped_s3_path="$existing_model_s3_path"
         if [[ "$existing_model_s3_path" == "$s3_bucket_prefix"* ]]; then
             stripped_s3_path="${existing_model_s3_path#$s3_bucket_prefix}"
+        fi
+        
+        # Validate JSON before processing
+        if ! echo "$model_object" | jq empty >/dev/null 2>&1; then
+            log_model_config "ERROR" "Invalid JSON for model object in symlink conversion:" >&2
+            log_model_config "ERROR" "Content: $model_object" >&2
+            return 1
         fi
         
         model_object=$(echo "$model_object" | jq \
