@@ -72,8 +72,8 @@ if [[ -d "$NETWORK_VOLUME/ComfyUI" ]]; then
         notify_sync_progress "user_data" "PROGRESS" 40
         
         echo "  📤 Uploading $COMFYUI_POD_SPECIFIC_ARCHIVE_NAME to S3..."
-        # Use the enhanced upload function with progress tracking
-        if upload_file_with_progress "$TEMP_ARCHIVE_PATH" "$S3_COMFYUI_POD_SPECIFIC_PATH" "user_data" 1 2; then
+        # Use sync_to_s3_with_progress for better progress tracking
+        if sync_to_s3_with_progress "$TEMP_ARCHIVE_PATH" "$S3_COMFYUI_POD_SPECIFIC_PATH" "user_data" 1 2 "cp"; then
             echo "  ✅ Successfully uploaded $COMFYUI_POD_SPECIFIC_ARCHIVE_NAME"
         else
             echo "  ❌ Failed to sync $COMFYUI_POD_SPECIFIC_ARCHIVE_NAME"
@@ -139,8 +139,8 @@ if [[ "$OTHER_HAS_DATA_TO_SYNC" == "true" ]]; then
     notify_sync_progress "user_data" "PROGRESS" 80
     
     echo "  📤 Uploading $OTHER_POD_SPECIFIC_ARCHIVE_NAME to S3..."
-    # Use the enhanced upload function with progress tracking
-    if upload_file_with_progress "$TEMP_ARCHIVE_PATH" "$S3_OTHER_POD_SPECIFIC_PATH" "user_data" 2 2; then
+    # Use sync_to_s3_with_progress for better progress tracking
+    if sync_to_s3_with_progress "$TEMP_ARCHIVE_PATH" "$S3_OTHER_POD_SPECIFIC_PATH" "user_data" 2 2 "cp"; then
         echo "  ✅ Successfully uploaded $OTHER_POD_SPECIFIC_ARCHIVE_NAME"
     else
         echo "  ❌ Failed to sync $OTHER_POD_SPECIFIC_ARCHIVE_NAME"
@@ -228,7 +228,7 @@ sync_user_shared_data_internal() {
         archive_name="$(basename "$archive_path")"
 
         echo "  📤 Uploading $archive_name to $s3_dest..."
-        if upload_file_with_progress "$archive_path" "$s3_dest" "user_data" $((processed_archives + 1)) "$total_archives"; then
+        if sync_to_s3_with_progress "$archive_path" "$s3_dest" "user_data" $((processed_archives + 1)) "$total_archives" "cp"; then
             echo "  ✅ Successfully uploaded $archive_name"
         else
             echo "  ❌ Failed to upload $archive_name"
@@ -373,8 +373,12 @@ sync_global_shared_models_internal() {
         if [[ -n "$(find "$LOCAL_BROWSER_SESSIONS_BASE" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
             echo "🌐 Syncing global shared browser sessions to S3..."
             echo "  📤 Syncing browser sessions to $S3_BROWSER_SESSIONS_BASE/"
-            aws s3 sync "$LOCAL_BROWSER_SESSIONS_BASE" "$S3_BROWSER_SESSIONS_BASE/" --only-show-errors || \
+            # Use sync_to_s3_with_progress for better progress tracking
+            if sync_to_s3_with_progress "$LOCAL_BROWSER_SESSIONS_BASE" "$S3_BROWSER_SESSIONS_BASE/" "global_shared" 1 1 "sync"; then
+                echo "  ✅ Successfully synced global browser sessions"
+            else
                 echo "  ❌ Failed to sync global browser sessions"
+            fi
         else
             echo "  📭 Skipping empty browser sessions directory"
         fi
@@ -495,8 +499,8 @@ sync_pod_metadata_internal() {
         notify_sync_progress "pod_metadata" "PROGRESS" 25
         s3_config_path="$S3_METADATA_BASE/models_config.json"
         
-        # Use enhanced upload with progress tracking
-        if upload_file_with_progress "$LOCAL_MODEL_CONFIG" "$s3_config_path" "pod_metadata" 1 2; then
+        # Use sync_to_s3_with_progress for better progress tracking
+        if sync_to_s3_with_progress "$LOCAL_MODEL_CONFIG" "$s3_config_path" "pod_metadata" 1 2 "cp"; then
             echo "  ✅ Successfully synced model configuration"
         else
             echo "  ❌ Failed to sync model configuration"
@@ -513,8 +517,8 @@ sync_pod_metadata_internal() {
             notify_sync_progress "pod_metadata" "PROGRESS" 50
             s3_workflows_path="$S3_METADATA_BASE/workflows/"
             
-            # Use simple S3 sync for workflows
-            if aws s3 sync "$LOCAL_WORKFLOWS_DIR" "$s3_workflows_path" --delete --only-show-errors; then
+            # Use sync_to_s3_with_progress for better progress tracking
+            if sync_to_s3_with_progress "$LOCAL_WORKFLOWS_DIR" "$s3_workflows_path" "pod_metadata" 2 3 "sync-delete"; then
                 echo "  ✅ Successfully synced user workflows"
             else
                 echo "  ❌ Failed to sync user workflows"

@@ -29,29 +29,130 @@ log_model_sync() {
     echo "[$timestamp] [$level] Model Sync: $message" | tee -a "$MODEL_SYNC_LOG"
 }
 
-# Function to upload file to S3 with progress tracking
+# Function to sync files/directories to S3 with progress tracking (for non-model uploads)
+sync_to_s3_with_progress() {
+    local source_path="$1"
+    local s3_destination="$2"
+    local sync_type="$3"
+    local current_item_index="$4"
+    local total_items="$5"
+    local operation="${6:-cp}"  # Default to 'cp', can be 'sync'
+    
+    if [ -z "$source_path" ] || [ -z "$s3_destination" ] || [ -z "$sync_type" ]; then
+        log_model_sync "ERROR" "Missing required parameters for S3 sync"
+        return 1
+    fi
+    
+    if [ ! -e "$source_path" ]; then
+        log_model_sync "ERROR" "Source path does not exist: $source_path"
+        return 1
+    fi
+    
+    local item_name=$(basename "$source_path")
+    local file_size=0
+    
+    if [ -f "$source_path" ]; then
+        file_size=$(stat -f%z "$source_path" 2>/dev/null || stat -c%s "$source_path" 2>/dev/null || echo "0")
+        log_model_sync "INFO" "Uploading file $item_name to S3 (${file_size} bytes)"
+    elif [ -d "$source_path" ]; then
+        local file_count=$(find "$source_path" -type f | wc -l | tr -d ' ')
+        log_model_sync "INFO" "Syncing directory $item_name to S3 ($file_count files)"
+    fi
+    
+    # Calculate progress percentage if we have index information
+    local progress_percentage=""
+    if [ -n "$current_item_index" ] && [ -n "$total_items" ] && [ "$total_items" -gt 0 ]; then
+        progress_percentage=$((current_item_index * 100 / total_items))
+        notify_sync_progress "$sync_type" "PROGRESS" "$progress_percentage"
+        log_model_sync "INFO" "Progress notification sent: $sync_type PROGRESS $progress_percentage%"
+    fi
+    
+    # Perform the actual S3 operation
+    local success=false
+    case "$operation" in
+        "cp")
+            if [ -f "$source_path" ]; then
+                if aws s3 cp "$source_path" "$s3_destination" --only-show-errors; then
+                    success=true
+                fi
+            else
+                log_model_sync "ERROR" "Cannot use 'cp' operation on directory: $source_path"
+                return 1
+            fi
+            ;;
+        "sync")
+            if [ -d "$source_path" ]; then
+                if aws s3 sync "$source_path" "$s3_destination" --only-show-errors; then
+                    success=true
+                fi
+            else
+                log_model_sync "ERROR" "Cannot use 'sync' operation on file: $source_path"
+                return 1
+            fi
+            ;;
+        "sync-delete")
+            if [ -d "$source_path" ]; then
+                if aws s3 sync "$source_path" "$s3_destination" --delete --only-show-errors; then
+                    success=true
+                fi
+            else
+                log_model_sync "ERROR" "Cannot use 'sync-delete' operation on file: $source_path"
+                return 1
+            fi
+            ;;
+        *)
+            log_model_sync "ERROR" "Unknown operation: $operation"
+            return 1
+            ;;
+    esac
+    
+    if [ "$success" = true ]; then
+        log_model_sync "INFO" "Successfully ${operation}ed: $item_name"
+        return 0
+    else
+        log_model_sync "ERROR" "Failed to ${operation}: $item_name"
+        return 1
+    fi
+}
+
+# Function to upload file to S3 with progress tracking (for model uploads)
 upload_file_with_progress() {
     local local_file="$1"
     local s3_destination="$2"
     local sync_type="$3"
     local current_file_index="$4"
     local total_files="$5"
-    local download_url="$6"  # Required download URL for metadata
+    local download_url="$6"  # Optional download URL for metadata (required for model uploads)
     
-    if [ -z "$local_file" ] || [ -z "$s3_destination" ] || [ -z "$sync_type" ] || [ -z "$download_url" ]; then
-        log_model_sync "ERROR" "Missing required parameters for S3 upload (including download URL)"
+    if [ -z "$local_file" ] || [ -z "$s3_destination" ] || [ -z "$sync_type" ]; then
+        log_model_sync "ERROR" "Missing required parameters for S3 upload"
         return 1
     fi
     
-    # Validate download URL format
-    if [ "$download_url" = "null" ] || [ "$download_url" = "unknown" ]; then
-        log_model_sync "ERROR" "Invalid download URL provided: $download_url"
-        return 1
-    fi
+    # Check if this is a model upload (requires download URL)
+    local is_model_upload=false
+    case "$sync_type" in
+        *model*|*checkpoint*|*lora*|*textual_inversion*|*controlnet*|*vae*)
+            is_model_upload=true
+            ;;
+    esac
     
-    if ! echo "$download_url" | grep -qE '^(https?|s3)://[^[:space:]]+$'; then
-        log_model_sync "ERROR" "Download URL has invalid format: $download_url"
-        return 1
+    # Validate download URL for model uploads
+    if [ "$is_model_upload" = "true" ]; then
+        if [ -z "$download_url" ]; then
+            log_model_sync "ERROR" "Download URL is required for model uploads"
+            return 1
+        fi
+        
+        if [ "$download_url" = "null" ] || [ "$download_url" = "unknown" ]; then
+            log_model_sync "ERROR" "Invalid download URL provided: $download_url"
+            return 1
+        fi
+        
+        if ! echo "$download_url" | grep -qE '^(https?|s3)://[^[:space:]]+$'; then
+            log_model_sync "ERROR" "Download URL has invalid format: $download_url"
+            return 1
+        fi
     fi
     
     if [ ! -f "$local_file" ]; then

@@ -52,14 +52,20 @@ setup_test_env() {
     mkdir -p "$TEST_TEMP_DIR/network_volume/scripts"
     mkdir -p "$TEST_TEMP_DIR/network_volume/.model_config_locks"
     
-    # Set up test environment variables
+    # Source .env file if it exists for environment variables
+    if [ -f "$PROJECT_ROOT/.env" ]; then
+        set -a  # automatically export all variables
+        source "$PROJECT_ROOT/.env"
+        set +a  # stop automatically exporting
+        log_test "INFO" "Sourced .env file for test environment"
+    fi
+    
+    # Set up test environment variables (override .env for testing)
     export NETWORK_VOLUME="$TEST_TEMP_DIR/network_volume"
-    export AWS_ACCESS_KEY_ID="AKIAQAGGWRGSBIWAMIT2"
-    export AWS_SECRET_ACCESS_KEY="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"
     export AWS_DEFAULT_REGION="us-east-1"
-    export AWS_BUCKET_NAME="global-test-bucket-ws"
+    export AWS_BUCKET_NAME="global-test-bucket-ws"  # Force test bucket name
     export POD_ID="test-pod-123"
-    export POD_USER_NAME="test-user"
+    export POD_USER_NAME="${POD_USER_NAME:-test-user}"
     export API_BASE_URL="http://localhost:3000"
     export WEBHOOK_SECRET_KEY="test-secret-key"
     
