@@ -122,7 +122,7 @@ test_duplicate_handling_workflow() {
     mkdir -p "$models_dir/loras"
     create_test_model_file "$models_dir/checkpoints/duplicate_model_v1.safetensors" 1024
     create_test_model_file "$models_dir/loras/duplicate_model_v2.safetensors" 2048
-    # Don't create missing_file.safetensors to test its removal
+    # Don't create missing_file.safetensors to test remote model preservation
     
     # Verify we have the expected models initially (1 checkpoint + 1 lora + 1 missing)
     local checkpoint_count
@@ -138,10 +138,10 @@ test_duplicate_handling_workflow() {
     local sanitize_result=$?
     assert_equals "0" "$sanitize_result" "Sanitization should succeed"
     
-    # Check that missing file was removed but valid models remain
+    # Check that models remain (including missing file which could be remote)
     local final_checkpoint_count
     final_checkpoint_count=$(jq '.checkpoints | length' "$config_file")
-    assert_equals "1" "$final_checkpoint_count" "Should have 1 checkpoint model (missing file removed)"
+    assert_equals "3" "$final_checkpoint_count" "Should have 3 checkpoint models after sanitization (preserving potentially remote files and symlink conversions)"
     
     local final_lora_count
     final_lora_count=$(jq '.loras | length' "$config_file")
@@ -156,8 +156,8 @@ test_duplicate_handling_workflow() {
     assert_not_equals "$checkpoint_name" "$lora_name" "Models in different groups should have different names"
 }
 
-# Test missing file cleanup workflow
-test_missing_file_cleanup_workflow() {
+# Test missing file cleanup workflow (now tests remote model preservation)
+test_remote_model_preservation_workflow() {
     source_model_config_manager
     source_model_sync_integration
     
@@ -169,7 +169,7 @@ test_missing_file_cleanup_workflow() {
     
     # Create only some of the model files
     create_test_model_file "$models_dir/checkpoints/existing_model.safetensors" 1024
-    # Note: missing_model.safetensors is intentionally not created
+    # Note: remote_model.safetensors is intentionally not created (simulating remote-only model)
     
     # Add both models to config
     local existing_model='{
@@ -180,16 +180,16 @@ test_missing_file_cleanup_workflow() {
         "downloadUrl": "https://example.com/existing_model.safetensors"
     }'
     
-    local missing_model='{
-        "originalS3Path": "/models/checkpoints/missing_model.safetensors",
-        "localPath": "'$models_dir'/checkpoints/missing_model.safetensors",
-        "modelName": "missing_model",
+    local remote_model='{
+        "originalS3Path": "/models/checkpoints/remote_model.safetensors",
+        "localPath": "'$models_dir'/checkpoints/remote_model.safetensors",
+        "modelName": "remote_model",
         "modelSize": 1024,
-        "downloadUrl": "https://example.com/missing_model.safetensors"
+        "downloadUrl": "https://example.com/remote_model.safetensors"
     }'
     
     create_or_update_model "checkpoints" "$existing_model"
-    create_or_update_model "checkpoints" "$missing_model"
+    create_or_update_model "checkpoints" "$remote_model"
     
     # Verify we have 2 models initially
     local initial_count
@@ -201,20 +201,80 @@ test_missing_file_cleanup_workflow() {
     local sanitize_result=$?
     assert_equals "0" "$sanitize_result" "Sanitization should succeed"
     
-    # Check that only the existing model remains
+    # Check that BOTH models remain (preserving potentially remote files)
     local final_count
     final_count=$(jq '.checkpoints | length' "$config_file")
-    assert_equals "1" "$final_count" "Should have only 1 model after cleanup"
+    assert_equals "2" "$final_count" "Should preserve both models (including remote-only)"
     
-    # Check that the correct model remains
-    local remaining_model
-    remaining_model=$(jq -r '.checkpoints.existing_model.modelName // "missing"' "$config_file")
-    assert_equals "existing_model" "$remaining_model" "Should keep the existing model"
+    # Check that both models are still in config
+    local existing_model_check
+    existing_model_check=$(jq -r '.checkpoints.existing_model.modelName // "missing"' "$config_file")
+    assert_equals "existing_model" "$existing_model_check" "Should keep the existing local model"
     
-    # Check that the missing model was removed
-    local missing_model_check
-    missing_model_check=$(jq -r '.checkpoints.missing_model // "missing"' "$config_file")
-    assert_equals "missing" "$missing_model_check" "Should remove the missing model"
+    # Check that the remote model was preserved
+    local remote_model_check
+    remote_model_check=$(jq -r '.checkpoints.remote_model.modelName // "missing"' "$config_file")
+    assert_equals "remote_model" "$remote_model_check" "Should preserve the remote model config"
+}
+
+# Test local duplicate handling workflow (only converts local duplicates)
+test_local_duplicate_handling_workflow() {
+    source_model_config_manager
+    source_model_sync_integration
+    
+    local config_file="$NETWORK_VOLUME/ComfyUI/models_config.json"
+    local models_dir="$NETWORK_VOLUME/ComfyUI/models"
+    
+    # Initialize config with duplicate local models
+    echo '{}' > "$config_file"
+    
+    # Create multiple local files that are duplicates
+    create_test_model_file "$models_dir/checkpoints/duplicate_v1.safetensors" 1024
+    create_test_model_file "$models_dir/checkpoints/duplicate_v2.safetensors" 2048  # Larger, should be primary
+    
+    # Add both as separate models with same download URL (making them duplicates by content, not name)
+    local duplicate1='{
+        "originalS3Path": "/models/checkpoints/duplicate_v1.safetensors",
+        "localPath": "'$models_dir'/checkpoints/duplicate_v1.safetensors",
+        "modelName": "duplicate_v1",
+        "modelSize": 1024,
+        "downloadUrl": "https://example.com/duplicate_model.safetensors"
+    }'
+    
+    local duplicate2='{
+        "originalS3Path": "/models/checkpoints/duplicate_v2.safetensors",
+        "localPath": "'$models_dir'/checkpoints/duplicate_v2.safetensors",
+        "modelName": "duplicate_v2",
+        "modelSize": 2048,
+        "downloadUrl": "https://example.com/duplicate_model.safetensors"
+    }'
+    
+    create_or_update_model "checkpoints" "$duplicate1"
+    create_or_update_model "checkpoints" "$duplicate2"
+    
+    # Verify we have 2 models initially
+    local initial_count
+    initial_count=$(jq '.checkpoints | length' "$config_file")
+    assert_equals "2" "$initial_count" "Should start with 2 duplicate models"
+    
+    # Run sanitization
+    sanitize_model_config
+    local sanitize_result=$?
+    assert_equals "0" "$sanitize_result" "Sanitization should succeed"
+    
+    # Check that we still have both entries but one converted to symlink
+    local final_count
+    final_count=$(jq '.checkpoints | length' "$config_file")
+    assert_equals "2" "$final_count" "Should preserve both model entries"
+    
+    # Check that the larger file (v2) remained primary and v1 became symlink
+    local v2_symlink
+    v2_symlink=$(jq -r '.checkpoints.duplicate_v2.symLinkedFrom // "none"' "$config_file")
+    assert_equals "none" "$v2_symlink" "Larger file should remain as primary (not symlinked)"
+    
+    local v1_symlink
+    v1_symlink=$(jq -r '.checkpoints.duplicate_v1.symLinkedFrom // "none"' "$config_file")
+    assert_not_equals "none" "$v1_symlink" "Smaller file should be converted to symlink"
 }
 
 # Test error recovery workflow
@@ -259,7 +319,8 @@ main() {
     
     run_test test_complete_model_workflow "Complete Model Workflow"
     run_test test_duplicate_handling_workflow "Duplicate Handling Workflow"
-    run_test test_missing_file_cleanup_workflow "Missing File Cleanup Workflow"
+    run_test test_remote_model_preservation_workflow "Remote Model Preservation Workflow"
+    run_test test_local_duplicate_handling_workflow "Local Duplicate Handling Workflow"
     run_test test_error_recovery_workflow "Error Recovery Workflow"
     
     print_test_summary

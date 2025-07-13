@@ -26,10 +26,10 @@ test_sanitize_duplicates() {
     
     assert_equals "0" "$result" "Sanitization should succeed"
     
-    # Check that we have entries in both groups (no duplicates within same group)
+    # Check that we have entries in both groups (preserving all models including missing files)
     local checkpoint_count
     checkpoint_count=$(jq '.checkpoints | length' "$config_file")
-    assert_equals "1" "$checkpoint_count" "Should have one checkpoint model (missing file removed)"
+    assert_equals "3" "$checkpoint_count" "Should preserve all checkpoint models (including potentially remote files)"
     
     local lora_count
     lora_count=$(jq '.loras | length' "$config_file")
@@ -67,10 +67,10 @@ test_sanitize_missing_files() {
     
     assert_equals "0" "$result" "Sanitization should succeed"
     
-    # Check that missing file model was removed
+    # Check that missing file model was preserved (could be remote)
     local missing_model
-    missing_model=$(jq -r '.checkpoints.missing_file_model // "missing"' "$config_file")
-    assert_equals "missing" "$missing_model" "Missing file model should be removed from config"
+    missing_model=$(jq -r '.checkpoints.missing_file_model.modelName // "missing"' "$config_file")
+    assert_equals "missing_file" "$missing_model" "Missing file model should be preserved in config (may be remote)"
 }
 
 # Test process model for sync - upload scenario

@@ -546,6 +546,12 @@ should_process_file() {
     local file_path="$1"
     local file_name=$(extract_model_name_from_path "$file_path")
     
+    # Skip files that don't exist locally
+    if [ ! -f "$file_path" ]; then
+        log_model_sync "INFO" "Skipping file that doesn't exist locally: $file_path"
+        return 1
+    fi
+    
     # Skip hidden files and system files
     if [[ "$file_name" =~ ^\. ]]; then
         log_model_sync "INFO" "Skipping hidden file: $file_name"
@@ -759,15 +765,16 @@ sanitize_model_config() {
     total_models=$(jq 'length' "$all_models_file" 2>/dev/null || echo "0")
     log_model_sync "INFO" "Found $total_models models in config to sanitize"
     
-    # Group models by name and download URL
+    # Group models by download URL only (models with same download URL are duplicates)
     local duplicates_file
     duplicates_file=$(mktemp)
     
     jq '
-    group_by(.modelName + "|" + (.downloadUrl // "")) |
+    group_by(.downloadUrl // "") |
     map(select(length > 1)) |
+    map(select(.[0].downloadUrl != "" and .[0].downloadUrl != null)) |
     map({
-        key: (.[0].modelName + "|" + (.[0].downloadUrl // "")),
+        key: (.[0].downloadUrl // ""),
         models: .
     })
     ' "$all_models_file" > "$duplicates_file" 2>/dev/null
@@ -776,13 +783,12 @@ sanitize_model_config() {
     duplicate_groups=$(jq 'length' "$duplicates_file" 2>/dev/null || echo "0")
     
     if [ "$duplicate_groups" -eq 0 ]; then
-        log_model_sync "INFO" "No duplicate models found, proceeding with file existence validation"
+        log_model_sync "INFO" "No duplicate models found - sanitization complete"
     else
         log_model_sync "INFO" "Found $duplicate_groups groups of duplicate models to consolidate"
     fi
     
-    # Process each group of duplicates
-    local models_to_remove=()
+    # Process each group of duplicates - only handle duplicate resolution, do NOT remove files
     local models_to_convert=()
     
     if [ "$duplicate_groups" -gt 0 ]; then
@@ -796,12 +802,13 @@ sanitize_model_config() {
             
             log_model_sync "INFO" "Processing duplicate group: $group_key"
             
-            # Find the model with the largest size and existing file
+            # Find the model with the largest size that exists locally
             local best_model=""
             local best_size=0
             local models_in_group
             models_in_group=$(echo "$duplicate_group" | jq -c '.models[]')
             
+            # First pass: find the best local candidate
             while IFS= read -r model; do
                 if [ -z "$model" ]; then
                     continue
@@ -811,7 +818,7 @@ sanitize_model_config() {
                 local_path=$(echo "$model" | jq -r '.localPath // ""')
                 model_size=$(echo "$model" | jq -r '.modelSize // 0')
                 
-                # Check if file exists locally
+                # Only consider files that exist locally for primary
                 if [ -f "$local_path" ]; then
                     # Get actual file size
                     local actual_size
@@ -830,10 +837,11 @@ sanitize_model_config() {
                         best_size="$model_size"
                     fi
                 else
-                    log_model_sync "WARN" "Model file does not exist locally: $local_path"
+                    log_model_sync "INFO" "Model file not found locally (may be remote): $local_path"
                 fi
             done <<< "$models_in_group"
             
+            # Second pass: if we found a local primary, convert other LOCAL duplicates to symlinks
             if [ -n "$best_model" ]; then
                 local best_path best_group
                 best_path=$(echo "$best_model" | jq -r '.localPath')
@@ -841,7 +849,7 @@ sanitize_model_config() {
                 
                 log_model_sync "INFO" "Selected primary model: $best_path (${best_size} bytes)"
                 
-                # Mark other models for conversion to symlinks or removal
+                # Only convert OTHER LOCAL duplicates to symlinks
                 while IFS= read -r model; do
                     if [ -z "$model" ]; then
                         continue
@@ -853,79 +861,28 @@ sanitize_model_config() {
                     
                     if [ "$model_path" != "$best_path" ]; then
                         if [ -f "$model_path" ]; then
-                            # Convert to symlink
+                            # Convert LOCAL duplicate to symlink
                             models_to_convert+=("$model_group|$model_path|$best_path")
-                            log_model_sync "INFO" "Will convert to symlink: $model_path -> $best_path"
+                            log_model_sync "INFO" "Will convert local duplicate to symlink: $model_path -> $best_path"
                         else
-                            # Remove from config
-                            models_to_remove+=("$model_path")
-                            log_model_sync "INFO" "Will remove non-existent model from config: $model_path"
+                            # File doesn't exist locally - KEEP in config (may be remote)
+                            log_model_sync "INFO" "Keeping model config (file may be remote): $model_path"
                         fi
                     fi
                 done <<< "$models_in_group"
             else
-                # No valid files found, remove all from config
-                while IFS= read -r model; do
-                    if [ -z "$model" ]; then
-                        continue
-                    fi
-                    
-                    local model_path
-                    model_path=$(echo "$model" | jq -r '.localPath')
-                    models_to_remove+=("$model_path")
-                    log_model_sync "INFO" "Will remove non-existent model from config: $model_path"
-                done <<< "$models_in_group"
+                # No local files found in this duplicate group - keep all configs
+                log_model_sync "INFO" "No local files found for duplicate group $group_key - keeping all configs"
             fi
             
             group_index=$((group_index + 1))
         done
     fi
     
-    # Check for models that exist in config but not on disk (non-duplicates)
-    local all_models_count
-    all_models_count=$(jq 'length' "$all_models_file")
-    local model_index=0
-    
-    while [ "$model_index" -lt "$all_models_count" ]; do
-        local model
-        model=$(jq -r ".[$model_index]" "$all_models_file")
-        
-        local local_path is_symlink
-        local_path=$(echo "$model" | jq -r '.localPath // ""')
-        is_symlink=$(echo "$model" | jq -r '.symLinkedFrom // false')
-        
-        if [ -n "$local_path" ]; then
-            if [ "$is_symlink" != "false" ] && [ "$is_symlink" != "null" ]; then
-                # This is a symlink - verify target exists
-                if [ ! -f "$local_path" ]; then
-                    log_model_sync "WARN" "Symlink target does not exist: $local_path"
-                    models_to_remove+=("$local_path")
-                fi
-            elif [ ! -f "$local_path" ]; then
-                # Regular model file doesn't exist
-                log_model_sync "WARN" "Model file does not exist: $local_path"
-                models_to_remove+=("$local_path")
-            fi
-        fi
-        
-        model_index=$((model_index + 1))
-    done
-    
     # Clean up temp files
     rm -f "$all_models_file" "$duplicates_file"
     
-    # Apply removals
-    local removed_count=0
-    if [ ${#models_to_remove[@]} -gt 0 ]; then
-        for model_path in "${models_to_remove[@]}"; do
-            if remove_model_by_path "$model_path"; then
-                removed_count=$((removed_count + 1))
-                log_model_sync "INFO" "Removed model from config: $model_path"
-            fi
-        done
-    fi
-    
-    # Apply symlink conversions
+    # Apply symlink conversions only (no removals of potentially remote files)
     local converted_count=0
     if [ ${#models_to_convert[@]} -gt 0 ]; then
         for conversion in "${models_to_convert[@]}"; do
@@ -949,7 +906,7 @@ sanitize_model_config() {
                     
                     if convert_to_symlink "$group" "$path" "$full_s3_path"; then
                         converted_count=$((converted_count + 1))
-                        log_model_sync "INFO" "Converted model to symlink: $path -> $target_s3_path"
+                        log_model_sync "INFO" "Converted local duplicate to symlink: $path -> $target_s3_path"
                     else
                         log_model_sync "ERROR" "Failed to convert model to symlink: $path"
                     fi
@@ -962,7 +919,7 @@ sanitize_model_config() {
         done
     fi
     
-    log_model_sync "INFO" "Model config sanitization completed: removed $removed_count models, converted $converted_count to symlinks"
+    log_model_sync "INFO" "Model config sanitization completed: converted $converted_count local duplicates to symlinks (preserved all remote models)"
     
     return 0
 }
