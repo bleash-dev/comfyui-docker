@@ -198,7 +198,7 @@ create_or_update_model() {
     fi
     
     # Strip S3 bucket prefix from s3OriginalPath and symLinkedFrom before saving locally
-    local s3_bucket_prefix="s3://$AWS_BUCKET_NAME"
+    local s3_bucket_prefix="s3://$AWS_BUCKET_NAME/"
     model_object=$(echo "$model_object" | jq \
         --arg bucketPrefix "$s3_bucket_prefix" \
         '
@@ -470,7 +470,7 @@ convert_to_symlink() {
         timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")
         
         # Strip S3 bucket prefix from paths before saving locally
-        local s3_bucket_prefix="s3://$AWS_BUCKET_NAME"
+        local s3_bucket_prefix="s3://$AWS_BUCKET_NAME/"
         local stripped_s3_path="$existing_model_s3_path"
         if [[ "$existing_model_s3_path" == "$s3_bucket_prefix"* ]]; then
             stripped_s3_path="${existing_model_s3_path#$s3_bucket_prefix}"
