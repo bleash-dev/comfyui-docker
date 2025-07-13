@@ -240,8 +240,17 @@ process_model_for_sync() {
     fi
     
     # Early validation: Check if download URL is available before proceeding
-    local download_url
-    download_url=$(get_model_download_url "$local_path" 2>/dev/null || echo "")
+    local temp_output
+    temp_output=$(mktemp)
+
+    local download_url=""
+    if get_model_download_url "$local_path" "$temp_output"; then
+        download_url=$(<"$temp_output")
+    else
+        download_url=""
+    fi
+
+    rm -f "$temp_output"
     
     if [ -z "$download_url" ] || [ "$download_url" = "unknown" ]; then
         log_model_sync "INFO" "Skipping model (no download URL in config): $(basename "$local_path")"
@@ -453,8 +462,17 @@ should_process_file() {
     esac
     
     # Check if file has a valid download URL in config
-    local download_url
-    download_url=$(get_model_download_url "$file_path" 2>/dev/null || echo "")
+    local temp_output
+    temp_output=$(mktemp)
+
+    local download_url=""
+    if get_model_download_url "$local_path" "$temp_output"; then
+        download_url=$(<"$temp_output")
+    else
+        download_url=""
+    fi
+
+    rm -f "$temp_output"
     
     if [ -z "$download_url" ] || [ "$download_url" = "unknown" ]; then
         log_model_sync "INFO" "Skipping file without valid download URL in config: $file_name"
@@ -542,8 +560,17 @@ batch_process_models() {
                 # For upload/replace actions, perform the actual S3 upload with progress
                 if [ -f "$model_file" ]; then
                     # Get the download URL for metadata (required)
-                    local download_url
-                    download_url=$(get_model_download_url "$model_file" 2>/dev/null || echo "")
+                    local temp_output
+                    temp_output=$(mktemp)
+
+                    local download_url=""
+                    if get_model_download_url "$local_path" "$temp_output"; then
+                        download_url=$(<"$temp_output")
+                    else
+                        download_url=""
+                    fi
+
+                    rm -f "$temp_output"
                     
                     # Validate download URL before upload
                     if [ -z "$download_url" ] || [ "$download_url" = "unknown" ] || [ "$download_url" = "null" ]; then

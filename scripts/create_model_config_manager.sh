@@ -421,6 +421,7 @@ list_models_in_group() {
 # Function to get model download URL by local path
 get_model_download_url() {
     local local_path="$1"
+    local output_file="$2"
 
     local temp_file
     temp_file=$(mktemp)
@@ -430,9 +431,9 @@ get_model_download_url() {
             local download_url
             download_url=$(jq -r '.downloadUrl // empty' "$temp_file" 2>/dev/null)
             rm -f "$temp_file"
-            
+
             if [ -n "$download_url" ] && [ "$download_url" != "null" ]; then
-                echo "$download_url"
+                echo "$download_url" > "$output_file"
                 return 0
             else
                 log_model_config "WARN" "No download URL found for model: $local_path"
