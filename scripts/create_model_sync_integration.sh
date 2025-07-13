@@ -26,7 +26,7 @@ log_model_sync() {
     shift
     local message="$*"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] [$level] Model Sync: $message" | tee -a "$MODEL_SYNC_LOG"
+    echo "[$timestamp] [$level] Model Sync: $message" | tee -a "$MODEL_SYNC_LOG" >&2
 }
 
 # Function to sync files/directories to S3 with progress tracking (for non-model uploads)

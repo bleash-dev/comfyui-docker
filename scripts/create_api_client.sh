@@ -26,7 +26,7 @@ log_api_activity() {
     shift
     local message="$*"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] [$level] API Client: $message" | tee -a "$API_CLIENT_LOG"
+    echo "[$timestamp] [$level] API Client: $message" | tee -a "$API_CLIENT_LOG" >&2
 }
 
 # Function to generate HMAC signature
