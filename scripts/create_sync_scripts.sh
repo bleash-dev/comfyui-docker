@@ -486,14 +486,14 @@ sync_pod_metadata_internal() {
     notify_sync_progress "pod_metadata" "PROGRESS" 0
 
     S3_METADATA_BASE="s3://$AWS_BUCKET_NAME/metadata/$POD_ID"
-    LOCAL_MODEL_CONFIG="$NETWORK_VOLUME/ComfyUI/model-config.json"
+    LOCAL_MODEL_CONFIG="$NETWORK_VOLUME/ComfyUI/models_config.json"
     LOCAL_WORKFLOWS_DIR="$NETWORK_VOLUME/ComfyUI/user/default/workflows"
 
     # Sync model configuration file
     if [[ -f "$LOCAL_MODEL_CONFIG" ]]; then
         echo "  📤 Syncing model configuration to S3..."
         notify_sync_progress "pod_metadata" "PROGRESS" 25
-        s3_config_path="$S3_METADATA_BASE/model-config.json"
+        s3_config_path="$S3_METADATA_BASE/models_config.json"
         
         # Use enhanced upload with progress tracking
         if upload_file_with_progress "$LOCAL_MODEL_CONFIG" "$s3_config_path" "pod_metadata" 1 2; then

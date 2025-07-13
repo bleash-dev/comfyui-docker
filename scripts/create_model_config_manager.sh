@@ -7,7 +7,7 @@ echo "📝 Creating model configuration management script..."
 cat > "$NETWORK_VOLUME/scripts/model_config_manager.sh" << 'EOF'
 #!/bin/bash
 # Model Configuration Manager for ComfyUI
-# Manages model-config.json with thread-safe operations
+# Manages models_config.json with thread-safe operations
 
 # Configuration
 MODEL_CONFIG_FILE="$NETWORK_VOLUME/ComfyUI/models_config.json"
@@ -549,7 +549,7 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     echo "📋 Model Configuration Manager"
     echo "============================="
     echo ""
-    echo "This script manages model-config.json with thread-safe operations."
+    echo "This script manages models_config.json with thread-safe operations."
     echo ""
     echo "Functions available:"
     echo "  create_or_update_model <group> <model_object_json>"
