@@ -438,7 +438,7 @@ get_model_download_url() {
             return 1
         fi
     else
-        log_model_config "WARN" "Model not found in config: $local_path"
+        log_model_config "WARN" "Model not found in config: $local_path $model_file"
         return 1
     fi
 }
