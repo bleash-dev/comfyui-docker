@@ -421,24 +421,27 @@ list_models_in_group() {
 # Function to get model download URL by local path
 get_model_download_url() {
     local local_path="$1"
-    
-    local model_file
-    model_file=$(find_model_by_path "" "$local_path")
-    
-    if [ $? -eq 0 ] && [ -f "$model_file" ]; then
-        local download_url
-        download_url=$(jq -r '.downloadUrl // empty' "$model_file" 2>/dev/null)
-        rm -f "$model_file"
-        
-        if [ -n "$download_url" ] && [ "$download_url" != "null" ]; then
-            echo "$download_url"
-            return 0
-        else
-            log_model_config "WARN" "No download URL found for model: $local_path"
-            return 1
+
+    local temp_file
+    temp_file=$(mktemp)
+
+    if find_model_by_path "" "$local_path" "$temp_file"; then
+        if [ -f "$temp_file" ]; then
+            local download_url
+            download_url=$(jq -r '.downloadUrl // empty' "$temp_file" 2>/dev/null)
+            rm -f "$temp_file"
+            
+            if [ -n "$download_url" ] && [ "$download_url" != "null" ]; then
+                echo "$download_url"
+                return 0
+            else
+                log_model_config "WARN" "No download URL found for model: $local_path"
+                return 1
+            fi
         fi
     else
-        log_model_config "WARN" "Model not found in config: $local_path $model_file"
+        log_model_config "WARN" "Model not found in config: $local_path"
+        rm -f "$temp_file"
         return 1
     fi
 }
