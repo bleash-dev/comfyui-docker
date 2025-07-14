@@ -59,8 +59,8 @@ else
     echo "⚠️ Global models directory not found"
 fi
 
-if [ -d "$NETWORK_VOLUME/ComfyUI/.browser-sessions" ]; then
-    session_count=$(find "$NETWORK_VOLUME/ComfyUI/.browser-sessions" -type f | wc -l)
+if [ -d "$NETWORK_VOLUME/ComfyUI/.browser-session" ]; then
+    session_count=$(find "$NETWORK_VOLUME/ComfyUI/.browser-session" -type f | wc -l)
     echo "✅ Global browser sessions directory available ($session_count files)"
 else
     echo "⚠️ Global browser sessions directory not found"

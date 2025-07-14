@@ -59,7 +59,7 @@ Pod User: $POD_USER_NAME
 Pod ID: $POD_ID
 Network Volume: $NETWORK_VOLUME
 GPU Info: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo "No GPU")
-Browser Sessions: $([ -d "$NETWORK_VOLUME/ComfyUI/.browser-sessions" ] && echo "Enabled" || echo "Not Found")
+Browser Sessions: $([ -d "$NETWORK_VOLUME/ComfyUI/.browser-session" ] && echo "Enabled" || echo "Not Found")
 Global Models: $([ -d "$NETWORK_VOLUME/ComfyUI/models" ] && echo "$(ls -1 "$NETWORK_VOLUME/ComfyUI/models" | wc -l) directories" || echo "Not Found")
 ComfyUI Input: $([ -d "$NETWORK_VOLUME/ComfyUI/input" ] && echo "$(find "$NETWORK_VOLUME/ComfyUI/input" -type f | wc -l) files" || echo "Not Found")
 ComfyUI Output: $([ -d "$NETWORK_VOLUME/ComfyUI/output" ] && echo "$(find "$NETWORK_VOLUME/ComfyUI/output" -type f | wc -l) files" || echo "Not Found")

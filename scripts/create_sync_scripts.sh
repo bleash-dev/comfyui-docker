@@ -20,7 +20,7 @@ sync_user_data_internal() {
     notify_sync_progress "user_data" "PROGRESS" 0
 
 EXCLUDE_SHARED_FOLDERS=("venv" ".comfyui" ".cache") 
-EXCLUDE_COMFYUI_SHARED_FOLDERS=("models" "custom_nodes" ".browser-sessions")
+EXCLUDE_COMFYUI_SHARED_FOLDERS=("models" "custom_nodes" ".browser-session")
 
 COMFYUI_POD_SPECIFIC_ARCHIVE_NAME="comfyui_pod_specific_data.tar.gz"
 S3_COMFYUI_POD_SPECIFIC_PATH="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/$COMFYUI_POD_SPECIFIC_ARCHIVE_NAME"

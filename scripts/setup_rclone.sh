@@ -271,17 +271,6 @@ else
     echo "  ℹ️ No existing browser sessions found in S3, starting with empty directory"
 fi
 
-# Create metadata file for browser sessions
-cat > "$browser_sessions_dir/.global_shared_info" << EOF
-{
-    "type": "global_shared_browser_session",
-    "s3_path": "$s3_browser_sessions_base/",
-    "sync_strategy": "periodic",
-    "last_synced": "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)",
-    "note": "Global shared browser session, synced periodically with models"
-}
-EOF
-echo "✅ Created global shared browser session directory: $browser_sessions_dir"
 
 # Sync user-specific data from S3
 USER_SYNC_SCRIPT_PATH=""
