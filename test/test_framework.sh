@@ -233,6 +233,60 @@ assert_command_failure() {
     fi
 }
 
+# Function to assert command failure (alias for assert_command_failure)
+assert_command_fails() {
+    assert_command_failure "$@"
+}
+
+# Function to assert directory exists
+assert_dir_exists() {
+    local dir_path="$1"
+    local message="${2:-Directory should exist: $dir_path}"
+    
+    if [ -d "$dir_path" ]; then
+        print_color "$GREEN" "  ✓ PASS: $message"
+        log_test "PASS" "$CURRENT_TEST_NAME - $message"
+        return 0
+    else
+        print_color "$RED" "  ✗ FAIL: $message"
+        log_test "FAIL" "$CURRENT_TEST_NAME - $message"
+        return 1
+    fi
+}
+
+# Function to assert content contains string
+assert_contains() {
+    local content="$1"
+    local expected="$2"
+    local message="${3:-Content should contain: $expected}"
+    
+    if echo "$content" | grep -q "$expected"; then
+        print_color "$GREEN" "  ✓ PASS: $message"
+        log_test "PASS" "$CURRENT_TEST_NAME - $message"
+        return 0
+    else
+        print_color "$RED" "  ✗ FAIL: $message"
+        log_test "FAIL" "$CURRENT_TEST_NAME - $message (content: $content)"
+        return 1
+    fi
+}
+
+# Function to assert string is not empty
+assert_not_empty() {
+    local value="$1"
+    local message="${2:-Value should not be empty}"
+    
+    if [ -n "$value" ]; then
+        print_color "$GREEN" "  ✓ PASS: $message"
+        log_test "PASS" "$CURRENT_TEST_NAME - $message"
+        return 0
+    else
+        print_color "$RED" "  ✗ FAIL: $message"
+        log_test "FAIL" "$CURRENT_TEST_NAME - $message"
+        return 1
+    fi
+}
+
 # Function to end a test
 end_test() {
     local test_result="$1"
@@ -302,6 +356,11 @@ source_model_sync_integration() {
     source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
 }
 
+# Function to source model download integration for testing
+source_model_download_integration() {
+    source "$NETWORK_VOLUME/scripts/model_download_integration.sh"
+}
+
 # Function to source the API client for testing
 source_api_client() {
     # Source the mock API client
@@ -353,8 +412,8 @@ trap cleanup_test_env EXIT INT TERM
 # Export functions for use in test files
 export -f setup_test_env cleanup_test_env start_test end_test run_test
 export -f assert_equals assert_not_equals assert_file_exists assert_file_not_exists assert_json_equals
-export -f assert_command_success assert_command_failure
+export -f assert_command_success assert_command_failure assert_command_fails assert_dir_exists assert_contains assert_not_empty
 export -f create_test_model_file create_test_model_config create_test_model_config_from_fixture
 export -f process_test_fixture
-export -f source_model_config_manager source_model_sync_integration
+export -f source_model_config_manager source_model_sync_integration source_model_download_integration
 export -f print_test_summary log_test print_color

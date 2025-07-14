@@ -218,6 +218,14 @@ if [ -f "$SCRIPT_DIR/create_model_sync_integration.sh" ]; then
     echo "  ✅ Model sync integration created/configured."
 fi
 
+if [ -f "$SCRIPT_DIR/create_model_download_integration.sh" ]; then
+    if ! bash "$SCRIPT_DIR/create_model_download_integration.sh"; then
+        echo "❌ CRITICAL: Failed to create model download integration."
+        exit 1
+    fi
+    echo "  ✅ Model download integration created/configured."
+fi
+
 if [ -f "$SCRIPT_DIR/create_sync_lock_manager.sh" ]; then
     if ! bash "$SCRIPT_DIR/create_sync_lock_manager.sh"; then
         echo "❌ CRITICAL: Failed to create model sync integration."

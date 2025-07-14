@@ -1,10 +1,14 @@
 #!/bin/bash
 # Create API client and model configuration management scripts
 
+# Get the target directory from the first argument
+TARGET_DIR="${1:-$NETWORK_VOLUME/scripts}"
+mkdir -p "$TARGET_DIR"
+
 echo "📝 Creating API client and model configuration management scripts..."
 
 # Create the HTTP API client with HMAC authentication
-cat > "$NETWORK_VOLUME/scripts/api_client.sh" << 'EOF'
+cat > "$TARGET_DIR/api_client.sh" << 'EOF'
 #!/bin/bash
 # HTTP API Client with HMAC authentication for ComfyUI pod communication
 
@@ -293,6 +297,6 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
 fi
 EOF
 
-chmod +x "$NETWORK_VOLUME/scripts/api_client.sh"
+chmod +x "$TARGET_DIR/api_client.sh"
 
-echo "✅ API client created at $NETWORK_VOLUME/scripts/api_client.sh"
+echo "✅ API client created at $TARGET_DIR/api_client.sh"

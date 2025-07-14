@@ -10,7 +10,7 @@ test_multiple_api_calls_contamination() {
     mkdir -p "$NETWORK_VOLUME/scripts"
     
     # Generate the API client script
-    source /Users/gilesfokam/workspace/personal/comfyui-docker/scripts/create_api_client.sh
+    source scripts/create_api_client.sh
     source "$NETWORK_VOLUME/scripts/api_client.sh"
     
     # Set up environment
@@ -183,7 +183,7 @@ test_multiple_api_calls_with_redirection() {
     mkdir -p "$NETWORK_VOLUME/scripts"
     
     # Generate the API client script
-    source /Users/gilesfokam/workspace/personal/comfyui-docker/scripts/create_api_client.sh
+    source scripts/create_api_client.sh
     source "$NETWORK_VOLUME/scripts/api_client.sh"
     
     export POD_ID="test-pod"
