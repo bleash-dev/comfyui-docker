@@ -128,7 +128,7 @@ make_api_request() {
     # Check curl execution
     if [ $curl_exit_code -ne 0 ]; then
         log_api_activity "ERROR" "Curl failed with exit code $curl_exit_code for $endpoint"
-        echo "CURL_ERROR:$curl_exit_code"
+        echo "CURL_ERROR:$curl_exit_code" >&2
         return 1
     fi
     
@@ -138,8 +138,9 @@ make_api_request() {
         log_api_activity "DEBUG" "Response: $(cat "$response_file")"
     fi
     
-    # Return HTTP status code
-    echo "$http_code"
+    # Return HTTP status code - ensure only this goes to stdout
+    # Use printf to avoid any potential newline issues
+    printf "%s\n" "$http_code"
     return 0
 }
 

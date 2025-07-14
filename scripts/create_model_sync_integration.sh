@@ -379,7 +379,7 @@ process_model_for_sync() {
     response_file=$(mktemp)
     
     local http_code
-    http_code=$(check_model_sync_permission "$s3_destination" "$download_url" "$destination_group" "$model_size" "$response_file")
+    http_code=$(check_model_sync_permission "$s3_destination" "$download_url" "$destination_group" "$model_size" "$response_file" 2>/dev/null)
     
     if [[ ! "$http_code" =~ ^2[0-9][0-9]$ ]]; then
         log_model_sync "ERROR" "Failed to get sync permission (HTTP $http_code)"
