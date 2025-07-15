@@ -1,14 +1,10 @@
 #!/bin/bash
 # Create model configuration management script
 
-# Get the target directory from the first argument
-TARGET_DIR="${1:-$NETWORK_VOLUME/scripts}"
-mkdir -p "$TARGET_DIR"
-
 echo "📝 Creating model configuration management script..."
 
 # Create the model configuration manager
-cat > "$TARGET_DIR/model_config_manager.sh" << 'EOF'
+cat > "$NETWORK_VOLUME/scripts/model_config_manager.sh" << 'EOF'
 #!/bin/bash
 # Model Configuration Manager for ComfyUI
 # Manages models_config.json with thread-safe operations
@@ -558,11 +554,10 @@ convert_to_symlink() {
         fi
         
         model_object=$(echo "$model_object" | jq \
-            --arg s3Path "$stripped_s3_path" \
+            --arg targetLocalPath "$local_path" \
             --arg timestamp "$timestamp" \
             '. + {
-                "originalS3Path": $s3Path,
-                "symLinkedFrom": $s3Path,
+                "symLinkedFrom": $targetLocalPath,
                 "lastUpdated": $timestamp
             } | del(.downloadUrl)')
         
@@ -652,7 +647,7 @@ remove_model_by_path() {
 
 # Function to load all current local models excluding symlinks
 load_local_models() {
-    local output_file="${1:-}"
+    local output_file="$1"
     
     # Default output file if not provided
     if [ -z "$output_file" ]; then
@@ -693,16 +688,15 @@ load_local_models() {
 
 # Function to resolve symlinks and create them on the filesystem
 resolve_symlinks() {
-    local target_s3_path="$1"      # S3 path to find symlinks for
-    local target_model_name="$2"   # Model name to find symlinks for
-    local dry_run="${3:-false}"    # If true, don't create actual symlinks
+    local target_local_path="$1"    # Local path of the target file to find symlinks for
+    local dry_run="${2:-false}"     # If true, don't create actual symlinks
     
-    if [ -z "$target_s3_path" ] && [ -z "$target_model_name" ]; then
-        log_model_config "ERROR" "Either target S3 path or model name is required for symlink resolution"
+    if [ -z "$target_local_path" ]; then
+        log_model_config "ERROR" "Target local path is required for symlink resolution"
         return 1
     fi
     
-    log_model_config "INFO" "Resolving symlinks for target: s3_path='$target_s3_path', model_name='$target_model_name', dry_run=$dry_run"
+    log_model_config "INFO" "Resolving symlinks for target local path: '$target_local_path', dry_run=$dry_run"
     
     # Initialize config if needed
     initialize_model_config
@@ -710,65 +704,22 @@ resolve_symlinks() {
     local temp_file
     temp_file=$(mktemp)
     
-    # Find all models that are symlinked to the target
-    local jq_filter
-    if [ -n "$target_s3_path" ] && [ -n "$target_model_name" ]; then
-        # Search by both S3 path and model name
-        jq_filter='
-        [
-            to_entries[] |
-            select(.value | type == "object") as $group |
-            $group.value | to_entries[] |
-            select(
-                (.value.symLinkedFrom != null and .value.symLinkedFrom != "") and
-                ((.value.symLinkedFrom | contains($targetS3Path)) or 
-                 (.value.symLinkedFrom | test($targetModelName)))
-            ) |
-            .value + {
-                "modelKey": .key,
-                "directoryGroup": $group.key
-            }
-        ]
-        '
-    elif [ -n "$target_s3_path" ]; then
-        # Search by S3 path only
-        jq_filter='
-        [
-            to_entries[] |
-            select(.value | type == "object") as $group |
-            $group.value | to_entries[] |
-            select(
-                (.value.symLinkedFrom != null and .value.symLinkedFrom != "") and
-                (.value.symLinkedFrom | contains($targetS3Path))
-            ) |
-            .value + {
-                "modelKey": .key,
-                "directoryGroup": $group.key
-            }
-        ]
-        '
-    else
-        # Search by model name only - find symlinks that reference the target model
-        jq_filter='
-        [
-            to_entries[] |
-            select(.value | type == "object") as $group |
-            $group.value | to_entries[] |
-            select(
-                (.value.symLinkedFrom != null and .value.symLinkedFrom != "") and
-                (.value.symLinkedFrom | test($targetModelName))
-            ) |
-            .value + {
-                "modelKey": .key,
-                "directoryGroup": $group.key
-            }
-        ]
-        '
-    fi
-    
-    jq --arg targetS3Path "${target_s3_path:-}" \
-       --arg targetModelName "${target_model_name:-}" \
-       "$jq_filter" "$MODEL_CONFIG_FILE" > "$temp_file" 2>/dev/null
+    # Find all models that have symLinkedFrom pointing to the target local path
+    jq --arg targetLocalPath "$target_local_path" '
+    [
+        to_entries[] |
+        select(.value | type == "object") as $group |
+        $group.value | to_entries[] |
+        select(
+            (.value.symLinkedFrom != null and .value.symLinkedFrom != "") and
+            (.value.symLinkedFrom == $targetLocalPath)
+        ) |
+        .value + {
+            "modelKey": .key,
+            "directoryGroup": $group.key
+        }
+    ]
+    ' "$MODEL_CONFIG_FILE" > "$temp_file" 2>/dev/null
     
     if [ $? -ne 0 ]; then
         log_model_config "ERROR" "Failed to query symlink models"
@@ -808,54 +759,60 @@ resolve_symlinks() {
             continue
         fi
         
-        # Convert relative S3 path to full local path
-        local full_target_path
+        # Convert relative local paths to full local paths
+        local full_target_path full_symlink_path
         if [[ "$target_path" == /* ]]; then
-            # Absolute path starting with / - construct full local path
-            full_target_path="$NETWORK_VOLUME/ComfyUI$target_path"
-        elif [[ "$target_path" == models/* ]]; then
-            # Path already starts with "models/" - construct from ComfyUI directory
-            full_target_path="$NETWORK_VOLUME/ComfyUI/$target_path"
+            # Absolute path - use as is
+            full_target_path="$target_path"
         else
-            # Relative path - assume it's under models/
-            full_target_path="$NETWORK_VOLUME/ComfyUI/models/$target_path"
+            # Relative path - construct from ComfyUI directory
+            full_target_path="$NETWORK_VOLUME/ComfyUI/$target_path"
         fi
         
-        log_model_config "INFO" "Processing symlink: $symlink_path -> $full_target_path"
+        # Construct full symlink path
+        if [[ "$symlink_path" == /* ]]; then
+            # Absolute path - use as is
+            full_symlink_path="$symlink_path"
+        else
+            # Relative path - construct from ComfyUI directory
+            full_symlink_path="$NETWORK_VOLUME/ComfyUI/$symlink_path"
+        fi
+        
+        log_model_config "INFO" "Processing symlink: $full_symlink_path -> $full_target_path"
         
         if [ "$dry_run" = "true" ]; then
-            log_model_config "INFO" "[DRY RUN] Would create symlink: $symlink_path -> $full_target_path"
+            log_model_config "INFO" "[DRY RUN] Would create symlink: $full_symlink_path -> $full_target_path"
             created_count=$((created_count + 1))
             continue
         fi
         
         # Check if target exists
         if [ ! -f "$full_target_path" ]; then
-            log_model_config "WARN" "Symlink target does not exist: $full_target_path (for $symlink_path)"
+            log_model_config "WARN" "Symlink target does not exist: $full_target_path (for $full_symlink_path)"
             failed_count=$((failed_count + 1))
             continue
         fi
         
         # Create directory for symlink if needed
         local symlink_dir
-        symlink_dir=$(dirname "$symlink_path")
+        symlink_dir=$(dirname "$full_symlink_path")
         if [ ! -d "$symlink_dir" ]; then
             log_model_config "DEBUG" "Creating directory for symlink: $symlink_dir"
             mkdir -p "$symlink_dir"
         fi
         
         # Remove existing file/symlink if it exists
-        if [ -e "$symlink_path" ] || [ -L "$symlink_path" ]; then
-            log_model_config "DEBUG" "Removing existing file/symlink: $symlink_path"
-            rm -f "$symlink_path"
+        if [ -e "$full_symlink_path" ] || [ -L "$full_symlink_path" ]; then
+            log_model_config "DEBUG" "Removing existing file/symlink: $full_symlink_path"
+            rm -f "$full_symlink_path"
         fi
         
         # Create the symlink
-        if ln -s "$full_target_path" "$symlink_path" 2>/dev/null; then
-            log_model_config "INFO" "Created symlink: $symlink_path -> $full_target_path"
+        if ln -s "$full_target_path" "$full_symlink_path" 2>/dev/null; then
+            log_model_config "INFO" "Created symlink: $full_symlink_path -> $full_target_path"
             created_count=$((created_count + 1))
         else
-            log_model_config "ERROR" "Failed to create symlink: $symlink_path -> $full_target_path"
+            log_model_config "ERROR" "Failed to create symlink: $full_symlink_path -> $full_target_path"
             failed_count=$((failed_count + 1))
         fi
         
@@ -886,10 +843,10 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     echo "  find_model_by_path [group] <local_path> [output_file]"
     echo "  list_models_in_group <group> [output_file]"
     echo "  get_model_download_url <local_path>"
-    echo "  convert_to_symlink <group> <local_path> <existing_s3_path>"
+    echo "  convert_to_symlink <group> <local_path> <target_local_path>"
     echo "  remove_model_by_path <local_path>"
     echo "  load_local_models [output_file]"
-    echo "  resolve_symlinks <target_s3_path> <target_model_name> [dry_run]"
+    echo "  resolve_symlinks <target_local_path> [dry_run]"
     echo ""
     echo "Configuration file: $MODEL_CONFIG_FILE"
     echo "Lock directory: $MODEL_CONFIG_LOCK_DIR"
@@ -902,14 +859,14 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     echo "    \"modelName\": \"model_name\","
     echo "    \"modelSize\": 1234567890,"
     echo "    \"downloadUrl\": \"https://example.com/model.safetensors\","
-    echo "    \"symLinkedFrom\": \"/existing/path\" (optional),  # S3 path with bucket prefix stripped"
+    echo "    \"symLinkedFrom\": \"models/checkpoints/target.safetensors\" (optional),  # Local path this model symlinks to"
     echo "    \"uploadedAt\": \"2023-07-10T12:00:00.000Z\","
     echo "    \"lastUpdated\": \"2023-07-10T12:00:00.000Z\","
     echo "    \"directoryGroup\": \"checkpoints\""
     echo "  }"
     echo ""
-    echo "Note: s3OriginalPath and symLinkedFrom fields have the s3://bucket prefix stripped"
-    echo "      when stored in the local config file for portability."
+    echo "Note: originalS3Path contains S3 path with bucket prefix stripped"
+    echo "      symLinkedFrom contains local path (relative to ComfyUI directory) for symlink targets"
     
     # Initialize if called directly
     initialize_model_config
@@ -918,6 +875,6 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
 fi
 EOF
 
-chmod +x "$TARGET_DIR/model_config_manager.sh"
+chmod +x "$NETWORK_VOLUME/scripts/model_config_manager.sh"
 
-echo "✅ Model configuration manager created at $TARGET_DIR/model_config_manager.sh"
+echo "✅ Model configuration manager created at $NETWORK_VOLUME/scripts/model_config_manager.sh"

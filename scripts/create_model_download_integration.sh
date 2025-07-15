@@ -106,6 +106,39 @@ release_download_lock() {
     fi
 }
 
+# Function to convert size with units to bytes
+convert_to_bytes() {
+    local value="$1"
+    local unit="$2"
+    
+    # Remove any leading/trailing whitespace
+    value=$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    unit=$(echo "$unit" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    
+    # Handle fractional values by using awk for floating point arithmetic
+    case "$unit" in
+        "B"|"bytes")
+            echo "$value" | awk '{printf "%.0f", $1}'
+            ;;
+        "KB"|"KiB")
+            echo "$value" | awk '{printf "%.0f", $1 * 1024}'
+            ;;
+        "MB"|"MiB")
+            echo "$value" | awk '{printf "%.0f", $1 * 1024 * 1024}'
+            ;;
+        "GB"|"GiB")
+            echo "$value" | awk '{printf "%.0f", $1 * 1024 * 1024 * 1024}'
+            ;;
+        "TB"|"TiB")
+            echo "$value" | awk '{printf "%.0f", $1 * 1024 * 1024 * 1024 * 1024}'
+            ;;
+        *)
+            # If unknown unit, assume bytes
+            echo "$value" | awk '{printf "%.0f", $1}'
+            ;;
+    esac
+}
+
 # Function to add download to queue (prevents duplicates)
 add_to_download_queue() {
     local group="$1"
@@ -282,11 +315,22 @@ update_download_progress() {
     local local_path="$3"
     local total_size="$4"
     local downloaded="$5"
-    local status="$6"
+    local progress_status="$6"
     
-    if [ -z "$group" ] || [ -z "$model_name" ] || [ -z "$status" ]; then
+    # Log every call to update_download_progress to a dedicated progress log file
+    local progress_log_file="$NETWORK_VOLUME/.download_progress_calls.log"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] PROGRESS_CALL: group='$group', model='$model_name', status='$progress_status', downloaded=${downloaded:-0}/${total_size:-0} bytes, path='$local_path'" >> "$progress_log_file"
+    
+    if [ -z "$group" ] || [ -z "$model_name" ] || [ -z "$progress_status" ]; then
         log_download "ERROR" "Missing required parameters for progress update"
         return 1
+    fi
+    
+    # Ensure progress file exists before proceeding
+    if [ ! -f "$DOWNLOAD_PROGRESS_FILE" ]; then
+        mkdir -p "$(dirname "$DOWNLOAD_PROGRESS_FILE")"
+        echo '{}' > "$DOWNLOAD_PROGRESS_FILE"
     fi
     
     if ! acquire_download_lock "progress" 30; then
@@ -304,7 +348,7 @@ update_download_progress() {
        --arg localPath "${local_path:-}" \
        --argjson totalSize "${total_size:-0}" \
        --argjson downloaded "${downloaded:-0}" \
-       --arg status "$status" \
+       --arg status "$progress_status" \
        --arg timestamp "$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")" \
        '
        .[$group] = (.[$group] // {}) |
@@ -331,38 +375,67 @@ update_download_progress() {
     fi
 }
 
-# Function to download a single model with progress tracking from S3
+# Function to download a single model with progress tracking from S3 using chunked download
+# Function to download a single model using chunked S3 download with cancellation support
 download_model_with_progress() {
     local group="$1"
     local model_name="$2"
     local s3_path="$3"  # This is the originalS3Path from config
     local local_path="$4"
-    local total_size="$5"
+    local provided_size="$5"  # Renamed for clarity - this will be ignored
     
     if [ -z "$group" ] || [ -z "$model_name" ] || [ -z "$s3_path" ] || [ -z "$local_path" ]; then
         log_download "ERROR" "Missing required parameters for model download"
         return 1
     fi
     
-    # Check for cancellation before starting
-    if is_download_cancelled "$group" "$model_name"; then
-        log_download "INFO" "Download cancelled before starting: $group/$model_name"
-        update_download_progress "$group" "$model_name" "$local_path" "$total_size" 0 "cancelled"
+    # Parse S3 path to get bucket and key
+    local bucket key
+    if [[ "$s3_path" =~ ^s3://([^/]+)/(.*)$ ]]; then
+        bucket="${BASH_REMATCH[1]}"
+        key="${BASH_REMATCH[2]}"
+    elif [[ "$s3_path" =~ ^/(.*)$ ]]; then
+        bucket="${AWS_BUCKET_NAME:-}"
+        key="${BASH_REMATCH[1]}"
+    else
+        bucket="${AWS_BUCKET_NAME:-}"
+        key="$s3_path"
+    fi
+    
+    if [ -z "$bucket" ] || [ -z "$key" ]; then
+        log_download "ERROR" "Could not parse S3 path: $s3_path"
         return 1
     fi
     
-    # Ensure s3_path is properly formatted
-    local full_s3_path="$s3_path"
-    if [[ "$s3_path" != s3://* ]]; then
-        if [[ "$s3_path" == /* ]]; then
-            # Remove leading slash and prepend bucket
-            full_s3_path="s3://$AWS_BUCKET_NAME${s3_path}"
-        else
-            full_s3_path="s3://$AWS_BUCKET_NAME/$s3_path"
-        fi
+    # Always fetch the actual file size from S3, overriding any provided size
+    local aws_cmd="aws"
+    if [ -n "${AWS_CLI_OVERRIDE:-}" ] && [ -x "$AWS_CLI_OVERRIDE" ]; then
+        aws_cmd="$AWS_CLI_OVERRIDE"
     fi
     
-    log_download "INFO" "Starting S3 download: $group/$model_name from $full_s3_path"
+    log_download "INFO" "Getting actual file size from S3 for: $group/$model_name"
+    local actual_total_size
+    actual_total_size=$("$aws_cmd" s3api head-object --bucket "$bucket" --key "$key" --query 'ContentLength' --output text 2>/dev/null || echo "")
+    if [ -z "$actual_total_size" ] || [ "$actual_total_size" -eq 0 ] || [ "$actual_total_size" = "None" ]; then
+        log_download "ERROR" "Failed to get file size from S3 for: $group/$model_name"
+        return 1
+    fi
+    
+    log_download "INFO" "Retrieved actual file size from S3: $actual_total_size bytes for: $group/$model_name"
+    
+    # Log if provided size differs from actual size
+    if [ -n "$provided_size" ] && [ "$provided_size" -gt 0 ] && [ "$provided_size" -ne "$actual_total_size" ]; then
+        log_download "WARN" "Provided size ($provided_size bytes) differs from actual S3 size ($actual_total_size bytes) for $group/$model_name. Using actual size."
+    fi
+    
+    # Check for cancellation before starting
+    if is_download_cancelled "$group" "$model_name"; then
+        log_download "INFO" "Download cancelled before starting: $group/$model_name"
+        update_download_progress "$group" "$model_name" "$local_path" "$actual_total_size" 0 "cancelled"
+        return 1
+    fi
+    
+    log_download "INFO" "Starting chunked S3 download: $group/$model_name from s3://$bucket/$key"
     
     # Create directory if needed
     local dir_path
@@ -371,137 +444,373 @@ download_model_with_progress() {
         mkdir -p "$dir_path"
     fi
     
-    # Update status to in progress
-    update_download_progress "$group" "$model_name" "$local_path" "$total_size" 0 "progress"
+    # Create temporary chunk directory
+    local chunk_dir
+    chunk_dir=$(mktemp -d -t "chunks_${group}_${model_name}_$$_XXXXXX")
     
-    # Create a temporary file for download
-    local temp_download_path="${local_path}.downloading"
+    # Store chunk directory for cancellation cleanup
+    local chunk_dir_file="$MODEL_DOWNLOAD_DIR/.chunk_dir_${group}_${model_name}"
+    echo "$chunk_dir" > "$chunk_dir_file"
     
-    # Download from S3 with progress tracking and cancellation checks
-    local download_success=false
+    # Ensure cleanup on exit
+    trap "cleanup_chunked_download '$group' '$model_name' '$chunk_dir' '$chunk_dir_file' '$local_path'" EXIT INT TERM QUIT
     
-    log_download "INFO" "Downloading from S3: $full_s3_path -> $temp_download_path"
+    # Update status to in progress with actual size
+    update_download_progress "$group" "$model_name" "$local_path" "$actual_total_size" 0 "progress"
     
-    # Start AWS CLI download in background so we can monitor for cancellation
-    # Use AWS_CLI_OVERRIDE if set (for testing)
+    # Start chunked download - pass actual size
+    local download_result
+    download_result=$(chunked_s3_download_with_progress "$bucket" "$key" "$local_path" "$chunk_dir" "$group" "$model_name" "$actual_total_size")
+    local download_exit_code=$?
+    
+    # Check if download was cancelled
+    if is_download_cancelled "$group" "$model_name"; then
+        log_download "INFO" "Download was cancelled: $group/$model_name"
+        update_download_progress "$group" "$model_name" "$local_path" "$actual_total_size" 0 "cancelled"
+        trap - EXIT INT TERM QUIT
+        cleanup_chunked_download "$group" "$model_name" "$chunk_dir" "$chunk_dir_file" "$local_path"
+        return 1
+    fi
+    
+    if [ "$download_exit_code" -eq 0 ]; then
+        # Get final file size
+        local final_size
+        final_size=$(stat -f%z "$local_path" 2>/dev/null || stat -c%s "$local_path" 2>/dev/null || echo "0")
+        
+        # Update final progress
+        update_download_progress "$group" "$model_name" "$local_path" "$final_size" "$final_size" "completed"
+        
+        log_download "INFO" "Download completed successfully: $group/$model_name ($final_size bytes)"
+        
+        # Clean up
+        trap - EXIT INT TERM QUIT
+        cleanup_chunked_download "$group" "$model_name" "$chunk_dir" "$chunk_dir_file" ""
+        
+        # Resolve symlinks for this model
+        log_download "INFO" "Resolving symlinks for downloaded model: $group/$model_name"
+        if command -v resolve_symlinks >/dev/null 2>&1; then
+            resolve_symlinks "" "$model_name" false
+        else
+            log_download "WARN" "resolve_symlinks function not available"
+        fi
+        
+        return 0
+    else
+        log_download "ERROR" "Chunked download failed: $group/$model_name"
+        update_download_progress "$group" "$model_name" "$local_path" "$total_size" 0 "failed"
+        trap - EXIT INT TERM QUIT
+        cleanup_chunked_download "$group" "$model_name" "$chunk_dir" "$chunk_dir_file" "$local_path"
+        return 1
+    fi
+}
+
+# Function to perform chunked S3 download with progress tracking and cancellation support
+chunked_s3_download_with_progress() {
+    local bucket="$1"
+    local key="$2"
+    local output_file="$3"
+    local chunk_dir="$4"
+    local group="$5"
+    local model_name="$6"
+    local expected_total_size="$7"
+    
     local aws_cmd="aws"
     if [ -n "${AWS_CLI_OVERRIDE:-}" ] && [ -x "$AWS_CLI_OVERRIDE" ]; then
         aws_cmd="$AWS_CLI_OVERRIDE"
     fi
     
-    "$aws_cmd" s3 cp "$full_s3_path" "$temp_download_path" --only-show-errors &
-    local aws_pid=$!
+    mkdir -p "$chunk_dir"
     
-    # Monitor download progress and check for cancellation
-    local check_interval=1
-    local last_size=0
-    local stall_count=0
-    local max_stalls=30  # 30 seconds without progress
-    
-    while kill -0 "$aws_pid" 2>/dev/null; do
-        # Check for cancellation
-        if is_download_cancelled "$group" "$model_name"; then
-            log_download "INFO" "Download cancelled during progress: $group/$model_name"
-            kill "$aws_pid" 2>/dev/null || true
-            rm -f "$temp_download_path"
-            update_download_progress "$group" "$model_name" "$local_path" "$total_size" 0 "cancelled"
+    # Use provided size if valid, otherwise get actual file size from S3
+    local total_size
+    if [ -n "$expected_total_size" ] && [ "$expected_total_size" -gt 0 ]; then
+        total_size="$expected_total_size"
+        log_download "INFO" "Using provided file size: $total_size bytes"
+    else
+        log_download "INFO" "Getting actual file size from S3..."
+        total_size=$("$aws_cmd" s3api head-object --bucket "$bucket" --key "$key" --query 'ContentLength' --output text 2>/dev/null || echo "")
+        if [ -z "$total_size" ] || [ "$total_size" -eq 0 ] || [ "$total_size" = "None" ]; then
+            log_download "ERROR" "Failed to get file size from S3"
             return 1
         fi
-        
-        # Check download progress for large files
-        if [ -f "$temp_download_path" ]; then
-            local current_size
-            current_size=$(stat -f%z "$temp_download_path" 2>/dev/null || stat -c%s "$temp_download_path" 2>/dev/null || echo "0")
+        log_download "INFO" "Retrieved actual file size from S3: $total_size bytes"
+    fi
+    
+    # Determine chunk size (bytes) based on file size
+    local chunk_size_mb
+    if [ "$total_size" -lt $((10 * 1024 * 1024)) ]; then            # < 10MB
+        chunk_size_mb=2
+    elif [ "$total_size" -lt $((100 * 1024 * 1024)) ]; then         # < 100MB
+        chunk_size_mb=20
+    elif [ "$total_size" -lt $((1024 * 1024 * 1024)) ]; then        # < 1GB
+        chunk_size_mb=100
+    elif [ "$total_size" -lt $((5 * 1024 * 1024 * 1024)) ]; then    # < 5GB
+        chunk_size_mb=200
+    elif [ "$total_size" -lt $((10 * 1024 * 1024 * 1024)) ]; then   # < 10GB
+        chunk_size_mb=400
+    elif [ "$total_size" -lt $((50 * 1024 * 1024 * 1024)) ]; then   # < 50GB
+        chunk_size_mb=500
+    else                                                            # ≥ 50GB
+        chunk_size_mb=1000
+    fi
+    
+    local chunk_size=$((chunk_size_mb * 1024 * 1024))
+    local num_chunks=$(( (total_size + chunk_size - 1) / chunk_size ))
+    
+    log_download "INFO" "Chunk size: $chunk_size bytes (${chunk_size_mb}MB)"
+    log_download "INFO" "Number of chunks: $num_chunks"
+    
+    # Store chunk PIDs for cancellation
+    local chunk_pids_file="$chunk_dir/.chunk_pids"
+    touch "$chunk_pids_file"
+    
+    # Download chunks in parallel with limited concurrency
+    local max_concurrent_chunks=5
+    local active_chunks=0
+    local completed_chunks=0
+    local failed_chunks=0
+    
+    # Start progress monitoring in background
+    (
+        while [ "$completed_chunks" -lt "$num_chunks" ] && [ "$failed_chunks" -eq 0 ]; do
+            # Check for cancellation
+            if is_download_cancelled "$group" "$model_name"; then
+                log_download "INFO" "Cancellation detected during chunk download progress monitoring"
+                break
+            fi
+            
+            # Calculate progress by monitoring chunk directory size
+            local current_size=0
+            if [ -d "$chunk_dir" ]; then
+                # Sum up all chunk file sizes
+                for chunk_file in "$chunk_dir"/part-*; do
+                    if [ -f "$chunk_file" ]; then
+                        local chunk_file_size
+                        chunk_file_size=$(stat -f%z "$chunk_file" 2>/dev/null || stat -c%s "$chunk_file" 2>/dev/null || echo "0")
+                        current_size=$((current_size + chunk_file_size))
+                    fi
+                done
+            fi
             
             # Update progress
+            update_download_progress "$group" "$model_name" "$output_file" "$total_size" "$current_size" "progress"
+            
+            # Log progress
+            local percentage=0
             if [ "$total_size" -gt 0 ]; then
-                local percentage=$((current_size * 100 / total_size))
-                update_download_progress "$group" "$model_name" "$local_path" "$total_size" "$current_size" "progress"
-                
-                # Log progress for large files (every 10% or if over 10MB)
-                if [ "$total_size" -gt 10485760 ] && [ $((current_size % (total_size / 10))) -lt $((last_size % (total_size / 10))) ]; then
-                    log_download "INFO" "Download progress: $group/$model_name ($percentage%)"
-                fi
+                percentage=$((current_size * 100 / total_size))
             fi
+            log_download "INFO" "Download progress: $group/$model_name - ${percentage}% ($current_size/$total_size bytes)"
             
-            # Check for stalled download
-            if [ "$current_size" -eq "$last_size" ]; then
-                stall_count=$((stall_count + 1))
-                if [ "$stall_count" -ge "$max_stalls" ]; then
-                    log_download "WARN" "Download appears stalled, terminating: $group/$model_name"
-                    kill "$aws_pid" 2>/dev/null || true
-                    break
-                fi
-            else
-                stall_count=0
-            fi
-            
-            last_size="$current_size"
+            sleep 2
+        done
+    ) &
+    local progress_monitor_pid=$!
+    
+    # Download chunks with retry logic
+    for ((i = 0; i < num_chunks; i++)); do
+        # Check for cancellation before starting each chunk
+        if is_download_cancelled "$group" "$model_name"; then
+            log_download "INFO" "Cancellation detected, stopping chunk downloads"
+            break
         fi
         
-        sleep "$check_interval"
+        # Wait if we have too many concurrent downloads
+        while [ "$active_chunks" -ge "$max_concurrent_chunks" ]; do
+            sleep 0.5
+            # Count active processes
+            active_chunks=0
+            if [ -f "$chunk_pids_file" ]; then
+                while IFS= read -r pid; do
+                    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                        active_chunks=$((active_chunks + 1))
+                    fi
+                done < "$chunk_pids_file"
+            fi
+        done
+        
+        local start=$((i * chunk_size))
+        local end=$((start + chunk_size - 1))
+        if [ "$end" -ge "$total_size" ]; then
+            end=$((total_size - 1))
+        fi
+        
+        local range="bytes=${start}-${end}"
+        local chunk_file="$chunk_dir/part-$(printf "%04d" $i)"
+        
+        log_download "DEBUG" "Starting chunk $i: $range"
+        
+        # Download chunk in background with retry
+        (
+            local retry_count=0
+            local max_retries=3
+            local success=false
+            
+            while [ "$retry_count" -lt "$max_retries" ] && [ "$success" = false ]; do
+                # Check for cancellation before each retry
+                if is_download_cancelled "$group" "$model_name"; then
+                    log_download "DEBUG" "Chunk $i cancelled during retry loop"
+                    exit 2  # Use exit code 2 to indicate cancellation
+                fi
+                
+                if "$aws_cmd" s3api get-object \
+                    --bucket "$bucket" \
+                    --key "$key" \
+                    --range "$range" \
+                    "$chunk_file" >/dev/null 2>&1; then
+                    
+                    # Check for cancellation after successful download
+                    if is_download_cancelled "$group" "$model_name"; then
+                        log_download "DEBUG" "Chunk $i cancelled after download"
+                        rm -f "$chunk_file"  # Clean up the downloaded chunk
+                        exit 2  # Use exit code 2 to indicate cancellation
+                    fi
+                    
+                    success=true
+                    log_download "DEBUG" "Chunk $i completed successfully"
+                else
+                    retry_count=$((retry_count + 1))
+                    log_download "WARN" "Chunk $i failed, retry $retry_count/$max_retries"
+                    rm -f "$chunk_file"
+                    sleep 1
+                fi
+            done
+            
+            if [ "$success" = false ]; then
+                log_download "ERROR" "Chunk $i failed after $max_retries retries"
+                exit 1
+            fi
+        ) &
+        
+        local chunk_pid=$!
+        echo "$chunk_pid" >> "$chunk_pids_file"
+        active_chunks=$((active_chunks + 1))
     done
     
-    # Wait for AWS CLI to complete and get exit status
-    wait "$aws_pid" 2>/dev/null
-    local aws_exit_code=$?
+    # Wait for all chunks to complete
+    log_download "INFO" "Waiting for all chunks to complete..."
+    local all_success=true
+    local cancelled_during_chunks=false
     
-    # Check final cancellation state
-    if is_download_cancelled "$group" "$model_name"; then
-        log_download "INFO" "Download was cancelled: $group/$model_name"
-        rm -f "$temp_download_path"
-        update_download_progress "$group" "$model_name" "$local_path" "$total_size" 0 "cancelled"
+    if [ -f "$chunk_pids_file" ]; then
+        while IFS= read -r pid; do
+            if [ -n "$pid" ]; then
+                local exit_code=0
+                if wait "$pid" 2>/dev/null; then
+                    exit_code=$?
+                else
+                    exit_code=$?
+                fi
+                
+                if [ "$exit_code" -eq 2 ]; then
+                    # Exit code 2 indicates cancellation
+                    log_download "DEBUG" "Chunk download process $pid was cancelled"
+                    cancelled_during_chunks=true
+                elif [ "$exit_code" -ne 0 ]; then
+                    log_download "ERROR" "Chunk download process $pid failed with exit code $exit_code"
+                    all_success=false
+                fi
+            fi
+        done < "$chunk_pids_file"
+    fi
+    
+    # Stop progress monitoring
+    kill "$progress_monitor_pid" 2>/dev/null || true
+    wait "$progress_monitor_pid" 2>/dev/null || true
+    
+    # Check for cancellation - either detected during chunk processing or via signal
+    if is_download_cancelled "$group" "$model_name" || [ "$cancelled_during_chunks" = true ]; then
+        log_download "INFO" "Download was cancelled during chunk processing"
         return 1
     fi
     
-    # Check if download succeeded
-    if [ "$aws_exit_code" -eq 0 ] && [ -f "$temp_download_path" ]; then
-        download_success=true
-        log_download "INFO" "S3 download completed: $full_s3_path"
-    else
-        download_success=false
-        log_download "ERROR" "S3 download failed for $full_s3_path (exit code: $aws_exit_code)"
+    if [ "$all_success" = false ]; then
+        log_download "ERROR" "Some chunks failed to download"
+        return 1
     fi
     
-    if [ "$download_success" = true ] && [ -f "$temp_download_path" ]; then
-        # Verify download size if total_size was provided
-        local actual_size
-        actual_size=$(stat -f%z "$temp_download_path" 2>/dev/null || stat -c%s "$temp_download_path" 2>/dev/null || echo "0")
-        
-        if [ "$total_size" -gt 0 ] && [ "$actual_size" -ne "$total_size" ]; then
-            log_download "WARN" "Downloaded size ($actual_size) doesn't match expected size ($total_size) for $model_name"
+    # Verify all chunks exist
+    for ((i = 0; i < num_chunks; i++)); do
+        local chunk_file="$chunk_dir/part-$(printf "%04d" $i)"
+        if [ ! -f "$chunk_file" ]; then
+            log_download "ERROR" "Missing chunk file: $chunk_file"
+            return 1
         fi
+    done
+    
+    log_download "INFO" "All chunks downloaded successfully"
+    
+    # Assemble chunks into final file
+    log_download "INFO" "Assembling chunks into: $output_file"
+    
+    # Use a temporary file for assembly, then move atomically
+    local temp_output="$output_file.assembling"
+    rm -f "$temp_output"
+    
+    if cat "$chunk_dir"/part-* > "$temp_output" 2>/dev/null; then
+        # Verify assembled file size
+        local assembled_size
+        assembled_size=$(stat -f%z "$temp_output" 2>/dev/null || stat -c%s "$temp_output" 2>/dev/null || echo "0")
         
-        # Move temp file to final location
-        if mv "$temp_download_path" "$local_path"; then
-            local final_size
-            final_size=$(stat -f%z "$local_path" 2>/dev/null || stat -c%s "$local_path" 2>/dev/null || echo "0")
-            
-            # Update final progress
-            update_download_progress "$group" "$model_name" "$local_path" "$final_size" "$final_size" "completed"
-            
-            log_download "INFO" "Download completed successfully: $group/$model_name ($final_size bytes)"
-            
-            # Resolve symlinks for this model
-            log_download "INFO" "Resolving symlinks for downloaded model: $group/$model_name"
-            if command -v resolve_symlinks >/dev/null 2>&1; then
-                resolve_symlinks "" "$model_name" false
+        if [ "$assembled_size" -eq "$total_size" ]; then
+            # Move to final location atomically
+            if mv "$temp_output" "$output_file"; then
+                log_download "INFO" "File assembled successfully: $output_file ($assembled_size bytes)"
+                return 0
             else
-                log_download "WARN" "resolve_symlinks function not available"
+                log_download "ERROR" "Failed to move assembled file to final location"
+                rm -f "$temp_output"
+                return 1
             fi
-            
-            return 0
         else
-            log_download "ERROR" "Failed to move downloaded file to final location: $local_path"
-            rm -f "$temp_download_path"
-            update_download_progress "$group" "$model_name" "$local_path" "$total_size" 0 "failed"
+            log_download "ERROR" "Assembled file size ($assembled_size) doesn't match expected size ($total_size)"
+            rm -f "$temp_output"
             return 1
         fi
     else
-        log_download "ERROR" "Download failed: $group/$model_name"
-        rm -f "$temp_download_path"
-        update_download_progress "$group" "$model_name" "$local_path" "$total_size" 0 "failed"
+        log_download "ERROR" "Failed to assemble chunks"
+        rm -f "$temp_output"
         return 1
+    fi
+}
+
+# Function to clean up chunked download resources
+cleanup_chunked_download() {
+    local group="$1"
+    local model_name="$2"
+    local chunk_dir="$3"
+    local chunk_dir_file="$4"
+    local output_file="$5"  # If provided and cancellation, don't create this file
+    
+    # Kill any remaining chunk download processes
+    if [ -f "$chunk_dir/.chunk_pids" ]; then
+        while IFS= read -r pid; do
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                log_download "DEBUG" "Killing chunk download process: $pid"
+                kill -TERM "$pid" 2>/dev/null || true
+                sleep 0.5
+                if kill -0 "$pid" 2>/dev/null; then
+                    kill -KILL "$pid" 2>/dev/null || true
+                fi
+            fi
+        done < "$chunk_dir/.chunk_pids"
+    fi
+    
+    # Remove chunk directory
+    if [ -n "$chunk_dir" ] && [ -d "$chunk_dir" ]; then
+        log_download "DEBUG" "Cleaning up chunk directory: $chunk_dir"
+        rm -rf "$chunk_dir"
+    fi
+    
+    # Remove chunk directory tracking file
+    if [ -n "$chunk_dir_file" ] && [ -f "$chunk_dir_file" ]; then
+        rm -f "$chunk_dir_file"
+    fi
+    
+    # If this is a cancellation and we have an output file, make sure it doesn't exist
+    if [ -n "$output_file" ] && is_download_cancelled "$group" "$model_name"; then
+        rm -f "$output_file" "$output_file.assembling"
+        log_download "DEBUG" "Removed output file due to cancellation: $output_file"
     fi
 }
 
@@ -513,30 +822,111 @@ start_download_worker() {
         return 0
     fi
     
-    # Check if worker is already running
+    # Enhanced locking mechanism to prevent multiple workers
+    local lock_file="${DOWNLOAD_PID_FILE}.lock"
+    local start_lock_file="${DOWNLOAD_PID_FILE}.start.lock"
+    local max_wait=10
+    local wait_count=0
+    local lock_acquired=false
+    
+    # First, acquire the start lock to prevent multiple start attempts
+    while [ $wait_count -lt $max_wait ]; do
+        if (
+            set -C  # noclobber - fail if file exists
+            echo "$$:$(date +%s)" > "$start_lock_file"
+        ) 2>/dev/null; then
+            lock_acquired=true
+            break
+        fi
+        
+        # Check if existing lock is stale (older than 30 seconds)
+        if [ -f "$start_lock_file" ]; then
+            local lock_info lock_pid lock_time current_time
+            lock_info=$(cat "$start_lock_file" 2>/dev/null || echo "")
+            if [ -n "$lock_info" ]; then
+                lock_pid="${lock_info%%:*}"
+                lock_time="${lock_info##*:}"
+                current_time=$(date +%s)
+                
+                # If lock is stale or process doesn't exist, remove it
+                if [ -n "$lock_time" ] && [ $((current_time - lock_time)) -gt 30 ]; then
+                    log_download "WARN" "Removing stale start lock (age: $((current_time - lock_time))s)"
+                    rm -f "$start_lock_file"
+                elif [ -n "$lock_pid" ] && ! kill -0 "$lock_pid" 2>/dev/null; then
+                    log_download "WARN" "Removing start lock for dead process $lock_pid"
+                    rm -f "$start_lock_file"
+                fi
+            else
+                # Empty or corrupted lock file
+                rm -f "$start_lock_file"
+            fi
+        fi
+        
+        sleep 0.5
+        wait_count=$((wait_count + 1))
+    done
+    
+    if [ "$lock_acquired" != "true" ]; then
+        log_download "WARN" "Could not acquire start lock after ${max_wait} attempts"
+        return 0
+    fi
+    
+    # Clean up start lock on exit
+    trap "rm -f '$start_lock_file'" EXIT INT TERM QUIT
+    
+    # Now check if worker is already running (double-check with start lock held)
     if [ -f "$DOWNLOAD_PID_FILE" ]; then
         local pid
         pid=$(cat "$DOWNLOAD_PID_FILE" 2>/dev/null || echo "")
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            log_download "INFO" "Download worker already running (PID: $pid)"
+            log_download "DEBUG" "Download worker already running (PID: $pid)"
+            rm -f "$start_lock_file"
             return 0
         else
+            log_download "INFO" "Cleaning up stale worker PID file"
             rm -f "$DOWNLOAD_PID_FILE"
         fi
     fi
     
-    # Start worker in background
+    # Acquire the main worker lock for the duration of the worker process
+    if ! (
+        set -C  # noclobber - fail if file exists
+        echo "$$:$(date +%s)" > "$lock_file"
+    ) 2>/dev/null; then
+        log_download "DEBUG" "Could not acquire worker lock - another worker may have started"
+        rm -f "$start_lock_file"
+        return 0
+    fi
+    
+    # Start worker in background - enhanced approach with robust PID and lock management
     (
+        # Remove the start lock since we're now committed to starting the worker
+        rm -f "$start_lock_file"
+        
+        # Write our PID and ensure cleanup of both PID file and worker lock
         echo $$ > "$DOWNLOAD_PID_FILE"
-        trap "rm -f '$DOWNLOAD_PID_FILE'" EXIT INT TERM QUIT
+        trap "rm -f '$DOWNLOAD_PID_FILE' '$lock_file'" EXIT INT TERM QUIT
         
         log_download "INFO" "Download worker started (PID: $$)"
         
         # Track background download processes using simple arrays
         local download_pids=()
         local download_keys=()
+        local empty_queue_checks=0
+        local max_empty_checks=6  # Stop after 3 seconds of empty queue (6 * 0.5s)
+        
+        # Worker heartbeat for monitoring
+        local last_heartbeat=$(date +%s)
+        local heartbeat_interval=30  # Update heartbeat every 30 seconds
         
         while true; do
+            local current_time=$(date +%s)
+            
+            # Update heartbeat in lock file periodically
+            if [ $((current_time - last_heartbeat)) -ge $heartbeat_interval ]; then
+                echo "$$:$current_time" > "$lock_file" 2>/dev/null || true
+                last_heartbeat=$current_time
+            fi
             # Check for global stop signal
             if should_stop_all_downloads; then
                 log_download "INFO" "Global stop signal received, shutting down worker"
@@ -580,18 +970,29 @@ start_download_worker() {
             if [ "$running_count" -lt "$MAX_CONCURRENT_DOWNLOADS" ]; then
                 local next_download_file
                 next_download_file=$(get_next_download)
+                local get_result=$?
                 
-                if [ $? -eq 0 ] && [ -f "$next_download_file" ]; then
+                if [ "$get_result" -eq 0 ] && [ -f "$next_download_file" ]; then
                     local group model_name s3_path local_path total_size
-                    group=$(jq -r '.group // empty' "$next_download_file")
-                    model_name=$(jq -r '.modelName // empty' "$next_download_file")
-                    s3_path=$(jq -r '.s3Path // empty' "$next_download_file")
-                    local_path=$(jq -r '.localPath // empty' "$next_download_file")
-                    total_size=$(jq -r '.totalSize // 0' "$next_download_file")
+                    group=$(jq -r ".group // empty" "$next_download_file")
+                    model_name=$(jq -r ".modelName // empty" "$next_download_file")
+                    s3_path=$(jq -r ".s3Path // empty" "$next_download_file")
+                    local_path=$(jq -r ".localPath // empty" "$next_download_file")
+                    total_size=$(jq -r ".totalSize // 0" "$next_download_file")
                     
                     rm -f "$next_download_file"
                     
+                    # Check if this download was cancelled while in queue
+                    if is_download_cancelled "$group" "$model_name"; then
+                        log_download "INFO" "Skipping cancelled download from queue: $group/$model_name"
+                        update_download_progress "$group" "$model_name" "$local_path" "$total_size" 0 "cancelled"
+                        # Continue to next iteration without incrementing empty_queue_checks
+                        continue
+                    fi
+                    
                     if [ -n "$group" ] && [ -n "$model_name" ] && [ -n "$s3_path" ] && [ -n "$local_path" ]; then
+                        log_download "INFO" "Starting download: $group/$model_name from $s3_path"
+                        
                         # Start download in background
                         (
                             download_model_with_progress "$group" "$model_name" "$s3_path" "$local_path" "$total_size"
@@ -600,30 +1001,51 @@ start_download_worker() {
                         download_pids+=("$download_pid")
                         download_keys+=("${group}/${model_name}")
                         log_download "INFO" "Started download ${group}/${model_name} (PID: $download_pid, Active: $((running_count + 1))/$MAX_CONCURRENT_DOWNLOADS)"
+                        
+                        # Reset empty queue counter when we start a new download
+                        empty_queue_checks=0
                     else
                         log_download "ERROR" "Invalid download entry in queue"
                     fi
                 else
-                    # No downloads in queue, sleep and check again
-                    sleep 2
+                    # No downloads in queue
+                    empty_queue_checks=$((empty_queue_checks + 1))
+                    
+                    # If queue has been empty for a while and no active downloads, stop worker
+                    if [ "$empty_queue_checks" -ge "$max_empty_checks" ] && [ "$running_count" -eq 0 ]; then
+                        log_download "INFO" "Queue empty and no active downloads, worker shutting down"
+                        break
+                    fi
+                    
+                    # Sleep briefly and check again
+                    sleep 0.5
                 fi
             else
                 # At max capacity, wait a bit before checking again
                 sleep 1
             fi
         done
+        
+        log_download "INFO" "Download worker finished"
     ) &
     
-    local worker_pid=$!
-    log_download "INFO" "Download worker started in background (PID: $worker_pid)"
+    # Give the worker a moment to start
+    sleep 0.1
     
+    log_download "INFO" "Download worker started in background"
     return 0
 }
 
 # Function to stop download worker
-# Works independently regardless of execution scope
+# Works independently regardless of execution scope and cleans up locks
 stop_download_worker() {
     local force_stop="${1:-false}"
+    
+    # Clean up lock files first
+    local lock_file="${DOWNLOAD_PID_FILE}.lock"
+    local start_lock_file="${DOWNLOAD_PID_FILE}.start.lock"
+    
+    log_download "INFO" "Stopping download worker and cleaning up locks"
     
     # Multiple strategies to find and stop the download worker
     local stopped=false
@@ -633,31 +1055,45 @@ stop_download_worker() {
         local pid
         pid=$(cat "$DOWNLOAD_PID_FILE" 2>/dev/null || echo "")
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            log_download "INFO" "Stopping download worker via PID file (PID: $pid)"
-            kill -TERM "$pid" 2>/dev/null || true
+            # Safety check: don't kill the current process or its parent
+            local current_pid=$$
+            local parent_pid=$(ps -p $$ -o ppid= 2>/dev/null | tr -d ' ' || echo "")
             
-            # Give it time to shutdown gracefully
-            local wait_count=0
-            while [ $wait_count -lt 5 ] && kill -0 "$pid" 2>/dev/null; do
-                sleep 1
-                wait_count=$((wait_count + 1))
-            done
-            
-            # Force kill if still running
-            if kill -0 "$pid" 2>/dev/null; then
-                log_download "WARN" "Force killing download worker (PID: $pid)"
-                kill -KILL "$pid" 2>/dev/null || true
+            if [ "$pid" != "$current_pid" ] && [ "$pid" != "$parent_pid" ]; then
+                log_download "INFO" "Stopping download worker via PID file (PID: $pid)"
+                kill -TERM "$pid" 2>/dev/null || true
+                
+                # Give it time to shutdown gracefully
+                local wait_count=0
+                while [ $wait_count -lt 5 ] && kill -0 "$pid" 2>/dev/null; do
+                    sleep 1
+                    wait_count=$((wait_count + 1))
+                done
+                
+                # Force kill if still running and not in test environment
+                if kill -0 "$pid" 2>/dev/null; then
+                    if [ "${SKIP_FORCE_KILL:-false}" != "true" ]; then
+                        log_download "WARN" "Force killing download worker (PID: $pid)"
+                        kill -KILL "$pid" 2>/dev/null || true
+                        sleep 1
+                    else
+                        log_download "INFO" "Skipping force kill in test environment"
+                    fi
+                fi
+                
+                stopped=true
+            else
+                log_download "WARN" "Skipping worker stop to avoid killing test process (PID: $pid)"
             fi
-            
-            stopped=true
         fi
         rm -f "$DOWNLOAD_PID_FILE"
     fi
     
-    # Strategy 2: Find download worker processes by pattern
+    # Strategy 2: Find download worker processes by pattern (be more specific)
     if [ "$stopped" = false ] || [ "$force_stop" = true ]; then
         local worker_pids
-        worker_pids=$(pgrep -f "download.*worker" 2>/dev/null || true)
+        # Look for specific worker function calls, not just "download"
+        worker_pids=$(pgrep -f "run_download_worker_loop" 2>/dev/null || true)
         
         if [ -z "$worker_pids" ]; then
             # Look for AWS CLI processes that might be downloading (handle both real and mock aws)
@@ -668,21 +1104,39 @@ stop_download_worker() {
         fi
         
         if [ -n "$worker_pids" ]; then
-            log_download "INFO" "Stopping download processes found by pattern"
-            echo "$worker_pids" | xargs kill -TERM 2>/dev/null || true
-            sleep 2
-            # Force kill any remaining
-            echo "$worker_pids" | xargs kill -KILL 2>/dev/null || true
-            stopped=true
+            # Filter out the current test process and its parent to avoid killing the test
+            local current_pid=$$
+            local parent_pid=$(ps -p $$ -o ppid= 2>/dev/null | tr -d ' ' || echo "")
+            local filtered_pids=""
+            for pid in $worker_pids; do
+                if [ "$pid" != "$current_pid" ] && [ "$pid" != "$parent_pid" ]; then
+                    filtered_pids="$filtered_pids $pid"
+                fi
+            done
+            
+            if [ -n "$filtered_pids" ]; then
+                log_download "INFO" "Stopping download processes found by pattern"
+                echo "$filtered_pids" | xargs kill -TERM 2>/dev/null || true
+                sleep 2
+                # Force kill any remaining (only if not in test environment)
+                if [ "${SKIP_FORCE_KILL:-false}" != "true" ]; then
+                    echo "$filtered_pids" | xargs kill -KILL 2>/dev/null || true
+                else
+                    log_download "INFO" "Skipping force kill in test environment"
+                fi
+                stopped=true
+            fi
         fi
     fi
     
-    # Strategy 3: Create a global stop signal
-    local stop_signal_file="$MODEL_DOWNLOAD_DIR/.stop_all_downloads"
-    touch "$stop_signal_file"
-    
-    # Clean up stop signal after a delay
-    (sleep 10; rm -f "$stop_signal_file") &
+    # Strategy 3: Create a global stop signal (skip in test environments)
+    if [ "${SKIP_GLOBAL_STOP_SIGNAL:-false}" != "true" ]; then
+        local stop_signal_file="$MODEL_DOWNLOAD_DIR/.stop_all_downloads"
+        touch "$stop_signal_file"
+        
+        # Clean up stop signal after a delay
+        (sleep 10; rm -f "$stop_signal_file") &
+    fi
     
     # Cancel all pending downloads if force stop
     if [ "$force_stop" = true ]; then
@@ -718,6 +1172,10 @@ stop_download_worker() {
         log_download "INFO" "No active download worker found to stop"
     fi
     
+    # Clean up all lock files regardless of stop success
+    rm -f "$lock_file" "$start_lock_file" 2>/dev/null || true
+    log_download "DEBUG" "Cleaned up worker lock files"
+    
     return 0
 }
 
@@ -725,6 +1183,75 @@ stop_download_worker() {
 should_stop_all_downloads() {
     local stop_signal_file="$MODEL_DOWNLOAD_DIR/.stop_all_downloads"
     [ -f "$stop_signal_file" ]
+}
+
+# Function to check worker status including lock information
+get_worker_status() {
+    local output_file="${1:-}"
+    if [ -z "$output_file" ]; then
+        output_file=$(mktemp)
+    fi
+    
+    local lock_file="${DOWNLOAD_PID_FILE}.lock"
+    local start_lock_file="${DOWNLOAD_PID_FILE}.start.lock"
+    local status="stopped"
+    local pid=""
+    local lock_status="none"
+    local lock_age=0
+    
+    # Check PID file
+    if [ -f "$DOWNLOAD_PID_FILE" ]; then
+        pid=$(cat "$DOWNLOAD_PID_FILE" 2>/dev/null || echo "")
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            status="running"
+        else
+            status="stale"
+        fi
+    fi
+    
+    # Check lock files
+    if [ -f "$lock_file" ]; then
+        local lock_info current_time lock_time
+        lock_info=$(cat "$lock_file" 2>/dev/null || echo "")
+        current_time=$(date +%s)
+        
+        if [[ "$lock_info" == *":"* ]]; then
+            lock_time="${lock_info##*:}"
+            lock_age=$((current_time - lock_time))
+            lock_status="active"
+        else
+            lock_status="legacy"
+        fi
+    fi
+    
+    if [ -f "$start_lock_file" ]; then
+        lock_status="starting"
+    fi
+    
+    # Get queue status
+    local queue_length=0
+    if [ -f "$DOWNLOAD_QUEUE_FILE" ]; then
+        queue_length=$(jq 'length' "$DOWNLOAD_QUEUE_FILE" 2>/dev/null || echo "0")
+    fi
+    
+    # Write status to output file
+    jq -n \
+        --arg status "$status" \
+        --arg pid "$pid" \
+        --arg lockStatus "$lock_status" \
+        --argjson lockAge "$lock_age" \
+        --argjson queueLength "$queue_length" \
+        --arg timestamp "$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")" \
+        '{
+            status: $status,
+            pid: $pid,
+            lockStatus: $lockStatus,
+            lockAge: $lockAge,
+            queueLength: $queueLength,
+            timestamp: $timestamp
+        }' > "$output_file"
+    
+    echo "$output_file"
 }
 
 # Function to download models (main API function)
@@ -749,9 +1276,6 @@ download_models() {
     
     log_download "INFO" "Starting model download in mode: $mode"
     
-    # Start download worker if not running
-    start_download_worker
-    
     local models_to_download=()
     local total_models=0
     
@@ -759,8 +1283,8 @@ download_models() {
         "all")
             # Load all local models from config
             local all_models_file
-            if command -v load_local_models >/dev/null 2>&1; then
-                all_models_file=$(load_local_models)
+            if command -v get_downloadable_models >/dev/null 2>&1; then
+                all_models_file=$(get_downloadable_models)
                 
                 if [ $? -eq 0 ] && [ -f "$all_models_file" ]; then
                     while IFS= read -r model; do
@@ -769,29 +1293,23 @@ download_models() {
                     rm -f "$all_models_file"
                 fi
             else
-                log_download "WARN" "load_local_models function not available"
+                log_download "WARN" "get_downloadable_models function not available"
             fi
             ;;
             
         "missing")
-            # Load all local models and check which ones don't exist locally
-            local all_models_file
-            if command -v load_local_models >/dev/null 2>&1; then
-                all_models_file=$(load_local_models)
-                
-                if [ $? -eq 0 ] && [ -f "$all_models_file" ]; then
-                    while IFS= read -r model; do
-                        local local_path
-                        local_path=$(echo "$model" | jq -r '.localPath // empty')
-                        
-                        if [ -n "$local_path" ] && [ ! -f "$local_path" ]; then
-                            models_to_download+=("$model")
-                        fi
-                    done < <(jq -c '.[]' "$all_models_file" 2>/dev/null)
-                    rm -f "$all_models_file"
-                fi
+            # Get downloadable models that don't exist locally 
+            local downloadable_output
+            downloadable_output=$(get_downloadable_models)
+            
+            if [ $? -eq 0 ] && [ -n "$downloadable_output" ]; then
+                while IFS= read -r model; do
+                    if [ -n "$model" ] && [ "$model" != "null" ]; then
+                        models_to_download+=("$model")
+                    fi
+                done < <(echo "$downloadable_output" | jq -c '.[]' 2>/dev/null)
             else
-                log_download "WARN" "load_local_models function not available"
+                log_download "WARN" "Could not get downloadable models"
             fi
             ;;
             
@@ -873,9 +1391,19 @@ download_models() {
     done
     
     log_download "INFO" "Queued $queued_count model(s) for download"
-    
-    # Return current progress file
+
+    # Return current progress file before starting worker (to avoid lock contention)
     cp "$DOWNLOAD_PROGRESS_FILE" "$output_file"
+
+    # Start download worker if not running
+    start_download_worker
+    
+    # Ensure output file exists and is readable
+    if [ ! -f "$output_file" ]; then
+        log_download "WARN" "Output file does not exist: $output_file"
+        echo '{}' > "$output_file"
+    fi
+    
     echo "$output_file"
     return 0
 }
@@ -907,6 +1435,38 @@ get_download_progress() {
         log_download "ERROR" "Either group/model_name or local_path must be provided"
         return 1
     fi
+    
+    if [ -s "$output_file" ]; then
+        echo "$output_file"
+        return 0
+    else
+        echo "{}" > "$output_file"
+        echo "$output_file"
+        return 1
+    fi
+}
+
+# Function to get download progress by local path only
+get_download_progress_by_path() {
+    local local_path="${1:-}"
+    local output_file="${2:-}"
+    
+    if [ -z "$local_path" ]; then
+        log_download "ERROR" "Local path must be provided"
+        return 1
+    fi
+    
+    # Support both modes: return file path or content
+    if [ -z "$output_file" ]; then
+        output_file=$(mktemp)
+    fi
+    
+    initialize_download_system
+    
+    # Search by local path across all groups
+    jq --arg localPath "$local_path" \
+       '[.. | objects | select(.localPath == $localPath)][0] // {}' \
+       "$DOWNLOAD_PROGRESS_FILE" > "$output_file" 2>/dev/null
     
     if [ -s "$output_file" ]; then
         echo "$output_file"
@@ -973,11 +1533,14 @@ terminate_active_download() {
     # Find and kill AWS CLI download processes for this model
     # Handle both real aws and mock_aws patterns
     local pids
-    pids=$(pgrep -f "s3 cp.*${download_pattern}" 2>/dev/null || true)
+    pids=$(pgrep -f "s3.*get-object.*${download_pattern}" 2>/dev/null || true)
     
     if [ -z "$pids" ]; then
-        # Try alternative pattern matching
-        pids=$(pgrep -f "aws.*${download_pattern}" 2>/dev/null || true)
+        # Try alternative patterns for chunked downloads
+        pids=$(pgrep -f "aws.*s3api.*get-object" 2>/dev/null || true)
+        if [ -z "$pids" ]; then
+            pids=$(pgrep -f "mock_aws.*s3api.*get-object" 2>/dev/null || true)
+        fi
     fi
     
     if [ -n "$pids" ]; then
@@ -986,12 +1549,32 @@ terminate_active_download() {
                 log_download "INFO" "Terminating download process $pid for $group/$model_name"
                 kill -TERM "$pid" 2>/dev/null || true
                 # Give it a moment, then force kill if necessary
-                sleep 1
+                sleep 0.5
                 if kill -0 "$pid" 2>/dev/null; then
                     kill -KILL "$pid" 2>/dev/null || true
                 fi
             fi
         done
+    fi
+    
+    # Look for chunk directory and kill processes listed in .chunk_pids file
+    local chunk_dir_file="$MODEL_DOWNLOAD_DIR/.chunk_dir_${group}_${model_name}"
+    if [ -f "$chunk_dir_file" ]; then
+        local chunk_dir
+        chunk_dir=$(cat "$chunk_dir_file" 2>/dev/null || echo "")
+        if [ -n "$chunk_dir" ] && [ -f "$chunk_dir/.chunk_pids" ]; then
+            log_download "INFO" "Terminating chunk processes for $group/$model_name"
+            while IFS= read -r pid; do
+                if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                    log_download "DEBUG" "Killing chunk process $pid"
+                    kill -TERM "$pid" 2>/dev/null || true
+                    sleep 0.2
+                    if kill -0 "$pid" 2>/dev/null; then
+                        kill -KILL "$pid" 2>/dev/null || true
+                    fi
+                fi
+            done < "$chunk_dir/.chunk_pids"
+        fi
     fi
     
     # Also look for any background download processes that might be running
@@ -1173,6 +1756,113 @@ cancel_all_downloads() {
     return 0
 }
 
+# Function to get downloadable models that don't exist locally
+# Returns a JSON array of models that can be downloaded but don't exist locally
+# Usage: get_downloadable_models [output_file]
+# Returns a JSON array of all models in the config that do not exist locally
+get_downloadable_models() {
+    local output_file="${1:-}"
+    
+    # Ensure MODEL_CONFIG_FILE is available
+    if [ -z "$MODEL_CONFIG_FILE" ] || [ ! -f "$MODEL_CONFIG_FILE" ]; then
+        log_download "ERROR" "Model config file not found: $MODEL_CONFIG_FILE"
+        if [ -z "$output_file" ]; then
+            echo "[]"
+        else
+            echo "[]" > "$output_file"
+            echo "$output_file"
+        fi
+        return 1
+    fi
+    
+    # Create output file if not provided
+    local temp_output=false
+    if [ -z "$output_file" ]; then
+        output_file=$(mktemp)
+        temp_output=true
+    fi
+    
+    initialize_download_system
+    
+    log_download "INFO" "Getting list of downloadable models not existing locally from: $MODEL_CONFIG_FILE"
+    
+    # Get list of local models using the actual load_local_models function
+    local all_models_file
+    all_models_file=$(load_local_models)
+    local load_result=$?
+    
+    if [ $load_result -ne 0 ] || [ ! -f "$all_models_file" ]; then
+        log_download "ERROR" "Failed to load local models"
+        if [ -z "$output_file" ]; then
+            echo "[]"
+        else
+            echo "[]" > "$output_file"
+            echo "$output_file"
+        fi
+        return 1
+    fi
+    
+    # Create a temporary file for processing
+    local temp_file
+    temp_file=$(mktemp)
+    
+    # Initialize output as empty array
+    echo '[]' > "$output_file"
+    
+    # Use jq to find models that don't exist locally (check file system directly)
+    jq '
+        # Get all models from config that have originalS3Path but exclude symlinked models
+        [
+            to_entries[] |
+            select(.value | type == "object") as $group |
+            $group.value | to_entries[] |
+            select(.value.originalS3Path and (.value.originalS3Path | length > 0) and (.value.symLinkedFrom | not)) |
+            .value as $model |
+            $model + {
+                modelKey: .key,
+                directoryGroup: $group.key
+            }
+        ]
+    ' "$MODEL_CONFIG_FILE" > "$temp_file"
+    
+    # Filter models that don't exist on disk
+    while IFS= read -r model; do
+        if [ -n "$model" ] && [ "$model" != "null" ]; then
+            local local_path
+            local_path=$(echo "$model" | jq -r '.localPath // empty')
+            
+            if [ -n "$local_path" ]; then
+                # Replace {{NETWORK_VOLUME}} with actual value
+                local_path="${local_path//\{\{NETWORK_VOLUME\}\}/$NETWORK_VOLUME}"
+                
+                # Check if file doesn't exist locally
+                if [ ! -f "$local_path" ]; then
+                    # Append to output array
+                    jq --argjson model "$model" '. += [$model]' "$output_file" > "${output_file}.tmp" && mv "${output_file}.tmp" "$output_file"
+                fi
+            fi
+        fi
+    done < <(jq -c '.[]' "$temp_file" 2>/dev/null)
+    
+    # Clean up temporary files
+    rm -f "$local_models_file" "$temp_file"
+    
+    # Count and log results
+    local count
+    count=$(jq 'length' "$output_file" 2>/dev/null || echo "0")
+    log_download "INFO" "Found $count downloadable models not existing locally"
+    
+    # If we created a temporary output file, print contents and clean up
+    if [ "$temp_output" = true ]; then
+        cat "$output_file"
+        rm -f "$output_file"
+    else
+        echo "$output_file"
+    fi
+    
+    return 0
+}
+
 # Function to list active downloads (for monitoring/management)
 list_active_downloads() {
     local format="${1:-json}"  # json, table, or simple
@@ -1241,6 +1931,8 @@ list_active_downloads() {
     
     return 0
 }
+
+
 
 EOF
 

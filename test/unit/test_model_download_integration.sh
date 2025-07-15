@@ -583,6 +583,569 @@ test_s3_error_handling() {
     export PATH="$original_path"
 }
 
+# Test getting downloadable models that don't exist locally
+test_get_downloadable_models() {
+    source_model_download_integration
+    initialize_download_system
+    
+    # Set up mock MODEL_CONFIG_FILE using our test fixture
+    local original_config_file="$MODEL_CONFIG_FILE"
+    export MODEL_CONFIG_FILE="$PROJECT_ROOT/test/fixtures/models_config.json"
+    
+    # Create directories for testing
+    mkdir -p "$NETWORK_VOLUME/ComfyUI/models/checkpoints"
+    mkdir -p "$NETWORK_VOLUME/ComfyUI/models/loras" 
+    mkdir -p "$NETWORK_VOLUME/ComfyUI/models/vae"
+    
+    # Create one file that "exists" locally (existing_checkpoint)
+    touch "$NETWORK_VOLUME/ComfyUI/models/checkpoints/existing_checkpoint.safetensors"
+    touch "$NETWORK_VOLUME/ComfyUI/models/loras/existing_lora.safetensors"
+    
+    # Test getting downloadable models
+    local result_content
+    result_content=$(get_downloadable_models)
+    
+    assert_not_empty "$result_content" "Result content should not be empty"
+    assert_command_success "echo '$result_content' | jq empty" "Result should contain valid JSON"
+    
+    # Verify the result contains only missing models
+    local count
+    count=$(echo "$result_content" | jq 'length')
+    assert_equals "3" "$count" "Should return 3 downloadable models (missing_checkpoint, missing_lora, missing_vae)"
+    
+    # Verify specific models are included
+    local missing_checkpoint_count
+    missing_checkpoint_count=$(echo "$result_content" | jq '[.[] | select(.modelKey == "missing_checkpoint")] | length')
+    assert_equals "1" "$missing_checkpoint_count" "Should include missing_checkpoint"
+    
+    local missing_lora_count  
+    missing_lora_count=$(echo "$result_content" | jq '[.[] | select(.modelKey == "missing_lora")] | length')
+    assert_equals "1" "$missing_lora_count" "Should include missing_lora"
+    
+    local missing_vae_count
+    missing_vae_count=$(echo "$result_content" | jq '[.[] | select(.modelKey == "missing_vae")] | length')
+    assert_equals "1" "$missing_vae_count" "Should include missing_vae"
+    
+    # Verify existing models are excluded
+    local existing_checkpoint_count
+    existing_checkpoint_count=$(echo "$result_content" | jq '[.[] | select(.modelKey == "existing_checkpoint")] | length')
+    assert_equals "0" "$existing_checkpoint_count" "Should exclude existing_checkpoint"
+    
+    local existing_lora_count
+    existing_lora_count=$(echo "$result_content" | jq '[.[] | select(.modelKey == "existing_lora")] | length')
+    assert_equals "0" "$existing_lora_count" "Should exclude existing_lora"
+    
+    # Verify all returned models have required fields
+    local models_with_s3_path
+    models_with_s3_path=$(echo "$result_content" | jq '[.[] | select(.originalS3Path and (.originalS3Path | length > 0))] | length')
+    assert_equals "$count" "$models_with_s3_path" "All returned models should have originalS3Path"
+    
+    local models_with_group
+    models_with_group=$(echo "$result_content" | jq '[.[] | select(.directoryGroup and (.directoryGroup | length > 0))] | length')
+    assert_equals "$count" "$models_with_group" "All returned models should have directoryGroup"
+    
+    local models_with_key
+    models_with_key=$(echo "$result_content" | jq '[.[] | select(.modelKey and (.modelKey | length > 0))] | length')
+    assert_equals "$count" "$models_with_key" "All returned models should have modelKey"
+    
+    # Cleanup
+    export MODEL_CONFIG_FILE="$original_config_file"
+    rm -f "$NETWORK_VOLUME/ComfyUI/models/checkpoints/existing_checkpoint.safetensors"
+    rm -f "$NETWORK_VOLUME/ComfyUI/models/loras/existing_lora.safetensors"
+}
+
+# Test getting downloadable models with no missing models (all exist locally)
+test_get_downloadable_models_empty() {
+    source_model_download_integration
+    initialize_download_system
+    
+    # Set up mock MODEL_CONFIG_FILE using our test fixture
+    local original_config_file="$MODEL_CONFIG_FILE"
+    export MODEL_CONFIG_FILE="$PROJECT_ROOT/test/fixtures/models_config.json"
+    
+    # Create directories for testing
+    mkdir -p "$NETWORK_VOLUME/ComfyUI/models/checkpoints"
+    mkdir -p "$NETWORK_VOLUME/ComfyUI/models/loras" 
+    mkdir -p "$NETWORK_VOLUME/ComfyUI/models/vae"
+    
+    # Create ALL files so they "exist" locally
+    touch "$NETWORK_VOLUME/ComfyUI/models/checkpoints/existing_checkpoint.safetensors"
+    touch "$NETWORK_VOLUME/ComfyUI/models/checkpoints/missing_checkpoint.safetensors"
+    touch "$NETWORK_VOLUME/ComfyUI/models/loras/existing_lora.safetensors"
+    touch "$NETWORK_VOLUME/ComfyUI/models/loras/missing_lora.safetensors"
+    touch "$NETWORK_VOLUME/ComfyUI/models/vae/missing_vae.safetensors"
+    
+    # Test getting downloadable models when all exist locally
+    local result_content
+    result_content=$(get_downloadable_models)
+    
+    assert_not_empty "$result_content" "Result content should not be empty"
+    assert_command_success "echo '$result_content' | jq empty" "Result should contain valid JSON"
+    
+    # Verify the result is empty array
+    local count
+    count=$(echo "$result_content" | jq 'length')
+    assert_equals "0" "$count" "Should return 0 downloadable models when all exist locally"
+    
+    assert_equals "[]" "$result_content" "Should return empty JSON array"
+    
+    # Cleanup
+    export MODEL_CONFIG_FILE="$original_config_file"
+    rm -f "$NETWORK_VOLUME/ComfyUI/models/checkpoints/existing_checkpoint.safetensors"
+    rm -f "$NETWORK_VOLUME/ComfyUI/models/checkpoints/missing_checkpoint.safetensors"
+    rm -f "$NETWORK_VOLUME/ComfyUI/models/loras/existing_lora.safetensors"
+    rm -f "$NETWORK_VOLUME/ComfyUI/models/loras/missing_lora.safetensors"
+    rm -f "$NETWORK_VOLUME/ComfyUI/models/vae/missing_vae.safetensors"
+}
+
+# Test getting downloadable models with missing config file
+test_get_downloadable_models_load_failure() {
+    source_model_download_integration
+    initialize_download_system
+    
+    # Set up non-existent MODEL_CONFIG_FILE to simulate failure
+    local original_config_file="$MODEL_CONFIG_FILE"
+    export MODEL_CONFIG_FILE="/non/existent/path/models_config.json"
+    
+    # Test getting downloadable models when config file doesn't exist
+    local result_content
+    result_content=$(get_downloadable_models)
+    
+    assert_not_empty "$result_content" "Result content should not be empty even on failure"
+    assert_command_success "echo '$result_content' | jq empty" "Result should contain valid JSON"
+    
+    # Verify the result is empty array
+    local count
+    count=$(echo "$result_content" | jq 'length')
+    assert_equals "0" "$count" "Should return 0 downloadable models on failure"
+    
+    assert_equals "[]" "$result_content" "Should return empty JSON array on failure"
+    
+    # Cleanup
+    export MODEL_CONFIG_FILE="$original_config_file"
+}
+
+# Test background worker functionality
+test_background_worker_lifecycle() {
+    source_model_download_integration
+    
+    # Clean and reinitialize for fresh state
+    cleanup_download_system
+    initialize_download_system
+    
+    # Setup mock AWS CLI
+    setup_mock_aws_cli
+    
+    # Test that worker starts in background and doesn't block
+    local start_time=$(date +%s)
+    
+    # Start worker (should return immediately)
+    start_download_worker
+    local worker_result=$?
+    
+    local end_time=$(date +%s)
+    local duration=$((end_time - start_time))
+    
+    assert_equals "0" "$worker_result" "Worker should start successfully"
+    assert_command_success "[ '$duration' -lt 2 ]" "Worker start should return immediately (< 2 seconds)"
+    
+    # Verify worker PID file exists
+    assert_file_exists "$DOWNLOAD_PID_FILE" "Worker PID file should be created"
+    
+    # Verify worker process is running
+    local worker_pid
+    worker_pid=$(cat "$DOWNLOAD_PID_FILE" 2>/dev/null || echo "")
+    assert_command_success "[ -n '$worker_pid' ]" "Worker PID should be recorded"
+    assert_command_success "kill -0 '$worker_pid' 2>/dev/null" "Worker process should be running"
+    
+    # Worker should exit automatically when queue is empty
+    sleep 4  # Wait longer than max_empty_checks * 0.5s = 3s
+    
+    # Worker should have exited by now
+    if [ -n "$worker_pid" ]; then
+        assert_command_failure "kill -0 '$worker_pid' 2>/dev/null" "Worker should exit when queue is empty"
+    fi
+    
+    cleanup_mock_aws_cli
+}
+
+# Test that download_models returns immediately
+test_download_models_returns_immediately() {
+    source_model_download_integration
+    
+    # Clean and reinitialize
+    cleanup_download_system
+    initialize_download_system
+    
+    # Setup mock AWS CLI
+    setup_mock_aws_cli
+    
+    # Create test model for download
+    local test_model='{
+        "directoryGroup": "checkpoints",
+        "modelName": "test_model.safetensors",
+        "originalS3Path": "/models/checkpoints/test_model.safetensors",
+        "localPath": "/tmp/test_model.safetensors",
+        "modelSize": 1000000
+    }'
+    
+    # Test that download_models returns immediately
+    local start_time=$(date +%s)
+    
+    local result_file
+    result_file=$(download_models "single" "$test_model")
+    local download_result=$?
+    
+    local end_time=$(date +%s)
+    local duration=$((end_time - start_time))
+    
+    assert_equals "0" "$download_result" "download_models should succeed"
+    assert_command_success "[ '$duration' -lt 2 ]" "download_models should return immediately (< 2 seconds)"
+    assert_file_exists "$result_file" "Result file should be returned"
+    
+    # Verify download was queued
+    local queue_length
+    queue_length=$(jq 'length' "$DOWNLOAD_QUEUE_FILE" 2>/dev/null || echo "0")
+    assert_equals "1" "$queue_length" "Download should be queued"
+    
+    # Verify worker was started
+    assert_file_exists "$DOWNLOAD_PID_FILE" "Worker should be started"
+    
+    # Clean up
+    stop_download_worker true
+    cleanup_mock_aws_cli
+}
+
+# Test worker handles multiple downloads concurrently
+test_worker_concurrent_downloads() {
+    source_model_download_integration
+    
+    # Clean and reinitialize
+    cleanup_download_system
+    initialize_download_system
+    
+    # Setup mock AWS CLI that simulates slow downloads
+    setup_mock_aws_cli_slow
+    
+    # Add multiple downloads to queue
+    for i in {1..5}; do
+        add_to_download_queue "checkpoints" "model_${i}.safetensors" "/models/checkpoints/model_${i}.safetensors" "/tmp/model_${i}.safetensors" "1000000"
+    done
+    
+    # Start worker
+    start_download_worker
+    
+    # Give worker time to start downloads
+    sleep 2
+    
+    # Check that worker respects MAX_CONCURRENT_DOWNLOADS
+    local active_count
+    active_count=$(count_active_downloads)
+    assert_command_success "[ '$active_count' -le '$MAX_CONCURRENT_DOWNLOADS' ]" "Should not exceed max concurrent downloads"
+    assert_command_success "[ '$active_count' -gt 0 ]" "Should have active downloads"
+    
+    # Clean up
+    stop_download_worker true
+    cleanup_mock_aws_cli
+}
+
+# Test worker stops when queue becomes empty
+test_worker_stops_when_queue_empty() {
+    source_model_download_integration
+    
+    # Clean and reinitialize
+    cleanup_download_system
+    initialize_download_system
+    
+    # Setup fast mock AWS CLI
+    setup_mock_aws_cli_fast
+    
+    # Add a single quick download
+    add_to_download_queue "checkpoints" "quick_model.safetensors" "/models/checkpoints/quick_model.safetensors" "/tmp/quick_model.safetensors" "100"
+    
+    # Start worker
+    start_download_worker
+    local worker_pid
+    worker_pid=$(cat "$DOWNLOAD_PID_FILE" 2>/dev/null || echo "")
+    
+    # Wait for download to complete and worker to exit
+    local wait_count=0
+    while [ $wait_count -lt 10 ] && [ -n "$worker_pid" ] && kill -0 "$worker_pid" 2>/dev/null; do
+        sleep 1
+        wait_count=$((wait_count + 1))
+        # Check if worker PID file still exists (worker removes it on exit)
+        if [ ! -f "$DOWNLOAD_PID_FILE" ]; then
+            break
+        fi
+    done
+    
+    # Worker should have exited
+    if [ -n "$worker_pid" ]; then
+        assert_command_failure "kill -0 '$worker_pid' 2>/dev/null" "Worker should exit when queue is empty and no active downloads"
+    fi
+    
+    # PID file should be cleaned up
+    assert_file_not_exists "$DOWNLOAD_PID_FILE" "Worker PID file should be cleaned up on exit"
+    
+    cleanup_mock_aws_cli
+}
+
+# Test AWS CLI mocking system
+test_aws_cli_mocking() {
+    # Setup mock AWS CLI
+    setup_mock_aws_cli
+    
+    # Test that mock AWS CLI is being used
+    local aws_cmd="aws"
+    if [ -n "${AWS_CLI_OVERRIDE:-}" ] && [ -x "$AWS_CLI_OVERRIDE" ]; then
+        aws_cmd="$AWS_CLI_OVERRIDE"
+    fi
+    
+    # Test mock AWS CLI responds correctly
+    local test_output
+    test_output=$("$aws_cmd" s3 cp "s3://test-bucket/test-file" "/tmp/test-output" 2>&1)
+    local aws_result=$?
+    
+    assert_equals "0" "$aws_result" "Mock AWS CLI should succeed"
+    
+    # Verify mock file was created
+    assert_file_exists "/tmp/test-output" "Mock download should create file"
+    
+    # Verify file content
+    local file_content
+    file_content=$(cat "/tmp/test-output")
+    assert_command_success "echo '$file_content' | grep -q 'mock.*test-file'" "Mock file should contain expected content"
+    
+    # Clean up
+    rm -f "/tmp/test-output"
+    cleanup_mock_aws_cli
+}
+
+# Helper function to setup mock AWS CLI
+setup_mock_aws_cli() {
+    local mock_aws_dir="$NETWORK_VOLUME/mock_aws"
+    mkdir -p "$mock_aws_dir"
+    
+    # Create mock AWS CLI script
+    cat > "$mock_aws_dir/aws" << 'EOF'
+#!/bin/bash
+# Mock AWS CLI for testing
+
+if [ "$1" = "s3" ] && [ "$2" = "cp" ]; then
+    local s3_source="$3"
+    local local_dest="$4"
+    
+    # Extract filename from S3 path
+    local filename
+    filename=$(basename "$s3_source")
+    
+    # Create mock file content
+    local file_size=1000
+    if [[ "$filename" == *"large"* ]]; then
+        file_size=10000000
+    elif [[ "$filename" == *"small"* ]]; then
+        file_size=100
+    fi
+    
+    # Create directory if needed
+    mkdir -p "$(dirname "$local_dest")"
+    
+    # Create mock file with some content
+    echo "Mock download content for $filename" > "$local_dest"
+    
+    # Simulate some download time
+    sleep 0.1
+    
+    echo "Downloaded: $s3_source -> $local_dest" >&2
+    exit 0
+else
+    echo "Mock AWS CLI: $*" >&2
+    exit 0
+fi
+EOF
+    
+    chmod +x "$mock_aws_dir/aws"
+    export AWS_CLI_OVERRIDE="$mock_aws_dir/aws"
+    export PATH="$mock_aws_dir:$PATH"
+}
+
+# Helper function to setup slow mock AWS CLI (for testing concurrency)
+setup_mock_aws_cli_slow() {
+    setup_mock_aws_cli
+    
+    # Modify the mock to be slower
+    sed -i.bak 's/sleep 0.1/sleep 3/' "$AWS_CLI_OVERRIDE"
+}
+
+# Helper function to setup fast mock AWS CLI
+setup_mock_aws_cli_fast() {
+    setup_mock_aws_cli
+    
+    # Modify the mock to be very fast
+    sed -i.bak 's/sleep 0.1/sleep 0.01/' "$AWS_CLI_OVERRIDE"
+}
+
+# Helper function to cleanup mock AWS CLI
+cleanup_mock_aws_cli() {
+    if [ -n "${AWS_CLI_OVERRIDE:-}" ]; then
+        rm -rf "$(dirname "$AWS_CLI_OVERRIDE")"
+        unset AWS_CLI_OVERRIDE
+    fi
+    
+    # Restore PATH (remove mock directory)
+    if [[ "$PATH" == *"/mock_aws:"* ]]; then
+        export PATH="${PATH//*\/mock_aws:/}"
+    fi
+}
+
+# Helper function to cleanup download system
+cleanup_download_system() {
+    # Stop any running workers
+    stop_download_worker true 2>/dev/null || true
+    
+    # Clean up files
+    rm -f "$DOWNLOAD_QUEUE_FILE" "$DOWNLOAD_PROGRESS_FILE" "$DOWNLOAD_PID_FILE" 2>/dev/null || true
+    rm -rf "$DOWNLOAD_LOCK_DIR" 2>/dev/null || true
+    rm -f "$MODEL_DOWNLOAD_DIR"/.stop_all_downloads 2>/dev/null || true
+    rm -f "$MODEL_DOWNLOAD_DIR"/.cancel_* 2>/dev/null || true
+    
+    # Clean up any test files
+    rm -f /tmp/test_model*.safetensors /tmp/model_*.safetensors /tmp/quick_model.safetensors 2>/dev/null || true
+}
+
+# Test that worker can be skipped in test mode
+test_skip_background_worker() {
+    source_model_download_integration
+    
+    # Clean and reinitialize
+    cleanup_download_system
+    initialize_download_system
+    
+    # Enable test mode
+    export SKIP_BACKGROUND_WORKER="true"
+    
+    # Test that worker start is skipped
+    local start_time=$(date +%s)
+    
+    start_download_worker
+    local worker_result=$?
+    
+    local end_time=$(date +%s)
+    local duration=$((end_time - start_time))
+    
+    assert_equals "0" "$worker_result" "Worker start should succeed (but be skipped)"
+    assert_command_success "[ '$duration' -lt 1 ]" "Worker start should return immediately in test mode"
+    
+    # Verify no worker PID file is created
+    assert_file_not_exists "$DOWNLOAD_PID_FILE" "No worker PID file should be created in test mode"
+    
+    # Verify download_models still works but doesn't start worker
+    local test_model='{
+        "directoryGroup": "checkpoints",
+        "modelName": "test_model.safetensors",
+        "originalS3Path": "/models/checkpoints/test_model.safetensors",
+        "localPath": "/tmp/test_model.safetensors",
+        "modelSize": 1000000
+    }'
+    
+    local result_file
+    result_file=$(download_models "single" "$test_model")
+    local download_result=$?
+    
+    assert_equals "0" "$download_result" "download_models should succeed in test mode"
+    assert_file_exists "$result_file" "Result file should be returned"
+    
+    # Verify download was queued
+    local queue_length
+    queue_length=$(jq 'length' "$DOWNLOAD_QUEUE_FILE" 2>/dev/null || echo "0")
+    assert_equals "1" "$queue_length" "Download should be queued even in test mode"
+    
+    # Verify no worker was started
+    assert_file_not_exists "$DOWNLOAD_PID_FILE" "No worker should be started in test mode"
+    
+    # Clean up
+    unset SKIP_BACKGROUND_WORKER
+    rm -f "$result_file"
+}
+
+# Test worker locking to prevent multiple instances
+test_worker_locking() {
+    source_model_download_integration
+    
+    # Clean and reinitialize
+    rm -f "$DOWNLOAD_QUEUE_FILE" "$DOWNLOAD_PROGRESS_FILE" "$DOWNLOAD_PID_FILE" 2>/dev/null || true
+    rm -f "${DOWNLOAD_PID_FILE}.lock" "${DOWNLOAD_PID_FILE}.start.lock" 2>/dev/null || true
+    initialize_download_system
+    
+    # Temporarily disable SKIP_BACKGROUND_WORKER
+    local original_skip="${SKIP_BACKGROUND_WORKER:-false}"
+    export SKIP_BACKGROUND_WORKER=false
+    
+    # Stop any existing workers
+    stop_download_worker true >/dev/null 2>&1 || true
+    sleep 1
+    
+    # Test 1: Start first worker
+    start_download_worker >/dev/null 2>&1 &
+    local start_pid1=$!
+    sleep 2  # Give worker time to start
+    
+    # Check worker is running
+    local status_file
+    status_file=$(get_worker_status)
+    local status1
+    status1=$(jq -r '.status' "$status_file" 2>/dev/null || echo "unknown")
+    local worker_pid1
+    worker_pid1=$(jq -r '.pid' "$status_file" 2>/dev/null || echo "")
+    rm -f "$status_file"
+    
+    assert_equals "running" "$status1" "First worker should be running"
+    assert_not_empty "$worker_pid1" "First worker should have a PID"
+    
+    # Test 2: Try to start second worker (should be blocked by lock)
+    start_download_worker >/dev/null 2>&1 &
+    local start_pid2=$!
+    sleep 2
+    
+    # Check that the same worker is still running
+    status_file=$(get_worker_status)
+    local status2
+    status2=$(jq -r '.status' "$status_file" 2>/dev/null || echo "unknown")
+    local worker_pid2
+    worker_pid2=$(jq -r '.pid' "$status_file" 2>/dev/null || echo "")
+    rm -f "$status_file"
+    
+    assert_equals "running" "$status2" "Worker should still be running"
+    assert_equals "$worker_pid1" "$worker_pid2" "Worker PID should not change (locking should prevent new worker)"
+    
+    # Test 3: Stop worker and verify cleanup
+    stop_download_worker true >/dev/null 2>&1
+    sleep 2
+    
+    # Verify worker is stopped and locks are cleaned up
+    status_file=$(get_worker_status)
+    local final_status
+    final_status=$(jq -r '.status' "$status_file" 2>/dev/null || echo "unknown")
+    rm -f "$status_file"
+    
+    assert_not_equals "running" "$final_status" "Worker should be stopped"
+    
+    # Check that lock files are cleaned up
+    local lock_file="${DOWNLOAD_PID_FILE}.lock"
+    local start_lock_file="${DOWNLOAD_PID_FILE}.start.lock"
+    
+    assert_false "[ -f '$lock_file' ]" "Worker lock file should be cleaned up"
+    assert_false "[ -f '$start_lock_file' ]" "Start lock file should be cleaned up"
+    
+    # Wait for background processes to finish
+    wait "$start_pid1" 2>/dev/null || true
+    wait "$start_pid2" 2>/dev/null || true
+    
+    # Restore original setting
+    export SKIP_BACKGROUND_WORKER="$original_skip"
+}
+
+
 # Run all tests
 main() {
     print_color "$BLUE" "Running Model Download Integration Tests..."
@@ -637,9 +1200,19 @@ main() {
     run_test "test_original_s3_path_formats" "Original S3 Path Formats"
     run_test "test_cancel_download" "Cancel Download"
     run_test "test_download_locks" "Download Locks"
-    # Skip complex tests that require AWS mocking
-    echo "⏭️  Skipping S3 Path Construction test (requires complex AWS mocking)"
-    echo "⏭️  Skipping S3 Error Handling test (requires complex AWS mocking)"
+    run_test "test_get_downloadable_models" "Get Downloadable Models"
+    run_test "test_get_downloadable_models_empty" "Get Downloadable Models Empty"
+    run_test "test_get_downloadable_models_load_failure" "Get Downloadable Models Load Failure"
+    
+    # Background worker and AWS CLI mocking tests
+    run_test "test_skip_background_worker" "Skip Background Worker (Test Mode)"
+    run_test "test_background_worker_lifecycle" "Background Worker Lifecycle"
+    run_test "test_download_models_returns_immediately" "Download Models Returns Immediately"
+    run_test "test_worker_concurrent_downloads" "Worker Concurrent Downloads"
+    run_test "test_worker_stops_when_queue_empty" "Worker Stops When Queue Empty"
+    run_test "test_aws_cli_mocking" "AWS CLI Mocking"
+    run_test "test_skip_background_worker" "Skip Background Worker Test"
+    run_test "test_worker_locking" "Worker Locking Mechanism"
     
     cleanup_test_env
     print_test_summary

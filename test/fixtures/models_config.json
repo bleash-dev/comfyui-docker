@@ -1,0 +1,58 @@
+{
+  "checkpoints": {
+    "existing_checkpoint": {
+      "originalS3Path": "models/checkpoints/existing_checkpoint.safetensors",
+      "localPath": "{{NETWORK_VOLUME}}/ComfyUI/models/checkpoints/existing_checkpoint.safetensors",
+      "modelName": "existing_checkpoint",
+      "modelSize": 1024,
+      "downloadUrl": "https://example.com/existing_checkpoint.safetensors",
+      "uploadedAt": "2023-07-10T12:00:00.000Z",
+      "lastUpdated": "2023-07-10T12:00:00.000Z",
+      "directoryGroup": "checkpoints"
+    },
+    "missing_checkpoint": {
+      "originalS3Path": "models/checkpoints/missing_checkpoint.safetensors",
+      "localPath": "{{NETWORK_VOLUME}}/ComfyUI/models/checkpoints/missing_checkpoint.safetensors",
+      "modelName": "missing_checkpoint",
+      "modelSize": 2048,
+      "downloadUrl": "https://example.com/missing_checkpoint.safetensors",
+      "uploadedAt": "2023-07-10T13:00:00.000Z",
+      "lastUpdated": "2023-07-10T13:00:00.000Z",
+      "directoryGroup": "checkpoints"
+    }
+  },
+  "loras": {
+    "existing_lora": {
+      "originalS3Path": "models/loras/existing_lora.safetensors",
+      "localPath": "{{NETWORK_VOLUME}}/ComfyUI/models/loras/existing_lora.safetensors",
+      "modelName": "existing_lora",
+      "modelSize": 512,
+      "downloadUrl": "https://example.com/existing_lora.safetensors",
+      "uploadedAt": "2023-07-10T14:00:00.000Z",
+      "lastUpdated": "2023-07-10T14:00:00.000Z",
+      "directoryGroup": "loras"
+    },
+    "missing_lora": {
+      "originalS3Path": "models/loras/missing_lora.safetensors",
+      "localPath": "{{NETWORK_VOLUME}}/ComfyUI/models/loras/missing_lora.safetensors",
+      "modelName": "missing_lora",
+      "modelSize": 768,
+      "downloadUrl": "https://example.com/missing_lora.safetensors",
+      "uploadedAt": "2023-07-10T15:00:00.000Z",
+      "lastUpdated": "2023-07-10T15:00:00.000Z",
+      "directoryGroup": "loras"
+    }
+  },
+  "vae": {
+    "missing_vae": {
+      "originalS3Path": "models/vae/missing_vae.safetensors",
+      "localPath": "{{NETWORK_VOLUME}}/ComfyUI/models/vae/missing_vae.safetensors",
+      "modelName": "missing_vae",
+      "modelSize": 1536,
+      "downloadUrl": "https://example.com/missing_vae.safetensors",
+      "uploadedAt": "2023-07-10T16:00:00.000Z",
+      "lastUpdated": "2023-07-10T16:00:00.000Z",
+      "directoryGroup": "vae"
+    }
+  }
+}
