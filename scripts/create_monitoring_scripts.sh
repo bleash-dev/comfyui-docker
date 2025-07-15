@@ -51,6 +51,8 @@ fi
 [ -f "$NETWORK_VOLUME/.api_client.log" ] && cp "$NETWORK_VOLUME/.api_client.log" "$LOCAL_LOG_DIR/"
 [ -f "$NETWORK_VOLUME/.model_config_manager.log" ] && cp "$NETWORK_VOLUME/.model_config_manager.log" "$LOCAL_LOG_DIR/"
 [ -f "$NETWORK_VOLUME/.model_sync_integration.log" ] && cp "$NETWORK_VOLUME/.model_sync_integration.log" "$LOCAL_LOG_DIR/"
+[ -f "$NETWORK_VOLUME/.download_progress_calls.log" ] && cp "$NETWORK_VOLUME/.download_progress_calls.log" "$LOCAL_LOG_DIR/"
+[ -f "$NETWORK_VOLUME/.model_download_integration.log" ] && cp "$NETWORK_VOLUME/.model_download_integration.log" "$LOCAL_LOG_DIR/"
 
 # Environment info
 cat > "$LOCAL_LOG_DIR/environment.log" << ENVEOF

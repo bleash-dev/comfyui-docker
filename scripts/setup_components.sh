@@ -163,19 +163,26 @@ for node_name in "${!CUSTOM_NODES[@]}"; do
         git clone "$node_url" "$node_name" || echo "⚠️ Git clone failed for $node_name"
     fi
     
-    # Add requirements to consolidated file if they exist
-    if [ -f "$node_dir/requirements.txt" ]; then
-        echo "📋 Adding requirements from $node_name to consolidated file"
-        echo "# $node_name requirements" >> "$CONSOLIDATED_REQUIREMENTS"
-        cat "$node_dir/requirements.txt" >> "$CONSOLIDATED_REQUIREMENTS"
-        echo "" >> "$CONSOLIDATED_REQUIREMENTS"
+done
+
+# Scan all custom node directories for requirements files
+echo "🔍 Scanning all custom node directories for requirements files..."
+for dir in "$custom_nodes_dir"/*; do
+    if [ -d "$dir" ]; then
+        dir_name=$(basename "$dir")
+        requirements_file="$dir/requirements.txt"
+        
+        # Check if requirements.txt exists
+        if [ -f "$requirements_file" ]; then
+            echo "📋 Found requirements in $dir_name"
+            echo "# $dir_name requirements" >> "$CONSOLIDATED_REQUIREMENTS"
+            cat "$requirements_file" >> "$CONSOLIDATED_REQUIREMENTS"
+            echo "" >> "$CONSOLIDATED_REQUIREMENTS"
+        fi
     fi
 done
 
 echo "✅ Additional custom nodes setup complete"
-
-# Install custom nodes if nodes.txt exists
-[ -f "$NETWORK_VOLUME/ComfyUI/nodes.txt" ] && bash "$SCRIPT_DIR/install_nodes.sh" "$CONSOLIDATED_REQUIREMENTS"
 
 # Consolidated pip install - Install all requirements in one go
 if [ -s "$CONSOLIDATED_REQUIREMENTS" ]; then
