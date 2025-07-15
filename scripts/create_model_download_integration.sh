@@ -41,6 +41,64 @@ log_download() {
     echo "[$timestamp] [$level] Download: $message" | tee -a "$MODEL_DOWNLOAD_LOG" >&2
 }
 
+# Function to send download progress notification over API
+notify_download_progress() {
+    local download_type="$1"   # Type of download (e.g., "model_download", "batch_download")
+    local status="$2"          # PROGRESS | DONE | FAILED
+    local percentage="$3"      # 0-100
+    local model_name="$4"      # Optional: specific model name
+    local details="$5"         # Optional: additional details
+    
+    if [ -z "$POD_ID" ] || [ -z "$POD_USER_NAME" ]; then
+        log_download "DEBUG" "POD_ID or POD_USER_NAME not set for download progress notification"
+        return 1
+    fi
+    
+    # Skip API notifications if explicitly disabled
+    if [ "${SKIP_API_NOTIFICATIONS:-false}" = "true" ]; then
+        log_download "DEBUG" "API notifications disabled, skipping download progress notification"
+        return 0
+    fi
+    
+    local payload
+    payload=$(jq -n \
+        --arg userId "$POD_USER_NAME" \
+        --arg download_type "$download_type" \
+        --arg status "$status" \
+        --argjson percentage "${percentage:-0}" \
+        --arg modelName "${model_name:-}" \
+        --arg details "${details:-}" \
+        '{
+            userId: $userId,
+            download_type: $download_type,
+            status: $status,
+            percentage: $percentage
+        } + (if $modelName != "" then {modelName: $modelName} else {} end)
+          + (if $details != "" then {details: $details} else {} end)')
+    
+    # Use the API client function if available
+    if command -v make_api_request >/dev/null 2>&1; then
+        local response_file
+        response_file=$(mktemp)
+        
+        local http_code
+        http_code=$(make_api_request "POST" "/pods/$POD_ID/download-progress" "$payload" "$response_file" 2>/dev/null || echo "000")
+        
+        if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+            log_download "DEBUG" "Download progress notification sent successfully: $download_type $status $percentage%"
+            rm -f "$response_file"
+            return 0
+        else
+            log_download "WARN" "Failed to send download progress notification (HTTP $http_code)"
+            rm -f "$response_file"
+            return 1
+        fi
+    else
+        log_download "WARN" "make_api_request function not available for download progress notification"
+        return 1
+    fi
+}
+
 # =============================================================================
 # MODEL DOWNLOAD SYSTEM
 # =============================================================================
@@ -362,6 +420,88 @@ update_download_progress() {
     
     if [ $? -eq 0 ] && jq empty "$temp_file" 2>/dev/null; then
         mv "$temp_file" "$DOWNLOAD_PROGRESS_FILE"
+        
+        # Calculate overall download progress across all models and send notification
+        # Debug: Log the current download progress file content
+        log_download "DEBUG" "Current download progress file content: $(cat "$DOWNLOAD_PROGRESS_FILE" 2>/dev/null || echo 'FILE_NOT_READABLE')"
+        
+        local overall_progress_data
+        overall_progress_data=$(jq -r '
+            # Flatten the nested structure: group -> model -> progress_data
+            [
+                to_entries[]
+                | .value as $group_data
+                | $group_data
+                | to_entries[]
+                | .value
+                | select(.totalSize != null and .downloaded != null and .totalSize > 0)
+            ] as $all_models |
+            if ($all_models | length) == 0 then
+                { totalBytes: 0, downloadedBytes: 0, percentage: 0, activeDownloads: 0 }
+            else
+                {
+                    totalBytes: ($all_models | map(.totalSize) | add),
+                    downloadedBytes: ($all_models | map(.downloaded) | add),
+                    activeDownloads: ($all_models | map(select(.status == "progress" or .status == "queued")) | length)
+                } |
+                .percentage = (if .totalBytes > 0 then ((.downloadedBytes * 100) / .totalBytes) else 0 end)
+            end
+        ' "$DOWNLOAD_PROGRESS_FILE" 2>/dev/null)
+        
+        # Debug: Log overall progress data calculation
+        log_download "DEBUG" "Overall progress data calculation result: '$overall_progress_data'"
+        
+        if [ -n "$overall_progress_data" ]; then
+            log_download "DEBUG" "Processing overall progress data for notifications"
+            local overall_percentage active_downloads total_bytes downloaded_bytes
+            overall_percentage=$(echo "$overall_progress_data" | jq -r '.percentage // 0')
+            active_downloads=$(echo "$overall_progress_data" | jq -r '.activeDownloads // 0')
+            total_bytes=$(echo "$overall_progress_data" | jq -r '.totalBytes // 0')
+            downloaded_bytes=$(echo "$overall_progress_data" | jq -r '.downloadedBytes // 0')
+            
+            # Round percentage to nearest integer
+            overall_percentage=$(printf "%.0f" "$overall_percentage")
+            
+            # Determine notification status based on progress status and active downloads
+            local notification_status="PROGRESS"
+            if [ "$active_downloads" -eq 0 ]; then
+                if [ "$overall_percentage" -eq 100 ]; then
+                    notification_status="DONE"
+                elif [ "$progress_status" = "failed" ] || [ "$progress_status" = "cancelled" ]; then
+                    notification_status="FAILED"
+                fi
+            fi
+            
+            # Create details object with current model info and overall progress data
+            local details
+            details=$(jq -n \
+                --arg currentGroup "$group" \
+                --arg currentModel "$model_name" \
+                --arg currentStatus "$progress_status" \
+                --argjson currentTotalSize "${total_size:-0}" \
+                --argjson currentDownloaded "${downloaded:-0}" \
+                --argjson overallData "$overall_progress_data" \
+                '{
+                    currentModel: {
+                        group: $currentGroup,
+                        modelName: $currentModel,
+                        status: $currentStatus,
+                        totalSize: $currentTotalSize,
+                        downloaded: $currentDownloaded
+                    },
+                    overallProgress: $overallData
+                }')
+            
+            # Send download progress notification with actual progress data as details
+            # Note: Notification failure should not break the download progress update system
+            if ! notify_download_progress "model_download" "$notification_status" "$overall_percentage" "$model_name" "$details"; then
+                log_download "WARN" "Failed to send download progress notification for $group/$model_name (status: $notification_status, percentage: $overall_percentage%). Download progress update continues normally."
+            else
+                log_download "DEBUG" "Successfully sent download progress notification for $group/$model_name (status: $notification_status, percentage: $overall_percentage%)"
+            fi
+        else
+            log_download "DEBUG" "Skipping notification: overall_progress_data is empty or null"
+        fi
         
         release_download_lock "progress"
         trap - EXIT INT TERM QUIT
