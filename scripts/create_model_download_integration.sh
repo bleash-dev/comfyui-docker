@@ -1872,7 +1872,7 @@ cancel_all_downloads() {
         echo '[]' > "$DOWNLOAD_QUEUE_FILE"
     fi
     
-    # Update all in-progress downloads to cancelled
+    # Update all in-progress and queued downloads to cancelled
     if [ -f "$DOWNLOAD_PROGRESS_FILE" ]; then
         local temp_file
         temp_file=$(mktemp)
@@ -1881,7 +1881,7 @@ cancel_all_downloads() {
             to_entries | map(
                 .value = (
                     .value | to_entries | map(
-                        if .value.status == "progress" then
+                        if (.value.status == "progress" or .value.status == "queued") then
                             .value.status = "cancelled"
                         else
                             .
@@ -1890,6 +1890,24 @@ cancel_all_downloads() {
                 )
             ) | from_entries
         ' "$DOWNLOAD_PROGRESS_FILE" > "$temp_file" && mv "$temp_file" "$DOWNLOAD_PROGRESS_FILE"
+    fi
+    
+    # Send cancellation notification via API
+    local details
+    details=$(jq -n \
+        --arg reason "user_cancelled_all" \
+        --arg timestamp "$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")" \
+        '{
+            reason: $reason,
+            timestamp: $timestamp,
+            message: "All downloads cancelled by user request"
+        }')
+    
+    # Note: Notification failure should not break the cancellation process
+    if ! notify_download_progress "model_download" "FAILED" 0 "all_downloads" "$details"; then
+        log_download "WARN" "Failed to send cancellation notification. Downloads were cancelled successfully."
+    else
+        log_download "DEBUG" "Successfully sent cancellation notification"
     fi
     
     log_download "INFO" "All downloads cancelled"

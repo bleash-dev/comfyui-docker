@@ -386,10 +386,13 @@ delete_model() {
 }
 
 # Function to find model by local path
+# Supports both exact matching and substring matching
+# If exact match is found, returns that; otherwise returns all models containing the path
 find_model_by_path() {
     local group="$1"
     local local_path="$2"
     local output_file="${3:-}"
+    local match_type="${4:-auto}"  # "exact", "contains", or "auto" (try exact first, then contains)
     
     # Support both old and new calling conventions
     if [ -z "$output_file" ] && [ -z "$local_path" ]; then
@@ -397,9 +400,11 @@ find_model_by_path() {
         local_path="$group"
         output_file="$2"
         group=""
+        match_type="${3:-auto}"
     elif [ -z "$output_file" ] && [ -n "$local_path" ]; then
-        # New convention: find_model_by_path <group> <local_path> [output_file]
+        # New convention: find_model_by_path <group> <local_path> [output_file] [match_type]
         output_file=""
+        match_type="${4:-auto}"
     fi
     
     if [ -z "$local_path" ]; then
@@ -415,9 +420,13 @@ find_model_by_path() {
     # Initialize config if needed
     initialize_model_config
     
-    # Search for the model across all groups or in specific group
+    local exact_output contains_output
+    exact_output=$(mktemp)
+    contains_output=$(mktemp)
+    
+    # First try exact match
     if [ -n "$group" ]; then
-        # Search in specific group
+        # Search in specific group - exact match
         jq --arg group "$group" \
            --arg localPath "$local_path" \
            '
@@ -425,9 +434,19 @@ find_model_by_path() {
            to_entries[] |
            select(.value.localPath == $localPath) |
            .value + {"directoryGroup": $group}
-           ' "$MODEL_CONFIG_FILE" > "$output_file" 2>/dev/null
+           ' "$MODEL_CONFIG_FILE" > "$exact_output" 2>/dev/null
+        
+        # Search in specific group - contains match
+        jq --arg group "$group" \
+           --arg localPath "$local_path" \
+           '
+           [.[$group] // {} |
+           to_entries[] |
+           select(.value.localPath and (.value.localPath | contains($localPath))) |
+           .value + {"directoryGroup": $group}]
+           ' "$MODEL_CONFIG_FILE" > "$contains_output" 2>/dev/null
     else
-        # Search across all groups
+        # Search across all groups - exact match
         jq --arg localPath "$local_path" \
            '
            [to_entries[] | 
@@ -436,18 +455,72 @@ find_model_by_path() {
            .models | to_entries[] |
            select(.value.localPath == $localPath) |
            .value + {"directoryGroup": .key}][0] // empty
-           ' "$MODEL_CONFIG_FILE" > "$output_file" 2>/dev/null
+           ' "$MODEL_CONFIG_FILE" > "$exact_output" 2>/dev/null
+        
+        # Search across all groups - contains match
+        jq --arg localPath "$local_path" \
+           '
+           [to_entries[] | 
+           select(.value | type == "object") |
+           {key: .key, models: .value} |
+           .models | to_entries[] |
+           select(.value.localPath and (.value.localPath | contains($localPath))) |
+           .value + {"directoryGroup": .key}]
+           ' "$MODEL_CONFIG_FILE" > "$contains_output" 2>/dev/null
     fi
     
-    if [ -s "$output_file" ]; then
-        log_model_config "DEBUG" "Found model with local path: $local_path"
-        echo "$output_file"
-        return 0
-    else
-        log_model_config "DEBUG" "No model found with local path: $local_path"
-        rm -f "$output_file"
-        return 1
+    # Determine which results to return based on match_type and what was found
+    local use_exact=false
+    local use_contains=false
+    
+    case "$match_type" in
+        "exact")
+            use_exact=true
+            ;;
+        "contains")
+            use_contains=true
+            ;;
+        "auto")
+            # If exact match found, use it; otherwise use contains results
+            if [ -s "$exact_output" ] && [ "$(jq -r '. | length' "$exact_output" 2>/dev/null)" != "0" ]; then
+                use_exact=true
+            else
+                use_contains=true
+            fi
+            ;;
+    esac
+    
+    if [ "$use_exact" = true ] && [ -s "$exact_output" ]; then
+        # Check if exact output contains actual results (not just empty object/array)
+        local exact_content
+        exact_content=$(jq -r '. | if type == "array" then length else if . == {} then 0 else 1 end end' "$exact_output" 2>/dev/null)
+        if [ "$exact_content" != "0" ]; then
+            cp "$exact_output" "$output_file"
+            rm -f "$exact_output" "$contains_output"
+            log_model_config "DEBUG" "Found model with exact local path match: $local_path"
+            echo "$output_file"
+            return 0
+        fi
     fi
+    
+    if [ "$use_contains" = true ] && [ -s "$contains_output" ]; then
+        # Check if contains output has actual results
+        local contains_count
+        contains_count=$(jq 'length' "$contains_output" 2>/dev/null || echo "0")
+        if [ "$contains_count" -gt 0 ]; then
+            cp "$contains_output" "$output_file"
+            rm -f "$exact_output" "$contains_output"
+            log_model_config "DEBUG" "Found $contains_count model(s) with local path containing: $local_path"
+            echo "$output_file"
+            return 0
+        fi
+    fi
+    
+    # No matches found
+    rm -f "$exact_output" "$contains_output"
+    log_model_config "DEBUG" "No model found with local path matching: $local_path"
+    rm -f "$output_file"
+    return 1
 }
 
 # Function to list all models in a group
@@ -571,15 +644,18 @@ convert_to_symlink() {
 }
 
 # Function to remove model by local path
+# Supports both exact matching and substring matching like find_model_by_path
+# Can remove multiple models if using substring matching
 remove_model_by_path() {
     local local_path="$1"
+    local match_type="${2:-auto}"  # "exact", "contains", or "auto" (try exact first, then contains)
     
     if [ -z "$local_path" ]; then
         log_model_config "ERROR" "Local path is required for remove operation"
         return 1
     fi
     
-    log_model_config "INFO" "Removing model by local path: $local_path"
+    log_model_config "INFO" "Removing model(s) and any symlinks pointing to them with path matching '$local_path' (match_type: $match_type)"
     
     # Acquire lock
     if ! acquire_model_config_lock "remove"; then
@@ -593,20 +669,109 @@ remove_model_by_path() {
     # Initialize config if needed
     initialize_model_config
     
-    # Find the model first to get group and name
+    # Find models to remove using the same logic as find_model_by_path
+    local models_to_remove
+    models_to_remove=$(mktemp)
+    
+    # Get all models that match the criteria
+    if [ "$match_type" = "exact" ]; then
+        # Exact match only
+        jq --arg localPath "$local_path" '
+        [to_entries[] | 
+        select(.value | type == "object") |
+        {key: .key, models: .value} |
+        .models | to_entries[] |
+        select(.value.localPath == $localPath) |
+        {group: .key, model: .key, localPath: .value.localPath}]
+        ' "$MODEL_CONFIG_FILE" > "$models_to_remove" 2>/dev/null
+    elif [ "$match_type" = "contains" ]; then
+        # Contains match only
+        jq --arg localPath "$local_path" '
+        [to_entries[] | 
+        select(.value | type == "object") |
+        {key: .key, models: .value} |
+        .models | to_entries[] |
+        select(.value.localPath and (.value.localPath | contains($localPath))) |
+        {group: .key, model: .key, localPath: .value.localPath}]
+        ' "$MODEL_CONFIG_FILE" > "$models_to_remove" 2>/dev/null
+    else
+        # Auto mode: try exact first, then contains if no exact match
+        local exact_matches contains_matches
+        exact_matches=$(mktemp)
+        contains_matches=$(mktemp)
+        
+        # Get exact matches
+        jq --arg localPath "$local_path" '
+        [to_entries[] | 
+        select(.value | type == "object") |
+        {key: .key, models: .value} |
+        .models | to_entries[] |
+        select(.value.localPath == $localPath) |
+        {group: .key, model: .key, localPath: .value.localPath}]
+        ' "$MODEL_CONFIG_FILE" > "$exact_matches" 2>/dev/null
+        
+        # Get contains matches
+        jq --arg localPath "$local_path" '
+        [to_entries[] | 
+        select(.value | type == "object") |
+        {key: .key, models: .value} |
+        .models | to_entries[] |
+        select(.value.localPath and (.value.localPath | contains($localPath))) |
+        {group: .key, model: .key, localPath: .value.localPath}]
+        ' "$MODEL_CONFIG_FILE" > "$contains_matches" 2>/dev/null
+        
+        # Use exact if available, otherwise contains
+        local exact_count
+        exact_count=$(jq 'length' "$exact_matches" 2>/dev/null || echo "0")
+        
+        if [ "$exact_count" -gt 0 ]; then
+            cp "$exact_matches" "$models_to_remove"
+            log_model_config "DEBUG" "Using exact matches for removal: $exact_count model(s)"
+        else
+            cp "$contains_matches" "$models_to_remove"
+            local contains_count
+            contains_count=$(jq 'length' "$contains_matches" 2>/dev/null || echo "0")
+            log_model_config "DEBUG" "Using contains matches for removal: $contains_count model(s)"
+        fi
+        
+        rm -f "$exact_matches" "$contains_matches"
+    fi
+    
+    # Check if we found any models to remove
+    local remove_count
+    remove_count=$(jq 'length' "$models_to_remove" 2>/dev/null || echo "0")
+    
+    if [ "$remove_count" -eq 0 ]; then
+        log_model_config "INFO" "No models found matching path: $local_path"
+        rm -f "$models_to_remove"
+        release_model_config_lock "remove"
+        trap - EXIT INT TERM QUIT
+        return 1
+    fi
+    
+    log_model_config "INFO" "Found $remove_count model(s) to remove"
+    
+    # Create a list of all local paths that will be removed (for symlink cleanup)
+    local paths_to_remove
+    paths_to_remove=$(jq -r '.[].localPath' "$models_to_remove" 2>/dev/null)
+    
     local model_found=false
     local temp_file
     temp_file=$(mktemp)
     
-    # Search for model and remove it
-    jq --arg localPath "$local_path" '
+    # Remove all matching models and any symlinks pointing to them
+    jq --argjson modelsToRemove "$(cat "$models_to_remove")" '
     . as $root |
+    ($modelsToRemove | map(.localPath)) as $pathsToRemove |
     reduce to_entries[] as $group ({}; 
         if ($group.value | type == "object") then
             .[$group.key] = (
                 $group.value | 
                 to_entries |
-                map(select(.value.localPath != $localPath)) |
+                map(select(
+                    (.value.localPath | IN($pathsToRemove[]) | not) and
+                    (.value.symLinkedFrom | IN($pathsToRemove[]) | not)
+                )) |
                 from_entries
             )
         else
@@ -623,16 +788,32 @@ remove_model_by_path() {
         
         if [ "$new_count" -lt "$original_count" ]; then
             mv "$temp_file" "$MODEL_CONFIG_FILE"
-            log_model_config "INFO" "Successfully removed model from config: $local_path"
+            local removed_count=$((original_count - new_count))
+            log_model_config "INFO" "Successfully removed $removed_count model(s) and symlinks from config matching: $local_path"
+            
+            # Log details of what was removed
+            while IFS= read -r model_info; do
+                if [ -n "$model_info" ]; then
+                    local group model_name model_path
+                    group=$(echo "$model_info" | jq -r '.group')
+                    model_name=$(echo "$model_info" | jq -r '.model')
+                    model_path=$(echo "$model_info" | jq -r '.localPath')
+                    log_model_config "INFO" "Removed: $group/$model_name (path: $model_path)"
+                fi
+            done < <(jq -c '.[]' "$models_to_remove" 2>/dev/null)
+            
             model_found=true
         else
-            log_model_config "INFO" "Model not found in config: $local_path"
+            log_model_config "INFO" "No models were actually removed from config"
             rm -f "$temp_file"
         fi
     else
         log_model_config "ERROR" "Failed to update model config file during removal"
         rm -f "$temp_file"
     fi
+    
+    # Clean up
+    rm -f "$models_to_remove"
     
     # Release lock
     release_model_config_lock "remove"

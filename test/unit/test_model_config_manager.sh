@@ -260,6 +260,165 @@ test_invalid_json_handling() {
     assert_equals "{}" "$content" "Invalid JSON should be reset to empty object"
 }
 
+# Test flexible path matching for find and remove operations
+test_flexible_path_matching() {
+    source_model_config_manager
+    
+    local config_file="$NETWORK_VOLUME/ComfyUI/models_config.json"
+    
+    # Create test config with multiple models that have similar paths
+    cat > "$config_file" << EOF
+{
+  "checkpoints": {
+    "model_v1": {
+      "originalS3Path": "s3://bucket/models/base_model_v1.safetensors", 
+      "localPath": "$NETWORK_VOLUME/ComfyUI/models/checkpoints/base_model_v1.safetensors",
+      "modelName": "model_v1",
+      "modelSize": 1024
+    },
+    "model_v2": {
+      "originalS3Path": "s3://bucket/models/base_model_v2.safetensors",
+      "localPath": "$NETWORK_VOLUME/ComfyUI/models/checkpoints/base_model_v2.safetensors", 
+      "modelName": "model_v2",
+      "modelSize": 2048
+    },
+    "other_model": {
+      "originalS3Path": "s3://bucket/models/other_base.safetensors",
+      "localPath": "$NETWORK_VOLUME/ComfyUI/models/checkpoints/other_base.safetensors",
+      "modelName": "other_model", 
+      "modelSize": 512
+    }
+  },
+  "loras": {
+    "test_lora": {
+      "originalS3Path": "s3://bucket/loras/base_style.safetensors",
+      "localPath": "$NETWORK_VOLUME/ComfyUI/models/loras/base_style.safetensors",
+      "modelName": "test_lora",
+      "modelSize": 256
+    }
+  }
+}
+EOF
+
+    # Test 1: Exact match finding
+    echo "Testing exact match finding..."
+    local output_file temp_output
+    temp_output=$(mktemp)
+    output_file=$(find_model_by_path "" "$NETWORK_VOLUME/ComfyUI/models/checkpoints/base_model_v1.safetensors" "$temp_output" "exact")
+    local result=$?
+    
+    assert_equals "0" "$result" "Exact match should succeed"
+    
+    # Check if it's an object or array and get the correct count
+    local found_count found_model
+    if jq -e 'type == "array"' "$output_file" >/dev/null 2>&1; then
+        found_count=$(jq 'length' "$output_file" 2>/dev/null || echo "0")
+        found_model=$(jq -r '.[0].modelName // empty' "$output_file" 2>/dev/null)
+    else
+        # Single object
+        if jq -e 'type == "object" and . != {}' "$output_file" >/dev/null 2>&1; then
+            found_count="1"
+            found_model=$(jq -r '.modelName // empty' "$output_file" 2>/dev/null)
+        else
+            found_count="0"
+            found_model=""
+        fi
+    fi
+    
+    assert_equals "1" "$found_count" "Exact match should find exactly 1 model"
+    assert_equals "model_v1" "$found_model" "Should find the correct model"
+    
+    rm -f "$output_file" "$temp_output"
+    
+    # Test 2: Contains match finding  
+    echo "Testing contains match finding..."
+    temp_output=$(mktemp)
+    output_file=$(find_model_by_path "" "base_model" "$temp_output" "contains")
+    result=$?
+    
+    assert_equals "0" "$result" "Contains match should succeed"
+    
+    found_count=$(jq 'length' "$output_file" 2>/dev/null || echo "0")
+    assert_equals "2" "$found_count" "Contains match should find 2 models with 'base_model'"
+    
+    rm -f "$output_file" "$temp_output"
+    
+    # Test 3: Auto mode finding (should prefer exact)
+    echo "Testing auto mode finding..."
+    temp_output=$(mktemp)
+    output_file=$(find_model_by_path "" "$NETWORK_VOLUME/ComfyUI/models/checkpoints/base_model_v2.safetensors" "$temp_output" "auto")
+    result=$?
+    
+    assert_equals "0" "$result" "Auto mode should succeed"
+    
+    # Check if it's an object or array and get the correct count
+    if jq -e 'type == "array"' "$output_file" >/dev/null 2>&1; then
+        found_count=$(jq 'length' "$output_file" 2>/dev/null || echo "0")
+        found_model=$(jq -r '.[0].modelName // empty' "$output_file" 2>/dev/null)
+    else
+        # Single object
+        if jq -e 'type == "object" and . != {}' "$output_file" >/dev/null 2>&1; then
+            found_count="1"
+            found_model=$(jq -r '.modelName // empty' "$output_file" 2>/dev/null)
+        else
+            found_count="0"
+            found_model=""
+        fi
+    fi
+    
+    assert_equals "1" "$found_count" "Auto mode should find exact match first"
+    assert_equals "model_v2" "$found_model" "Should find the exact match"
+    
+    rm -f "$output_file" "$temp_output"
+    
+    # Test 4: Auto mode fallback to contains
+    echo "Testing auto mode fallback to contains..."
+    temp_output=$(mktemp)
+    output_file=$(find_model_by_path "" "base" "$temp_output" "auto")
+    result=$?
+    
+    assert_equals "0" "$result" "Auto mode fallback should succeed"
+    
+    found_count=$(jq 'length' "$output_file" 2>/dev/null || echo "0")
+    assert_equals "4" "$found_count" "Auto mode should fallback to contains and find 4 models"
+    
+    rm -f "$output_file" "$temp_output"
+    
+    # Test 5: Remove by exact match
+    echo "Testing remove by exact match..."
+    remove_model_by_path "$NETWORK_VOLUME/ComfyUI/models/checkpoints/base_model_v1.safetensors" "exact"
+    result=$?
+    
+    assert_equals "0" "$result" "Exact remove should succeed"
+    
+    local model_exists
+    model_exists=$(jq -r '.checkpoints.model_v1 // "missing"' "$config_file")
+    assert_equals "missing" "$model_exists" "Exact model should be removed"
+    
+    # Check other models still exist
+    model_exists=$(jq -r '.checkpoints.model_v2 // "missing"' "$config_file")
+    assert_not_equals "missing" "$model_exists" "Other model should still exist"
+    
+    # Test 6: Remove by contains match
+    echo "Testing remove by contains match..."
+    remove_model_by_path "base" "contains"
+    result=$?
+    
+    assert_equals "0" "$result" "Contains remove should succeed"
+    
+    # Check that models containing "base" were removed
+    model_exists=$(jq -r '.checkpoints.model_v2 // "missing"' "$config_file")
+    assert_equals "missing" "$model_exists" "Model with 'base' in path should be removed"
+    
+    model_exists=$(jq -r '.checkpoints.other_model // "missing"' "$config_file")
+    assert_equals "missing" "$model_exists" "Other model with 'base' in path should be removed"
+    
+    model_exists=$(jq -r '.loras.test_lora // "missing"' "$config_file")
+    assert_equals "missing" "$model_exists" "Lora with 'base' in path should be removed"
+    
+    echo "Flexible path matching tests completed successfully"
+}
+
 # Run all tests
 main() {
     print_color "$BLUE" "Running Model Config Manager Unit Tests"
@@ -276,6 +435,7 @@ main() {
     run_test test_convert_to_symlink "Convert to Symlink"
     run_test test_get_model_download_url "Get Model Download URL"
     run_test test_invalid_json_handling "Invalid JSON Handling"
+    run_test test_flexible_path_matching "Flexible Path Matching"
     
     print_test_summary
 }
