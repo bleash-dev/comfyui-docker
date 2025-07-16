@@ -152,35 +152,15 @@ create_chunk() {
     log_info "Creating chunk: $output_file"
     
     # Create tar archive with compression
-    log_info "Creating archive for chunk with $(wc -l < "$chunk_list") files"
-
-    # Create tar archive using a more robust approach
-    local temp_relative_list
-    temp_relative_list=$(mktemp)
-
-    # Convert absolute paths to relative paths
-    while IFS= read -r file; do
-        if [ -e "$file" ]; then
+    tar -czf "$output_file" -C "$base_dir" --files-from=<(
+        # Convert absolute paths to relative paths
+        while IFS= read -r file; do
             echo "${file#$base_dir/}"
-        fi
-    done < "$chunk_list" > "$temp_relative_list"
-
-    if [ ! -s "$temp_relative_list" ]; then
-        log_error "No valid files found for chunk: $chunk_list"
-        rm -f "$temp_relative_list"
+        done < "$chunk_list"
+    ) 2>/dev/null || {
+        log_error "Failed to create chunk: $output_file"
         return 1
-    fi
-
-    # Create the tar archive
-    if tar -czf "$output_file" -C "$base_dir" --files-from="$temp_relative_list" 2>/dev/null; then
-        rm -f "$temp_relative_list"
-        log_info "Created chunk: $output_file ($(du -h "$output_file" | cut -f1))"
-        return 0
-    else
-        log_error "Failed to create tar archive: $output_file"
-        rm -f "$temp_relative_list"
-        return 1
-    fi
+    }
     
     log_info "Created chunk: $output_file ($(du -h "$output_file" | cut -f1))"
 }
@@ -422,32 +402,15 @@ fix_venv_paths() {
     local current_python
     current_python=$(which python3 || which python || echo "/usr/bin/python3")
     
-    # Ensure current_python exists and is executable
-    if [ ! -x "$current_python" ]; then
-        log_error "Cannot find a valid Python executable"
-        return 1
-    fi
-    
-    log_info "Using system Python: $current_python"
-    
-    # Get Python version info
-    local python_version
-    python_version=$("$current_python" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "unknown")
-    log_info "System Python version: $python_version"
-    
     # Fix pyvenv.cfg to point to current Python home
     if [ -f "$venv_path/pyvenv.cfg" ]; then
         log_info "Updating pyvenv.cfg"
         local python_home
         python_home=$(dirname "$(dirname "$current_python")")
         
-        # Create a backup
-        cp "$venv_path/pyvenv.cfg" "$venv_path/pyvenv.cfg.backup" 2>/dev/null || true
-        
         # Update the home path in pyvenv.cfg
-        if command -v sed >/dev/null 2>&1; then
-            # Try different sed syntaxes for different systems
-            sed -i.bak "s|^home = .*|home = $python_home/bin|g" "$venv_path/pyvenv.cfg" 2>/dev/null || \
+        sed -i.bak "s|^home = .*|home = $python_home/bin|g" "$venv_path/pyvenv.cfg" 2>/dev/null || {
+            # Fallback for systems where sed -i needs empty string
             sed -i '' "s|^home = .*|home = $python_home/bin|g" "$venv_path/pyvenv.cfg" 2>/dev/null || {
                 # Manual replacement if sed fails
                 local temp_file
@@ -457,121 +420,57 @@ fix_venv_paths() {
                     { print }
                 ' "$venv_path/pyvenv.cfg" > "$temp_file" && mv "$temp_file" "$venv_path/pyvenv.cfg"
             }
-        else
-            # Fallback without sed
-            local temp_file
-            temp_file=$(mktemp)
-            awk -v new_home="$python_home/bin" '
-                /^home = / { print "home = " new_home; next }
-                { print }
-            ' "$venv_path/pyvenv.cfg" > "$temp_file" && mv "$temp_file" "$venv_path/pyvenv.cfg"
-        fi
-        
-        # Clean up backup files
+        }
         rm -f "$venv_path/pyvenv.cfg.bak" 2>/dev/null || true
-        
-        log_info "Updated pyvenv.cfg with Python home: $python_home/bin"
-    else
-        log_info "No pyvenv.cfg found, creating one"
-        cat > "$venv_path/pyvenv.cfg" << EOF
-home = $(dirname "$(dirname "$current_python")")/bin
-include-system-site-packages = false
-version = $python_version
-EOF
     fi
     
-    # Ensure bin directory exists
-    mkdir -p "$venv_path/bin"
-    
-    # Fix shebang lines in bin/ scripts and ensure executability
+    # Fix shebang lines in bin/ scripts
     if [ -d "$venv_path/bin" ]; then
-        log_info "Fixing shebang lines and permissions in venv executables"
+        log_info "Fixing shebang lines in venv executables"
         local venv_python="$venv_path/bin/python"
         
         for script in "$venv_path/bin"/*; do
-            if [ -f "$script" ]; then
-                # Make sure it's executable
-                chmod +x "$script" 2>/dev/null || true
-                
+            if [ -f "$script" ] && [ -x "$script" ]; then
                 # Check if it's a script with a shebang
                 if head -1 "$script" 2>/dev/null | grep -q "^#!.*python"; then
                     # Replace the shebang to point to the venv's python
                     if command -v sed >/dev/null 2>&1; then
-                        sed -i.bak "1s|^#!.*python.*|#!$venv_python|" "$script" 2>/dev/null || \
-                        sed -i '' "1s|^#!.*python.*|#!$venv_python|" "$script" 2>/dev/null || {
-                            # Manual replacement
-                            local temp_file
-                            temp_file=$(mktemp)
-                            {
-                                echo "#!$venv_python"
-                                tail -n +2 "$script"
-                            } > "$temp_file" && mv "$temp_file" "$script"
-                            chmod +x "$script"
+                        sed -i.bak "1s|^#!.*python.*|#!$venv_python|" "$script" 2>/dev/null || {
+                            sed -i '' "1s|^#!.*python.*|#!$venv_python|" "$script" 2>/dev/null || {
+                                # Manual replacement
+                                local temp_file
+                                temp_file=$(mktemp)
+                                {
+                                    echo "#!$venv_python"
+                                    tail -n +2 "$script"
+                                } > "$temp_file" && mv "$temp_file" "$script"
+                                chmod +x "$script"
+                            }
                         }
                         rm -f "$script.bak" 2>/dev/null || true
-                    else
-                        # Fallback without sed
-                        local temp_file
-                        temp_file=$(mktemp)
-                        {
-                            echo "#!$venv_python"
-                            tail -n +2 "$script"
-                        } > "$temp_file" && mv "$temp_file" "$script"
-                        chmod +x "$script"
                     fi
                 fi
             fi
         done
     fi
     
-    # Recreate the python symlinks to ensure they point correctly
+    # Recreate the python symlink to ensure it points correctly
     if [ -f "$current_python" ]; then
         local venv_python_version
         venv_python_version=$(basename "$current_python")
         
-        log_info "Creating Python symlinks for venv"
-        
-        # Remove old symlinks/files
+        # Remove old symlinks
         rm -f "$venv_path/bin/python" "$venv_path/bin/python3" 2>/dev/null || true
         
         # Create new symlinks
-        ln -sf "$current_python" "$venv_path/bin/$venv_python_version" 2>/dev/null || {
-            # If symlink fails, copy the executable
-            cp "$current_python" "$venv_path/bin/$venv_python_version" 2>/dev/null || true
-        }
-        
-        ln -sf "$venv_python_version" "$venv_path/bin/python3" 2>/dev/null || {
-            ln -sf "$current_python" "$venv_path/bin/python3" 2>/dev/null || true
-        }
-        
-        ln -sf "python3" "$venv_path/bin/python" 2>/dev/null || {
-            ln -sf "$current_python" "$venv_path/bin/python" 2>/dev/null || true
-        }
-        
-        # Ensure the symlinks are executable
-        chmod +x "$venv_path/bin/python"* 2>/dev/null || true
+        ln -sf "$current_python" "$venv_path/bin/$venv_python_version" 2>/dev/null || true
+        ln -sf "$venv_python_version" "$venv_path/bin/python3" 2>/dev/null || true
+        ln -sf "python3" "$venv_path/bin/python" 2>/dev/null || true
         
         log_info "Updated venv Python symlinks to point to: $current_python"
-        
-        # Verify the symlinks work
-        if [ -x "$venv_path/bin/python" ] && "$venv_path/bin/python" --version >/dev/null 2>&1; then
-            log_info "Venv Python executable verified working"
-        else
-            log_error "Venv Python executable is not working after fix"
-            return 1
-        fi
-    else
-        log_error "System Python executable not found or not executable"
-        return 1
     fi
     
-    # Ensure site-packages directory has correct permissions
-    if [ -d "$venv_path/lib" ]; then
-        find "$venv_path/lib" -type d -exec chmod 755 {} \; 2>/dev/null || true
-        find "$venv_path/lib" -type f -exec chmod 644 {} \; 2>/dev/null || true
-    fi
-    
-    log_info "Venv path fixing completed successfully"
+    log_info "Venv path fixing completed"
     return 0
 }
 
@@ -656,95 +555,37 @@ restore_venv() {
         return 1
     fi
     
-    # Count chunks for progress reporting
-    local chunk_count
-    chunk_count=$(ls "$chunk_dir"/${CHUNK_PREFIX}*.tar.gz 2>/dev/null | wc -l)
-    log_info "Found $chunk_count chunk files to restore"
-    
     # Verify checksums if available
     if [ -f "$chunk_dir/$CHECKSUM_FILE" ]; then
-        log_info "Verifying chunk checksums before restoration..."
         if ! verify_checksums "$chunk_dir" "$chunk_dir/$CHECKSUM_FILE"; then
             log_error "Chunk verification failed"
             return 1
         fi
-        log_info "All chunk checksums verified successfully"
     else
         log_info "No checksum file found, skipping verification"
-    fi
-    
-    # Clean up existing venv if it exists and is corrupted
-    if [ -d "$venv_path" ]; then
-        log_info "Removing existing venv directory before restoration"
-        rm -rf "$venv_path"
     fi
     
     # Create target directory
     mkdir -p "$venv_path"
     
     # Extract chunks in parallel to restore entire venv
-    log_info "Extracting chunks in parallel..."
     if process_chunks_parallel "extract" "$chunk_dir" "$venv_path" ""; then
-        log_info "Successfully extracted all chunks"
+        log_info "Successfully restored chunked venv"
         
         # Log statistics
+        local chunk_count
+        chunk_count=$(ls "$chunk_dir"/${CHUNK_PREFIX}*.tar.gz 2>/dev/null | wc -l)
         log_info "Restored $chunk_count chunks to: $venv_path"
-        
-        # Check basic venv structure
-        if [ ! -d "$venv_path/bin" ]; then
-            log_error "Restored venv missing bin/ directory"
-            return 1
-        fi
-        
-        if [ ! -d "$venv_path/lib" ]; then
-            log_error "Restored venv missing lib/ directory"
-            return 1
-        fi
-        
-        log_info "Basic venv structure verification passed"
         
         # Make sure executables are executable
         if [ -d "$venv_path/bin" ]; then
-            log_info "Setting executable permissions on bin/ directory contents"
             chmod +x "$venv_path/bin"/* 2>/dev/null || true
         fi
         
         # Fix venv paths for cross-environment compatibility
-        log_info "Applying cross-environment path fixes..."
-        if fix_venv_paths "$venv_path"; then
-            log_info "Venv path fixes applied successfully"
-            
-            # Final verification that the venv is functional
-            if [ -f "$venv_path/bin/python" ] && "$venv_path/bin/python" --version >/dev/null 2>&1; then
-                local python_version
-                python_version=$("$venv_path/bin/python" --version 2>&1)
-                log_info "Venv restoration completed successfully - Python: $python_version"
-                
-                # Verify pip is also working
-                if "$venv_path/bin/python" -m pip --version >/dev/null 2>&1; then
-                    local pip_version
-                    pip_version=$("$venv_path/bin/python" -m pip --version 2>&1 | head -1)
-                    log_info "Pip is also functional: $pip_version"
-                else
-                    log_info "Pip may need reinstallation, but Python is working"
-                fi
-                
-                return 0
-            else
-                log_error "Venv Python executable is not functional after restoration and fixes"
-                # List what we have for debugging
-                if [ -d "$venv_path/bin" ]; then
-                    log_error "bin/ directory contents:"
-                    ls -la "$venv_path/bin" | head -10 | while read -r line; do
-                        log_error "  $line"
-                    done
-                fi
-                return 1
-            fi
-        else
-            log_error "Failed to apply venv path fixes"
-            return 1
-        fi
+        fix_venv_paths "$venv_path"
+        
+        return 0
     else
         log_error "Failed to restore chunks"
         return 1
