@@ -121,7 +121,7 @@ OTHER_USER_SHARED_ARCHIVE_FILES=("_comfyui.tar.gz" "_cache.tar.gz")
 # --- Restore Order ---
 echo "--- Restoring Virtual Environment (Optimized) ---"
 # Try chunked venv first, fall back to traditional archive
-local venv_restored=false
+venv_restored=false
 if download_and_restore_chunked_venv \
     "$S3_USER_SHARED_BASE/venv_chunks" \
     "$NETWORK_VOLUME/venv" \
