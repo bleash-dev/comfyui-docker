@@ -186,12 +186,22 @@ create_other_folders_zip() {
     
     # Create zip archive of all non-lib items
     if command -v zip >/dev/null 2>&1; then
-        cd "$venv_path" && zip -r "$output_file" $(cat "$temp_include_list") >/dev/null 2>&1
+        # Convert output_file to absolute path before changing directory
+        local abs_output_file
+        if [[ "$output_file" = /* ]]; then
+            abs_output_file="$output_file"
+        else
+            abs_output_file="$(pwd)/$output_file"
+        fi
+        
+        cd "$venv_path" || return 1
+        # Use -@ option to read file list from stdin, which is safer
+        zip -r "$abs_output_file" -@ < "$temp_include_list" >/dev/null 2>&1
         local zip_result=$?
         cd - >/dev/null
         
         if [ $zip_result -eq 0 ]; then
-            log_info "Successfully created other folders zip: $output_file ($(du -h "$output_file" | cut -f1))"
+            log_info "Successfully created other folders zip: $abs_output_file ($(du -h "$abs_output_file" | cut -f1))"
         else
             log_error "Failed to create zip archive"
             rm -f "$temp_include_list"
