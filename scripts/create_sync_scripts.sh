@@ -197,7 +197,7 @@ sync_user_shared_data_internal() {
         
         # Use chunked upload for venv
         local s3_venv_chunks_path="$S3_USER_SHARED_BASE/venv_chunks"
-        if chunk_and_upload_venv "$venv_dir" "$s3_venv_chunks_path" "user_data"; then
+        if chunk_and_upload_venv "$venv_dir" "$s3_venv_chunks_path" "user_shared"; then
             echo "  ✅ Successfully uploaded venv using chunked method"
         else
             echo "  ⚠️ Chunked venv upload failed, falling back to traditional archive method"

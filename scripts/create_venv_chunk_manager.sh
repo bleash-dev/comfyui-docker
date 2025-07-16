@@ -38,6 +38,21 @@ log_info() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] INFO: $*" | tee -a "$VENV_LOG_FILE" >&2
 }
 
+# Source API client for progress notifications if available and not already sourced
+if [ -f "$NETWORK_VOLUME/scripts/api_client.sh" ] && ! command -v notify_sync_progress >/dev/null 2>&1; then
+    source "$NETWORK_VOLUME/scripts/api_client.sh" 2>/dev/null || true
+fi
+
+# Fallback notification function if API client is not available
+if ! command -v notify_sync_progress >/dev/null 2>&1; then
+    notify_sync_progress() {
+        local sync_type="$1"
+        local status="$2"
+        local percentage="$3"
+        log_info "Progress notification: $sync_type $status $percentage%"
+    }
+fi
+
 # Utility functions
 cleanup_temp() {
     if [ -n "${TEMP_DIR:-}" ] && [ -d "$TEMP_DIR" ]; then
@@ -511,13 +526,35 @@ restore_site_packages() {
 upload_chunks() {
     local chunk_dir="$1"
     local s3_path="$2"
+    local sync_type="${3:-venv_sync}"
     
     log_info "Uploading chunks to: $s3_path"
+    
+    # Count total chunks
+    local total_chunks=0
+    for chunk_file in "$chunk_dir"/${CHUNK_PREFIX}*.tar.gz; do
+        if [ -f "$chunk_file" ]; then
+            total_chunks=$((total_chunks + 1))
+        fi
+    done
+    
+    if [ "$total_chunks" -eq 0 ]; then
+        log_error "No chunk files found in: $chunk_dir"
+        return 1
+    fi
+    
+    log_info "Uploading $total_chunks chunks..."
+    
+    # Notify start of upload if this is user_shared type
+    if [ "$sync_type" = "user_shared" ]; then
+        notify_sync_progress "user_shared" "PROGRESS" 0
+    fi
     
     # Upload chunks in parallel
     local pids=()
     local max_jobs=$VENV_MAX_PARALLEL
     local job_count=0
+    local completed_chunks=0
     
     # Upload chunk files
     for chunk_file in "$chunk_dir"/${CHUNK_PREFIX}*.tar.gz; do
@@ -533,6 +570,13 @@ upload_chunks() {
                         wait "${pids[$i]}" 2>/dev/null || true
                         unset 'pids[i]'
                         job_count=$((job_count - 1))
+                        completed_chunks=$((completed_chunks + 1))
+                        
+                        # Update progress for user_shared uploads
+                        if [ "$sync_type" = "user_shared" ]; then
+                            local progress=$((completed_chunks * 80 / total_chunks))
+                            notify_sync_progress "user_shared" "PROGRESS" "$progress"
+                        fi
                     fi
                 done
             fi
@@ -554,7 +598,7 @@ upload_chunks() {
         job_count=$((job_count + 1))
     done
     
-    # Wait for all uploads
+    # Wait for all uploads and update progress
     if [ ${#pids[@]} -gt 0 ]; then
         for pid in "${pids[@]}"; do
             if kill -0 "$pid" 2>/dev/null; then
@@ -562,6 +606,13 @@ upload_chunks() {
                     log_error "Upload job failed: $pid"
                     return 1
                 }
+                completed_chunks=$((completed_chunks + 1))
+                
+                # Update progress for user_shared uploads
+                if [ "$sync_type" = "user_shared" ]; then
+                    local progress=$((completed_chunks * 80 / total_chunks))
+                    notify_sync_progress "user_shared" "PROGRESS" "$progress"
+                fi
             fi
         done
     fi
@@ -584,6 +635,11 @@ upload_chunks() {
             log_error "Failed to upload source checksum"
             return 1
         fi
+    fi
+    
+    # Notify completion for user_shared uploads
+    if [ "$sync_type" = "user_shared" ]; then
+        notify_sync_progress "user_shared" "PROGRESS" 100
     fi
     
     log_info "Successfully uploaded all chunks"
@@ -698,7 +754,7 @@ chunk_and_upload_venv() {
         log_info "Venv chunking successful, uploading to S3..."
         
         # Upload chunks
-        if upload_chunks "$temp_chunks_dir" "$s3_path"; then
+        if upload_chunks "$temp_chunks_dir" "$s3_path" "$sync_type"; then
             log_info "Successfully uploaded chunked venv"
             # Clean up temporary chunks
             rm -rf "$temp_chunks_dir"
