@@ -175,15 +175,42 @@ extract_chunk() {
         return 1
     fi
     
+    # Check if chunk file is empty (common S3 download issue)
+    if [ ! -s "$chunk_file" ]; then
+        log_error "Chunk file is empty (possible download failure): $chunk_file"
+        return 1
+    fi
+    
+    # Check if chunk file is a valid gzip file
+    if ! gzip -t "$chunk_file" 2>/dev/null; then
+        log_error "Chunk file is not a valid gzip archive: $chunk_file"
+        local file_size=$(stat -c%s "$chunk_file" 2>/dev/null || stat -f%z "$chunk_file" 2>/dev/null || echo "unknown")
+        log_error "File size: $file_size bytes"
+        # Show first few bytes for debugging
+        if command -v hexdump >/dev/null 2>&1; then
+            log_error "First 32 bytes: $(hexdump -C "$chunk_file" | head -2 || echo "unable to read")"
+        fi
+        return 1
+    fi
+    
     log_info "Extracting chunk: $chunk_file to $dest_dir"
     
     mkdir -p "$dest_dir"
     
-    if tar -xzf "$chunk_file" -C "$dest_dir" 2>/dev/null; then
+    # Capture tar output for better error reporting
+    local tar_output
+    local tar_exit_code
+    tar_output=$(tar -xzf "$chunk_file" -C "$dest_dir" 2>&1)
+    tar_exit_code=$?
+    
+    if [ $tar_exit_code -eq 0 ]; then
         log_info "Successfully extracted: $chunk_file"
         return 0
     else
-        log_error "Failed to extract chunk: $chunk_file"
+        log_error "Failed to extract chunk: $chunk_file (exit code: $tar_exit_code)"
+        if [ -n "$tar_output" ]; then
+            log_error "Tar error output: $tar_output"
+        fi
         return 1
     fi
 }
@@ -719,6 +746,7 @@ download_chunks() {
     local pids=()
     local max_jobs=$VENV_MAX_PARALLEL
     local job_count=0
+    local download_failures=0
     
     # Use a temporary file to avoid pipeline issues
     local temp_file_list
@@ -735,7 +763,7 @@ download_chunks() {
             if [ ${#pids[@]} -gt 0 ]; then
                 for i in "${!pids[@]}"; do
                     if ! kill -0 "${pids[$i]}" 2>/dev/null; then
-                        wait "${pids[$i]}" 2>/dev/null || true
+                        wait "${pids[$i]}" 2>/dev/null || download_failures=$((download_failures + 1))
                         unset 'pids[i]'
                         job_count=$((job_count - 1))
                     fi
@@ -746,8 +774,20 @@ download_chunks() {
         
         # Start download in background
         (
-            if aws s3 cp "$s3_path/$filename" "$chunk_dir/$filename" --only-show-errors; then
-                log_info "Downloaded: $filename"
+            local target_file="$chunk_dir/$filename"
+            if aws s3 cp "$s3_path/$filename" "$target_file" --only-show-errors; then
+                # Verify downloaded file is not empty and is valid
+                if [ ! -s "$target_file" ]; then
+                    log_error "Downloaded chunk is empty: $filename"
+                    exit 1
+                elif ! gzip -t "$target_file" 2>/dev/null; then
+                    log_error "Downloaded chunk is not valid gzip: $filename"
+                    local file_size=$(stat -c%s "$target_file" 2>/dev/null || stat -f%z "$target_file" 2>/dev/null || echo "unknown")
+                    log_error "File size: $file_size bytes"
+                    exit 1
+                else
+                    log_info "Downloaded: $filename"
+                fi
             else
                 log_error "Failed to download: $filename"
                 exit 1
@@ -764,12 +804,15 @@ download_chunks() {
     if [ ${#pids[@]} -gt 0 ]; then
         for pid in "${pids[@]}"; do
             if kill -0 "$pid" 2>/dev/null; then
-                wait "$pid" || {
-                    log_error "Download job failed: $pid"
-                    return 1
-                }
+                wait "$pid" || download_failures=$((download_failures + 1))
             fi
         done
+    fi
+    
+    # Check if we had any download failures
+    if [ $download_failures -gt 0 ]; then
+        log_error "Failed to download $download_failures chunk files"
+        return 1
     fi
     
     # Download checksum file
