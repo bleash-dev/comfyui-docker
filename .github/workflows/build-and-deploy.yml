@@ -8,74 +8,37 @@ on:
   workflow_dispatch:
 
 env:
-  AWS_REGION: us-east-1
   IMAGE_NAME: comfyui-docker
-  PUBLIC_REGISTRY_ALIAS: p1c2v8t9  # e.g., 'abc123xyz' from public.ecr.aws/<alias>
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    environment: ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
-
-    permissions:
-      id-token: write
-      contents: read
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Configure AWS credentials via OIDC
-      uses: aws-actions/configure-aws-credentials@v2
-      with:
-        role-to-assume: ${{ secrets.GH_ROLE_ARN }}
-        aws-region: ${{ env.AWS_REGION }}
-
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Log in to Amazon ECR Public
+    - name: Log in to Docker Hub
+      if: github.event_name != 'pull_request'
       uses: docker/login-action@v3
       with:
-        registry: public.ecr.aws
-
-    - name: Create ECR repository if it doesn't exist
-      run: |
-        echo "🔍 Checking if ECR repository exists..."
-        echo "Repository name: ${{ env.IMAGE_NAME }}"
-        
-        # First, verify we can access ECR
-        echo "🔐 Testing ECR access..."
-        aws ecr-public describe-registries --region us-east-1 || {
-          echo "❌ Cannot access ECR public registries. Check AWS credentials and permissions."
-          exit 1
-        }
-        
-        # Check if repository exists
-        if ! aws ecr-public describe-repositories --repository-names ${{ env.IMAGE_NAME }} --region us-east-1 >/dev/null 2>&1; then
-          echo "📝 Creating ECR Public repository: ${{ env.IMAGE_NAME }}"
-          aws ecr-public create-repository \
-            --repository-name ${{ env.IMAGE_NAME }} \
-            --region us-east-1
-          
-          echo "✅ Repository created successfully"
-          
-          # Verify the repository was created
-          aws ecr-public describe-repositories --repository-names ${{ env.IMAGE_NAME }} --region us-east-1
-        else
-          echo "✅ ECR repository already exists: ${{ env.IMAGE_NAME }}"
-        fi
+        username: ${{ secrets.DOCKER_HUB_USER_NAME }}
+        password: ${{ secrets.DOCKER_HUB_PASSWORD }}
 
     - name: Extract Docker metadata
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: public.ecr.aws/${{ env.PUBLIC_REGISTRY_ALIAS }}/${{ env.IMAGE_NAME }}
+        images: |
+          ${{ secrets.DOCKER_HUB_USER_NAME }}/${{ env.IMAGE_NAME }}
         tags: |
           type=sha,prefix=main-
           type=raw,value=latest,enable={{is_default_branch}}
 
-    - name: Build and push Docker image to ECR Public
+    - name: Build and push Docker image to Docker Hub
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -94,8 +57,8 @@ jobs:
     - name: Deployment Summary
       if: github.event_name != 'pull_request'
       run: |
-        echo "## 🚀 Docker Image Deployed to Amazon ECR Public" >> $GITHUB_STEP_SUMMARY
+        echo "## 🚀 Docker Image Deployed to Docker Hub" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Image:** \`public.ecr.aws/${{ env.PUBLIC_REGISTRY_ALIAS }}/${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Image:** \`${{ secrets.DOCKER_HUB_USER_NAME }}/${{ env.IMAGE_NAME }}:latest\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "You can use this image in RunPod **without any authentication**." >> $GITHUB_STEP_SUMMARY
+        echo "You can use this image in RunPod or any Docker environment." >> $GITHUB_STEP_SUMMARY
