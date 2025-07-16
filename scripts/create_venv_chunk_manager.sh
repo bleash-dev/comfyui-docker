@@ -94,7 +94,7 @@ calculate_directory_checksum() {
     find "$dir" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
 }
 
-# Generate chunk list from lib directory only
+# Generate chunk list from lib directory only with improved bin packing
 generate_chunk_list() {
     local venv_path="$1"
     local chunk_size_bytes=$((VENV_CHUNK_SIZE_MB * 1024 * 1024))
@@ -102,33 +102,73 @@ generate_chunk_list() {
     local current_size=0
     local chunk_file
     
-    # Look for lib directory in venv
-    local lib_dir=""
+    # Look for lib directories in venv (lib and lib64)
+    local lib_dirs=()
     if [ -d "$venv_path/lib" ]; then
-        lib_dir="$venv_path/lib"
-    else
-        log_error "No lib directory found in venv: $venv_path"
+        lib_dirs+=("$venv_path/lib")
+    fi
+    if [ -d "$venv_path/lib64" ]; then
+        lib_dirs+=("$venv_path/lib64")
+    fi
+    
+    if [ ${#lib_dirs[@]} -eq 0 ]; then
+        log_error "No lib or lib64 directories found in venv: $venv_path"
         return 1
     fi
     
-    log_info "Generating chunk list for lib directory: $lib_dir"
+    log_info "Generating chunk list for lib directories: ${lib_dirs[*]}"
     
     # Create temporary directory for chunk lists
     local TEMP_DIR
     TEMP_DIR=$(mktemp -d)
     chunk_file="$TEMP_DIR/chunk_${current_chunk}.list"
     
-    # Find all files in lib directory and process them
-    local temp_file_list
+    # Find all files in lib directories and sort by size (largest first for better packing)
+    local temp_file_list temp_file_sizes
     temp_file_list=$(mktemp)
-    find "$lib_dir" -type f > "$temp_file_list"
+    temp_file_sizes=$(mktemp)
     
-    while IFS= read -r file; do
-        if [ ! -e "$file" ]; then
+    # Find files in all lib directories and get their sizes
+    for lib_dir in "${lib_dirs[@]}"; do
+        find "$lib_dir" -type f -exec stat -c"%s %n" {} \; 2>/dev/null
+        find "$lib_dir" -type f -exec stat -f"%z %N" {} \; 2>/dev/null
+    done > "$temp_file_sizes"
+    
+    # Sort files by size (largest first) for better bin packing
+    sort -rn "$temp_file_sizes" > "$temp_file_list"
+    
+    local large_files_warned=false
+    
+    while IFS=' ' read -r file_size file_path; do
+        if [ ! -e "$file_path" ]; then
             continue
         fi
         
-        file_size=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null || echo 0)
+        # Warn about extremely large files (more than 2x chunk size)
+        if [ "$file_size" -gt $((chunk_size_bytes * 2)) ] && [ "$large_files_warned" = false ]; then
+            log_info "Warning: Found files larger than 2x chunk size ($(($file_size / 1024 / 1024))MB). Consider increasing VENV_CHUNK_SIZE_MB."
+            large_files_warned=true
+        fi
+        
+        # If this file alone exceeds chunk size, put it in its own chunk
+        if [ "$file_size" -gt "$chunk_size_bytes" ]; then
+            # If current chunk has files, close it first
+            if [ "$current_size" -gt 0 ]; then
+                current_chunk=$((current_chunk + 1))
+                chunk_file="$TEMP_DIR/chunk_${current_chunk}.list"
+                current_size=0
+            fi
+            
+            # Add the large file to its own chunk
+            echo "$file_path" >> "$chunk_file"
+            log_info "Large file ($(($file_size / 1024 / 1024))MB) assigned to chunk $current_chunk: $(basename "$file_path")"
+            
+            # Start next chunk
+            current_chunk=$((current_chunk + 1))
+            chunk_file="$TEMP_DIR/chunk_${current_chunk}.list"
+            current_size=0
+            continue
+        fi
         
         # If adding this file would exceed chunk size, start a new chunk
         if [ $((current_size + file_size)) -gt $chunk_size_bytes ] && [ $current_size -gt 0 ]; then
@@ -137,12 +177,12 @@ generate_chunk_list() {
             current_size=0
         fi
         
-        echo "$file" >> "$chunk_file"
+        echo "$file_path" >> "$chunk_file"
         current_size=$((current_size + file_size))
     done < "$temp_file_list"
     
-    # Clean up temp file
-    rm -f "$temp_file_list"
+    # Clean up temp files
+    rm -f "$temp_file_list" "$temp_file_sizes"
     
     # Output the temporary directory path
     echo "$TEMP_DIR"
@@ -164,12 +204,12 @@ create_other_folders_zip() {
     local temp_include_list
     temp_include_list=$(mktemp)
     
-    # List all items in venv_path, exclude only lib directory
+    # List all items in venv_path, exclude lib and lib64 directories
     for item in "$venv_path"/*; do
         if [ -e "$item" ]; then
             local basename_item
             basename_item=$(basename "$item")
-            if [ "$basename_item" != "lib" ]; then
+            if [ "$basename_item" != "lib" ] && [ "$basename_item" != "lib64" ]; then
                 echo "$basename_item" >> "$temp_include_list"
                 log_info "Including in zip: $basename_item"
             else
