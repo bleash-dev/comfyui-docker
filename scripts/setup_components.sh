@@ -26,23 +26,62 @@ if [ ! -d "$COMFYUI_VENV" ]; then
 else
     echo "ComfyUI virtual environment exists, checking integrity..."
     
+    # Enhanced debugging for venv checking
+    echo "📊 Venv Debug Info:"
+    echo "  - Path: $COMFYUI_VENV"
+    echo "  - Directory exists: $([ -d "$COMFYUI_VENV" ] && echo "YES" || echo "NO")"
+    if [ -d "$COMFYUI_VENV" ]; then
+        echo "  - Contents: $(ls -la "$COMFYUI_VENV" 2>/dev/null | wc -l) items"
+        echo "  - bin/ exists: $([ -d "$COMFYUI_VENV/bin" ] && echo "YES" || echo "NO")"
+        if [ -d "$COMFYUI_VENV/bin" ]; then
+            echo "  - bin/ contents: $(ls "$COMFYUI_VENV/bin" 2>/dev/null | tr '\n' ' ')"
+        fi
+        echo "  - python exists: $([ -f "$COMFYUI_VENV/bin/python" ] && echo "YES" || echo "NO")"
+        if [ -f "$COMFYUI_VENV/bin/python" ]; then
+            echo "  - python target: $(readlink "$COMFYUI_VENV/bin/python" 2>/dev/null || echo "not a symlink")"
+            echo "  - python executable: $([ -x "$COMFYUI_VENV/bin/python" ] && echo "YES" || echo "NO")"
+        fi
+    fi
+    
     # Check if the venv Python interpreter exists and works
     if [ ! -f "$COMFYUI_VENV/bin/python" ] || ! "$COMFYUI_VENV/bin/python" --version >/dev/null 2>&1; then
+        if [ ! -f "$COMFYUI_VENV/bin/python" ]; then
+            echo "⚠️ Virtual environment Python executable missing"
+        else
+            echo "⚠️ Virtual environment Python executable broken"
+            echo "    Error details: $("$COMFYUI_VENV/bin/python" --version 2>&1 || echo "Command failed completely")"
+        fi
         echo "⚠️ Virtual environment is corrupted or incompatible, recreating..."
         rm -rf "$COMFYUI_VENV"
         mkdir -p "$(dirname "$COMFYUI_VENV")"
         $PYTHON_CMD -m venv "$COMFYUI_VENV"
         echo "✅ Virtual environment recreated successfully"
     else
-        # Additional check: verify pip works in the venv
-        if ! "$COMFYUI_VENV/bin/python" -m pip --version >/dev/null 2>&1; then
-            echo "⚠️ Virtual environment pip is broken (likely path issue), recreating..."
+        # Additional checks for venv integrity
+        venv_python_version=$("$COMFYUI_VENV/bin/python" --version 2>&1 | awk '{print $2}' | cut -d'.' -f1,2)
+        system_python_version=$($PYTHON_CMD --version 2>&1 | awk '{print $2}' | cut -d'.' -f1,2)
+        
+        echo "  - venv Python version: $venv_python_version"
+        echo "  - system Python version: $system_python_version"
+        
+        if [ "$venv_python_version" != "$system_python_version" ]; then
+            echo "⚠️ Virtual environment Python version ($venv_python_version) doesn't match system Python ($system_python_version), recreating..."
             rm -rf "$COMFYUI_VENV"
             mkdir -p "$(dirname "$COMFYUI_VENV")"
             $PYTHON_CMD -m venv "$COMFYUI_VENV"
-            echo "✅ Virtual environment recreated successfully"
+            echo "✅ Virtual environment recreated with correct Python version"
         else
-            echo "✅ Virtual environment is healthy"
+            # Additional check: verify pip works in the venv
+            if ! "$COMFYUI_VENV/bin/python" -m pip --version >/dev/null 2>&1; then
+                echo "⚠️ Virtual environment pip is broken (likely path issue), recreating..."
+                echo "    Pip error: $("$COMFYUI_VENV/bin/python" -m pip --version 2>&1 || echo "Command failed")"
+                rm -rf "$COMFYUI_VENV"
+                mkdir -p "$(dirname "$COMFYUI_VENV")"
+                $PYTHON_CMD -m venv "$COMFYUI_VENV"
+                echo "✅ Virtual environment recreated successfully"
+            else
+                echo "✅ Virtual environment is healthy"
+            fi
         fi
     fi
 fi

@@ -89,7 +89,15 @@ download_and_restore_chunked_venv() {
                 # Use optimized chunked download
                 if download_and_reassemble_venv "$s3_chunks_base" "$local_venv_dir"; then
                     echo "  ✅ Successfully restored $description using chunked method"
-                    return 0
+                    
+                    # Verify the restored venv is functional
+                    if [ -f "$local_venv_dir/bin/python" ] && "$local_venv_dir/bin/python" --version >/dev/null 2>&1; then
+                        echo "  ✅ Restored venv is functional"
+                        return 0
+                    else
+                        echo "  ⚠️ Restored venv appears corrupted, marking as failed"
+                        return 1
+                    fi
                 else
                     echo "  ⚠️ Chunked restoration failed, will try fallback method"
                 fi
@@ -127,13 +135,35 @@ if download_and_restore_chunked_venv \
     "$NETWORK_VOLUME/venv" \
     "user venv (chunked)"; then
     venv_restored=true
+    echo "  ✅ Chunked venv restoration successful"
 else
     echo "  🔄 Falling back to traditional venv archive..."
-    download_and_extract \
+    if download_and_extract \
         "$S3_USER_SHARED_BASE/venv.tar.gz" \
         "$NETWORK_VOLUME" \
-        "User-shared 'venv' data (fallback)"
-    venv_restored=true
+        "User-shared 'venv' data (fallback)"; then
+        venv_restored=true
+        echo "  ✅ Traditional venv restoration successful"
+    else
+        echo "  ⚠️ Both chunked and traditional venv restoration failed"
+        echo "  ℹ️ Will proceed without restored venv - new environment will be created"
+        venv_restored=false
+    fi
+fi
+
+# Verify the restored venv (if any) is functional
+if [ "$venv_restored" = "true" ] && [ -d "$NETWORK_VOLUME/venv" ]; then
+    # Check if ComfyUI venv specifically was restored properly
+    COMFYUI_VENV_PATH="$NETWORK_VOLUME/venv/comfyui"
+    if [ -d "$COMFYUI_VENV_PATH" ]; then
+        if [ -f "$COMFYUI_VENV_PATH/bin/python" ] && "$COMFYUI_VENV_PATH/bin/python" --version >/dev/null 2>&1; then
+            echo "  ✅ ComfyUI venv verified as functional"
+        else
+            echo "  ⚠️ ComfyUI venv appears corrupted - will be recreated during setup"
+        fi
+    else
+        echo "  ℹ️ ComfyUI venv not found in backup - will be created fresh"
+    fi
 fi
 
 echo "--- Restoring Other User-Shared Data ---"
