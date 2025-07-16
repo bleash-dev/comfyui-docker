@@ -107,7 +107,7 @@ if ! bucket_location_output=$(aws s3api get-bucket-location --bucket "$AWS_BUCKE
     echo "   Bucket location test error output:"
     echo "   $bucket_location_output"
     echo "   Trying alternative connection test..."
-    
+
     # Fallback test: try to list bucket contents
     echo "   Attempting bucket list test..."
     if ! bucket_list_output=$(aws s3 ls "s3://$AWS_BUCKET_NAME/" 2>&1); then
@@ -121,11 +121,11 @@ if ! bucket_location_output=$(aws s3api get-bucket-location --bucket "$AWS_BUCKE
         echo "   - AWS region is correct: '$AWS_REGION'"
         echo "   - Bucket exists and you have access permissions"
         echo "   - Network connectivity to AWS S3"
-        
+
         # Try to give more specific error information with debug output
         echo "🔍 Attempting diagnostic test with debug output..."
         aws s3 ls "s3://$AWS_BUCKET_NAME/" --debug 2>&1 | head -20 || true
-        
+
         exit 1
     else
         echo "✅ S3 connection successful (via fallback test)."
@@ -248,18 +248,23 @@ if [ -f "$SCRIPT_DIR/create_model_download_integration.sh" ]; then
     echo "  ✅ Model download integration created/configured."
 fi
 
+# Corrected Block
 if [ -f "$SCRIPT_DIR/create_sync_lock_manager.sh" ]; then
     if ! bash "$SCRIPT_DIR/create_sync_lock_manager.sh"; then
-        echo "❌ CRITICAL: Failed to create model sync integration."
+        echo "❌ CRITICAL: Failed to create sync lock manager."
         exit 1
     fi
-    echo "  ✅ Model sync integration created/configured."
+    echo "  ✅ Sync lock manager created/configured."
 fi
 
 # Ensure sync lock manager exists
 if [ ! -f "$NETWORK_VOLUME/scripts/sync_lock_manager.sh" ]; then
     echo "⚠️ Sync lock manager not found, creating it..."
-    bash "$NETWORK_VOLUME/scripts/create_sync_lock_manager.sh"
+    if [ -f "$NETWORK_VOLUME/scripts/create_sync_lock_manager.sh" ]; then
+        bash "$NETWORK_VOLUME/scripts/create_sync_lock_manager.sh"
+    else
+        echo "   ❌ Could not find create_sync_lock_manager.sh in the network volume to re-create it."
+    fi
 fi
 
 
@@ -343,7 +348,7 @@ if aws s3 ls "$s3_config_path" >/dev/null 2>&1; then
     echo "    📥 Downloading model config from $s3_config_path"
     if aws s3 cp "$s3_config_path" "$LOCAL_MODEL_CONFIG" --only-show-errors; then
         echo "    ✅ Model configuration synced successfully"
-        
+
         # Validate the downloaded JSON
         if ! jq empty "$LOCAL_MODEL_CONFIG" 2>/dev/null; then
             echo "    ⚠️ WARNING: Downloaded model config is invalid JSON, initializing empty config"
@@ -369,11 +374,11 @@ if aws s3 ls "$s3_workflows_path" >/dev/null 2>&1; then
         rm -rf "$LOCAL_WORKFLOWS_DIR"
         mkdir -p "$LOCAL_WORKFLOWS_DIR"
     fi
-    
+
     echo "    📥 Downloading workflows from $s3_workflows_path"
     if aws s3 sync "$s3_workflows_path" "$LOCAL_WORKFLOWS_DIR/" --delete --only-show-errors; then
         echo "    ✅ User workflows synced successfully"
-        
+
         # Count downloaded workflows
         workflow_count=$(find "$LOCAL_WORKFLOWS_DIR" -type f -name "*.json" | wc -l)
         echo "    📊 Downloaded $workflow_count workflow files"
