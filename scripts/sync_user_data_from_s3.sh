@@ -80,7 +80,7 @@ download_and_restore_chunked_venv() {
     # Check if chunks are available
     if aws s3 ls "$s3_chunks_base/" >/dev/null 2>&1; then
         local chunks_found
-        chunks_found=$(aws s3 ls "$s3_chunks_base/" | grep "chunk-.*\.tar\.gz$" | wc -l)
+        chunks_found=$(aws s3 ls "$s3_chunks_base/" | grep "chunk_.*\.tar\.gz$" | wc -l)
         
         if [ "$chunks_found" -gt 0 ]; then
             echo "  📦 Found $chunks_found venv chunks, using optimized download..."
