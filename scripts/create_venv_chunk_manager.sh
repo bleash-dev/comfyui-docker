@@ -160,18 +160,18 @@ create_other_folders_zip() {
     
     log_info "Creating zip of non-lib folders: $output_file"
     
-    # Create a temporary list of folders to include (everything except lib)
+    # Create a temporary list of folders to include (explicit whitelist)
     local temp_include_list
     temp_include_list=$(mktemp)
     
-    # List all items in venv_path, exclude lib directory
-    for item in "$venv_path"/*; do
-        if [ -e "$item" ]; then
-            local basename_item
-            basename_item=$(basename "$item")
-            if [ "$basename_item" != "lib" ]; then
-                echo "$basename_item" >> "$temp_include_list"
-            fi
+    # Define the folders/files we want to include (everything except lib)
+    local items_to_include=("bin" "include" "share" "pyvenv.cfg")
+    
+    # Only include items that actually exist in the venv
+    for item in "${items_to_include[@]}"; do
+        if [ -e "$venv_path/$item" ]; then
+            echo "$item" >> "$temp_include_list"
+            log_info "Including in zip: $item"
         fi
     done
     
