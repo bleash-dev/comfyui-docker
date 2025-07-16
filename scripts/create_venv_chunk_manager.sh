@@ -350,13 +350,38 @@ chunk_site_packages() {
     local venv_path="$1"
     local output_dir="$2"
     
-    local site_packages="$venv_path/lib/python${PYTHON_VERSION}/site-packages"
+    # Try to find the site-packages directory in different possible locations
+    local site_packages=""
+    local possible_paths=(
+        "$venv_path/lib/python${PYTHON_VERSION}/site-packages"
+        "$venv_path/comfyui/lib/python${PYTHON_VERSION}/site-packages"
+        "$venv_path/*/lib/python${PYTHON_VERSION}/site-packages"
+    )
     
-    if [ ! -d "$site_packages" ]; then
-        log_error "Site-packages directory not found: $site_packages"
+    for path in "${possible_paths[@]}"; do
+        # Handle glob expansion for the wildcard path
+        if [[ "$path" == *"*"* ]]; then
+            for expanded_path in $path; do
+                if [ -d "$expanded_path" ]; then
+                    site_packages="$expanded_path"
+                    break 2
+                fi
+            done
+        elif [ -d "$path" ]; then
+            site_packages="$path"
+            break
+        fi
+    done
+    
+    if [ -z "$site_packages" ] || [ ! -d "$site_packages" ]; then
+        log_error "Site-packages directory not found in venv: $venv_path"
+        log_error "Tried paths: ${possible_paths[*]}"
+        log_error "Available directories in venv:"
+        find "$venv_path" -type d -name "*python*" -o -name "*site-packages*" 2>/dev/null | head -10 || true
         return 1
     fi
     
+    log_info "Found site-packages at: $site_packages"
     log_info "Starting chunked compression of: $site_packages"
     log_info "Output directory: $output_dir"
     log_info "Chunk size: ${VENV_CHUNK_SIZE_MB}MB, Parallel jobs: $VENV_MAX_PARALLEL"
@@ -410,8 +435,40 @@ restore_site_packages() {
     local chunk_dir="$1"
     local venv_path="$2"
     
-    local site_packages="$venv_path/lib/python${PYTHON_VERSION}/site-packages"
+    # Try to find the site-packages directory in different possible locations
+    local site_packages=""
+    local possible_paths=(
+        "$venv_path/lib/python${PYTHON_VERSION}/site-packages"
+        "$venv_path/comfyui/lib/python${PYTHON_VERSION}/site-packages"
+        "$venv_path/*/lib/python${PYTHON_VERSION}/site-packages"
+    )
     
+    for path in "${possible_paths[@]}"; do
+        # Handle glob expansion for the wildcard path
+        if [[ "$path" == *"*"* ]]; then
+            for expanded_path in $path; do
+                if [ -d "$(dirname "$expanded_path")" ]; then
+                    site_packages="$expanded_path"
+                    break 2
+                fi
+            done
+        elif [ -d "$(dirname "$path")" ]; then
+            site_packages="$path"
+            break
+        fi
+    done
+    
+    # If we still don't have a valid path, create the most likely one
+    if [ -z "$site_packages" ]; then
+        # Check if comfyui subdirectory exists
+        if [ -d "$venv_path/comfyui" ]; then
+            site_packages="$venv_path/comfyui/lib/python${PYTHON_VERSION}/site-packages"
+        else
+            site_packages="$venv_path/lib/python${PYTHON_VERSION}/site-packages"
+        fi
+    fi
+    
+    log_info "Target site-packages: $site_packages"
     log_info "Starting chunked restoration to: $site_packages"
     log_info "Source directory: $chunk_dir"
     
@@ -555,7 +612,12 @@ download_chunks() {
     local max_jobs=$VENV_MAX_PARALLEL
     local job_count=0
     
-    echo "$chunk_files" | while IFS= read -r filename; do
+    # Use a temporary file to avoid pipeline issues
+    local temp_file_list
+    temp_file_list=$(mktemp)
+    echo "$chunk_files" > "$temp_file_list"
+    
+    while IFS= read -r filename; do
         if [ -z "$filename" ]; then
             continue
         fi
@@ -585,7 +647,10 @@ download_chunks() {
         ) &
         pids+=($!)
         job_count=$((job_count + 1))
-    done
+    done < "$temp_file_list"
+    
+    # Clean up temp file
+    rm -f "$temp_file_list"
     
     # Wait for all downloads
     if [ ${#pids[@]} -gt 0 ]; then
