@@ -616,6 +616,72 @@ download_chunks() {
     log_info "Successfully downloaded all chunks"
 }
 
+# High-level wrapper functions for common operations
+chunk_and_upload_venv() {
+    local venv_path="$1"
+    local s3_path="$2"
+    local sync_type="${3:-venv_sync}"
+    
+    log_info "Starting chunked venv upload: $venv_path -> $s3_path"
+    
+    # Create temporary directory for chunks
+    local temp_chunks_dir
+    temp_chunks_dir=$(mktemp -d)
+    
+    # Chunk the venv
+    if chunk_site_packages "$venv_path" "$temp_chunks_dir"; then
+        log_info "Venv chunking successful, uploading to S3..."
+        
+        # Upload chunks
+        if upload_chunks "$temp_chunks_dir" "$s3_path"; then
+            log_info "Successfully uploaded chunked venv"
+            # Clean up temporary chunks
+            rm -rf "$temp_chunks_dir"
+            return 0
+        else
+            log_error "Failed to upload chunks"
+            rm -rf "$temp_chunks_dir"
+            return 1
+        fi
+    else
+        log_error "Failed to chunk venv"
+        rm -rf "$temp_chunks_dir"
+        return 1
+    fi
+}
+
+download_and_reassemble_venv() {
+    local s3_path="$1"
+    local venv_path="$2"
+    
+    log_info "Starting chunked venv download: $s3_path -> $venv_path"
+    
+    # Create temporary directory for chunks
+    local temp_chunks_dir
+    temp_chunks_dir=$(mktemp -d)
+    
+    # Download chunks
+    if download_chunks "$s3_path" "$temp_chunks_dir"; then
+        log_info "Chunks downloaded successfully, reassembling venv..."
+        
+        # Restore the venv from chunks
+        if restore_site_packages "$temp_chunks_dir" "$venv_path"; then
+            log_info "Successfully reassembled venv from chunks"
+            # Clean up temporary chunks
+            rm -rf "$temp_chunks_dir"
+            return 0
+        else
+            log_error "Failed to reassemble venv from chunks"
+            rm -rf "$temp_chunks_dir"
+            return 1
+        fi
+    else
+        log_error "Failed to download chunks"
+        rm -rf "$temp_chunks_dir"
+        return 1
+    fi
+}
+
 # Main command interface
 main() {
     local command="$1"
