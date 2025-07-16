@@ -278,4 +278,3 @@ else
 fi
 
 echo "✅ All components setup complete"
-echo "✅ All components setup complete"

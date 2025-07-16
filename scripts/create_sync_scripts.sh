@@ -166,15 +166,16 @@ chmod +x "$NETWORK_VOLUME/scripts/sync_user_data.sh"
 cat > "$NETWORK_VOLUME/scripts/sync_user_shared_data.sh" << 'EOF'
 #!/bin/bash
 # Sync user-shared data to S3 (data that persists across different pods for the same user)
-# This script first archives all relevant folders, then uploads with progress tracking.
+# This script uses optimized chunking for venv and archives for other folders.
 
-# Source the sync lock manager, API client, and model sync integration for progress notifications
+# Source the sync lock manager, API client, model sync integration, and venv chunk manager
 source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
 source "$NETWORK_VOLUME/scripts/api_client.sh"
 source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
+source "$NETWORK_VOLUME/scripts/venv_chunk_manager.sh"
 
 sync_user_shared_data_internal() {
-    echo "🔄 Syncing user-shared data to S3 (archived)..."
+    echo "🔄 Syncing user-shared data to S3 (optimized)..."
 
     # Send initial progress notification and ensure tools are available
     notify_sync_progress "user_data" "PROGRESS" 0
@@ -182,13 +183,43 @@ sync_user_shared_data_internal() {
     S3_USER_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/shared"
     S3_USER_COMFYUI_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/ComfyUI/shared"
 
-    USER_SHARED_FOLDERS_TO_ARCHIVE=("venv" ".comfyui" ".cache")
+    # Separate venv handling from other folders for optimization
+    OTHER_SHARED_FOLDERS=(".comfyui" ".cache")
     COMFYUI_USER_SHARED_FOLDERS_TO_ARCHIVE=("custom_nodes")
 
     declare -A ARCHIVES_TO_UPLOAD
 
-    echo "🗜️ Archiving user-shared folders..."
-    for folder_name in "${USER_SHARED_FOLDERS_TO_ARCHIVE[@]}"; do
+    # Handle venv with chunked optimization
+    local venv_dir="$NETWORK_VOLUME/venv"
+    if [[ -d "$venv_dir" ]] && [[ -n "$(find "$venv_dir" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+        echo "📦 Processing venv with chunked optimization..."
+        notify_sync_progress "user_data" "PROGRESS" 10
+        
+        # Use chunked upload for venv
+        local s3_venv_chunks_path="$S3_USER_SHARED_BASE/venv_chunks"
+        if chunk_and_upload_venv "$venv_dir" "$s3_venv_chunks_path" "user_data"; then
+            echo "  ✅ Successfully uploaded venv using chunked method"
+        else
+            echo "  ⚠️ Chunked venv upload failed, falling back to traditional archive method"
+            # Fallback to traditional archiving
+            local archive_name="venv.tar.gz"
+            local temp_archive_path="/tmp/user_shared_${archive_name}"
+            echo "  🗜️ Compressing venv with traditional method..."
+            if tar -czf "$temp_archive_path" -C "$NETWORK_VOLUME" "venv"; then
+                ARCHIVES_TO_UPLOAD["$temp_archive_path"]="$S3_USER_SHARED_BASE/$archive_name"
+                echo "  📝 Added venv to upload queue (fallback method)"
+            else
+                echo "  ❌ Failed to compress venv"
+            fi
+        fi
+    else
+        echo "  ⏭️ Skipping venv (missing or empty)"
+    fi
+
+    notify_sync_progress "user_data" "PROGRESS" 40
+
+    echo "🗜️ Archiving other user-shared folders..."
+    for folder_name in "${OTHER_SHARED_FOLDERS[@]}"; do
         local_folder_path="$NETWORK_VOLUME/$folder_name"
         safe_folder_name="${folder_name#.}"
         [[ "$folder_name" == .* ]] && safe_folder_name="_${safe_folder_name}"
@@ -197,8 +228,12 @@ sync_user_shared_data_internal() {
 
         if [[ -d "$local_folder_path" ]] && [[ -n "$(find "$local_folder_path" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
             echo "  🗜️ Compressing $folder_name..."
-            tar -czf "$temp_archive_path" -C "$NETWORK_VOLUME" "$folder_name"
-            ARCHIVES_TO_UPLOAD["$temp_archive_path"]="$S3_USER_SHARED_BASE/$archive_name"
+            if tar -czf "$temp_archive_path" -C "$NETWORK_VOLUME" "$folder_name"; then
+                ARCHIVES_TO_UPLOAD["$temp_archive_path"]="$S3_USER_SHARED_BASE/$archive_name"
+            else
+                echo "  ❌ Failed to compress $folder_name"
+                rm -f "$temp_archive_path"
+            fi
         else
             echo "  ⏭️ Skipping $folder_name (missing or empty)"
         fi
@@ -212,36 +247,49 @@ sync_user_shared_data_internal() {
 
         if [[ -d "$local_folder_path" ]] && [[ -n "$(find "$local_folder_path" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
             echo "  🗜️ Compressing ComfyUI/$folder_name..."
-            tar -czf "$temp_archive_path" -C "$NETWORK_VOLUME/ComfyUI" "$folder_name"
-            ARCHIVES_TO_UPLOAD["$temp_archive_path"]="$S3_USER_COMFYUI_SHARED_BASE/$archive_name"
+            if tar -czf "$temp_archive_path" -C "$NETWORK_VOLUME/ComfyUI" "$folder_name"; then
+                ARCHIVES_TO_UPLOAD["$temp_archive_path"]="$S3_USER_COMFYUI_SHARED_BASE/$archive_name"
+            else
+                echo "  ❌ Failed to compress ComfyUI/$folder_name"
+                rm -f "$temp_archive_path"
+            fi
         else
             echo "  ⏭️ Skipping ComfyUI/$folder_name (missing or empty)"
         fi
     done
 
+    notify_sync_progress "user_data" "PROGRESS" 60
+
     total_archives=${#ARCHIVES_TO_UPLOAD[@]}
-    processed_archives=0
+    
+    if [ "$total_archives" -gt 0 ]; then
+        processed_archives=0
 
-    echo "📤 Uploading archived user-shared data to S3 ($total_archives total)..."
-    for archive_path in "${!ARCHIVES_TO_UPLOAD[@]}"; do
-        s3_dest="${ARCHIVES_TO_UPLOAD[$archive_path]}"
-        archive_name="$(basename "$archive_path")"
+        echo "📤 Uploading archived user-shared data to S3 ($total_archives total)..."
+        for archive_path in "${!ARCHIVES_TO_UPLOAD[@]}"; do
+            s3_dest="${ARCHIVES_TO_UPLOAD[$archive_path]}"
+            archive_name="$(basename "$archive_path")"
 
-        echo "  📤 Uploading $archive_name to $s3_dest..."
-        if sync_to_s3_with_progress "$archive_path" "$s3_dest" "user_data" $((processed_archives + 1)) "$total_archives" "cp"; then
-            echo "  ✅ Successfully uploaded $archive_name"
-        else
-            echo "  ❌ Failed to upload $archive_name"
-        fi
-        rm -f "$archive_path"
+            echo "  📤 Uploading $archive_name to $s3_dest..."
+            if sync_to_s3_with_progress "$archive_path" "$s3_dest" "user_data" $((processed_archives + 1)) "$total_archives" "cp"; then
+                echo "  ✅ Successfully uploaded $archive_name"
+            else
+                echo "  ❌ Failed to upload $archive_name"
+            fi
+            rm -f "$archive_path"
 
-        processed_archives=$((processed_archives + 1))
-        progress=$((processed_archives * 100 / total_archives))
-        notify_sync_progress "user_data" "PROGRESS" "$progress"
-    done
+            processed_archives=$((processed_archives + 1))
+            # Calculate progress from 60% to 95%
+            local upload_progress=$((60 + (processed_archives * 35 / total_archives)))
+            notify_sync_progress "user_data" "PROGRESS" "$upload_progress"
+        done
+    else
+        echo "ℹ️ No additional archives to upload"
+        notify_sync_progress "user_data" "PROGRESS" 95
+    fi
 
     notify_sync_progress "user_data" "DONE" 100
-    echo "✅ User-shared data archive sync completed"
+    echo "✅ User-shared data sync completed (optimized)"
 }
 
 # Execute sync with lock management

@@ -1,10 +1,10 @@
 #!/bin/bash
-# Sync user data from S3 on startup using archives
+# Sync user data from S3 on startup using archives and optimized venv chunking
 
 # Optional but recommended:
 # set -uo pipefail
 
-echo "📥 Syncing user data from S3 (archives)..."
+echo "📥 Syncing user data from S3 (optimized)..."
 
 # --- Configuration & Validation ---
 required_vars=("AWS_BUCKET_NAME" "POD_USER_NAME" "POD_ID" "NETWORK_VOLUME")
@@ -17,6 +17,15 @@ done
 
 mkdir -p "$NETWORK_VOLUME"
 mkdir -p "$NETWORK_VOLUME/ComfyUI"
+
+# Source venv chunk manager if available
+if [ -f "$NETWORK_VOLUME/scripts/venv_chunk_manager.sh" ]; then
+    source "$NETWORK_VOLUME/scripts/venv_chunk_manager.sh"
+    VENV_CHUNKS_AVAILABLE=true
+else
+    echo "⚠️ Venv chunk manager not found, using traditional method"
+    VENV_CHUNKS_AVAILABLE=false
+fi
 
 # --- Helper Function: Download and Extract ---
 download_and_extract() {
@@ -60,6 +69,42 @@ download_and_extract() {
     echo "" 
 }
 
+# --- Helper Function: Download and Restore Chunked Venv ---
+download_and_restore_chunked_venv() {
+    local s3_chunks_base="$1"
+    local local_venv_dir="$2"
+    local description="$3"
+
+    echo "ℹ️ Checking for chunked $description: $s3_chunks_base"
+
+    # Check if chunks are available
+    if aws s3 ls "$s3_chunks_base/" >/dev/null 2>&1; then
+        local chunks_found
+        chunks_found=$(aws s3 ls "$s3_chunks_base/" | grep "chunk-.*\.tar\.gz$" | wc -l)
+        
+        if [ "$chunks_found" -gt 0 ]; then
+            echo "  📦 Found $chunks_found venv chunks, using optimized download..."
+            
+            if [ "$VENV_CHUNKS_AVAILABLE" = "true" ]; then
+                # Use optimized chunked download
+                if download_and_reassemble_venv "$s3_chunks_base" "$local_venv_dir"; then
+                    echo "  ✅ Successfully restored $description using chunked method"
+                    return 0
+                else
+                    echo "  ⚠️ Chunked restoration failed, will try fallback method"
+                fi
+            else
+                echo "  ⚠️ Chunk manager not available, skipping chunked download"
+            fi
+        else
+            echo "  ⏭️ No chunks found at $s3_chunks_base"
+        fi
+    else
+        echo "  ⏭️ Chunked $description not found at $s3_chunks_base"
+    fi
+    
+    return 1
+}
 
 # --- Define S3 Base Paths and Archive Names (mirroring the upload script) ---
 S3_POD_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID"
@@ -67,15 +112,32 @@ COMFYUI_POD_SPECIFIC_ARCHIVE_S3_PATH="$S3_POD_BASE/comfyui_pod_specific_data.tar
 OTHER_POD_SPECIFIC_ARCHIVE_S3_PATH="$S3_POD_BASE/other_pod_specific_data.tar.gz"
 
 S3_USER_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/shared"
-# CORRECTED to match upload script for .comfyui -> _comfyui.tar.gz
-USER_SHARED_ARCHIVE_FILES=("venv.tar.gz" "_comfyui.tar.gz" "_cache.tar.gz") 
-
 S3_USER_COMFYUI_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/ComfyUI/shared"
-COMFYUI_USER_SHARED_ARCHIVE_FILES=("custom_nodes.tar.gz") 
+COMFYUI_USER_SHARED_ARCHIVE_FILES=("custom_nodes.tar.gz")
+
+# Updated archive list without venv (handled separately)
+OTHER_USER_SHARED_ARCHIVE_FILES=("_comfyui.tar.gz" "_cache.tar.gz")
 
 # --- Restore Order ---
-echo "--- Restoring User-Shared Data ---"
-for archive_filename in "${USER_SHARED_ARCHIVE_FILES[@]}"; do
+echo "--- Restoring Virtual Environment (Optimized) ---"
+# Try chunked venv first, fall back to traditional archive
+local venv_restored=false
+if download_and_restore_chunked_venv \
+    "$S3_USER_SHARED_BASE/venv_chunks" \
+    "$NETWORK_VOLUME/venv" \
+    "user venv (chunked)"; then
+    venv_restored=true
+else
+    echo "  🔄 Falling back to traditional venv archive..."
+    download_and_extract \
+        "$S3_USER_SHARED_BASE/venv.tar.gz" \
+        "$NETWORK_VOLUME" \
+        "User-shared 'venv' data (fallback)"
+    venv_restored=true
+fi
+
+echo "--- Restoring Other User-Shared Data ---"
+for archive_filename in "${OTHER_USER_SHARED_ARCHIVE_FILES[@]}"; do
     folder_description="${archive_filename%.tar.gz}" 
     # For _comfyui.tar.gz, folder_description becomes "_comfyui". 
     # If you want it to log ".comfyui", you'd need a small mapping or string replacement here.
@@ -108,4 +170,4 @@ download_and_extract \
     "$NETWORK_VOLUME" \
     "Other pod-specific data"
 
-echo "✅ User data sync from S3 (archives) completed."
+echo "✅ User data sync from S3 (optimized) completed."

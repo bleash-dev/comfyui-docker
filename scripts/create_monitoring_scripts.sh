@@ -47,6 +47,9 @@ fi
 [ -f "$NETWORK_VOLUME/.model_discovery.log" ] && cp "$NETWORK_VOLUME/.model_discovery.log" "$LOCAL_LOG_DIR/"
 [ -f "$NETWORK_VOLUME/.initial_model_sync.log" ] && cp "$NETWORK_VOLUME/.initial_model_sync.log" "$LOCAL_LOG_DIR/"
 
+# Collect venv chunk manager logs
+[ -f "$NETWORK_VOLUME/.venv_chunk_manager.log" ] && cp "$NETWORK_VOLUME/.venv_chunk_manager.log" "$LOCAL_LOG_DIR/"
+
 # Collect API and model management logs
 [ -f "$NETWORK_VOLUME/.api_client.log" ] && cp "$NETWORK_VOLUME/.api_client.log" "$LOCAL_LOG_DIR/"
 [ -f "$NETWORK_VOLUME/.model_config_manager.log" ] && cp "$NETWORK_VOLUME/.model_config_manager.log" "$LOCAL_LOG_DIR/"

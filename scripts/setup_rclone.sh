@@ -21,6 +21,18 @@ mkdir -p "$NETWORK_VOLUME/scripts"
 AWS_CACHE_DIR="$NETWORK_VOLUME/.cache/aws"
 mkdir -p "$AWS_CACHE_DIR"
 
+# Create virtual environment chunk manager early - needed by other scripts
+echo "🔧 Creating virtual environment chunk manager..."
+if [ -f "$SCRIPT_DIR/create_venv_chunk_manager.sh" ]; then
+    if ! bash "$SCRIPT_DIR/create_venv_chunk_manager.sh"; then
+        echo "❌ CRITICAL: Failed to create virtual environment chunk manager."
+        exit 1
+    fi
+    echo "  ✅ Virtual environment chunk manager created/configured."
+else
+    echo "⚠️ WARNING: create_venv_chunk_manager.sh not found in $SCRIPT_DIR"
+fi
+
 # Validate required environment variables
 required_vars=("AWS_BUCKET_NAME" "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" "AWS_REGION" "POD_USER_NAME" "POD_ID")
 for var in "${required_vars[@]}"; do
@@ -162,6 +174,16 @@ rm -f "$test_local_file"
 
 # Create all sync and utility scripts
 echo "📝 Creating/configuring dynamic scripts..."
+
+# Create venv chunk manager first, as it may be needed by other scripts
+if [ -f "$SCRIPT_DIR/create_venv_chunk_manager.sh" ]; then
+    if ! bash "$SCRIPT_DIR/create_venv_chunk_manager.sh"; then
+        echo "❌ CRITICAL: Failed to create venv chunk manager."
+        exit 1
+    fi
+    echo "  ✅ Venv chunk manager created/configured."
+fi
+
 if [ -f "$SCRIPT_DIR/create_sync_scripts.sh" ]; then
     if ! bash "$SCRIPT_DIR/create_sync_scripts.sh"; then
         echo "❌ CRITICAL: Failed to create sync scripts."
