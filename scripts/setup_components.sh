@@ -252,21 +252,6 @@ if [ -s "$CONSOLIDATED_REQUIREMENTS" ]; then
         fi
     done
     
-    # Run install.py for any custom nodes from nodes.txt
-    if [ -f "$NETWORK_VOLUME/ComfyUI/nodes.txt" ]; then
-        echo "Running install.py scripts for custom nodes from nodes.txt..."
-        while IFS= read -r repo_url; do
-            [[ -z "$repo_url" || "$repo_url" =~ ^[[:space:]]*# ]] && continue
-            repo_name=$(basename "$repo_url" .git)
-            if [ -f "$repo_name/install.py" ]; then
-                echo "Running install.py for $repo_name..."
-                cd "$repo_name"
-                python install.py || echo "⚠️ $repo_name install.py failed"
-                cd "$custom_nodes_dir"
-            fi
-        done < "$NETWORK_VOLUME/ComfyUI/nodes.txt"
-    fi
-    
     deactivate
     
     # Cleanup

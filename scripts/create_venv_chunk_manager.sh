@@ -361,51 +361,24 @@ verify_checksums() {
 }
 
 # Main functions
-chunk_site_packages() {
+chunk_venv() {
     local venv_path="$1"
     local output_dir="$2"
     
-    # Try to find the site-packages directory in different possible locations
-    local site_packages=""
-    local possible_paths=(
-        "$venv_path/lib/python${PYTHON_VERSION}/site-packages"
-        "$venv_path/comfyui/lib/python${PYTHON_VERSION}/site-packages"
-        "$venv_path/*/lib/python${PYTHON_VERSION}/site-packages"
-    )
-    
-    for path in "${possible_paths[@]}"; do
-        # Handle glob expansion for the wildcard path
-        if [[ "$path" == *"*"* ]]; then
-            for expanded_path in $path; do
-                if [ -d "$expanded_path" ]; then
-                    site_packages="$expanded_path"
-                    break 2
-                fi
-            done
-        elif [ -d "$path" ]; then
-            site_packages="$path"
-            break
-        fi
-    done
-    
-    if [ -z "$site_packages" ] || [ ! -d "$site_packages" ]; then
-        log_error "Site-packages directory not found in venv: $venv_path"
-        log_error "Tried paths: ${possible_paths[*]}"
-        log_error "Available directories in venv:"
-        find "$venv_path" -type d -name "*python*" -o -name "*site-packages*" 2>/dev/null | head -10 || true
+    if [ ! -d "$venv_path" ]; then
+        log_error "Venv directory not found: $venv_path"
         return 1
     fi
     
-    log_info "Found site-packages at: $site_packages"
-    log_info "Starting chunked compression of: $site_packages"
+    log_info "Starting chunked compression of entire venv: $venv_path"
     log_info "Output directory: $output_dir"
     log_info "Chunk size: ${VENV_CHUNK_SIZE_MB}MB, Parallel jobs: $VENV_MAX_PARALLEL"
     
     mkdir -p "$output_dir"
     
-    # Calculate source checksum for change detection
+    # Calculate source checksum for change detection (entire venv)
     local source_checksum
-    source_checksum=$(calculate_directory_checksum "$site_packages")
+    source_checksum=$(calculate_directory_checksum "$venv_path")
     
     # Check if we have existing chunks with same source checksum
     local source_checksum_file="$output_dir/source.checksum"
@@ -422,15 +395,15 @@ chunk_site_packages() {
     rm -f "$output_dir"/${CHUNK_PREFIX}*.tar.gz
     rm -f "$output_dir/$CHECKSUM_FILE"
     
-    # Create chunks in parallel
-    if process_chunks_parallel "create" "$site_packages" "$output_dir" ""; then
+    # Create chunks in parallel from entire venv
+    if process_chunks_parallel "create" "$venv_path" "$output_dir" ""; then
         # Generate checksums
         generate_checksums "$output_dir" "$output_dir/$CHECKSUM_FILE"
         
         # Save source checksum
         echo "$source_checksum" > "$source_checksum_file"
         
-        log_info "Successfully created chunked site-packages"
+        log_info "Successfully created chunked venv"
         
         # Log statistics
         local chunk_count
@@ -446,45 +419,20 @@ chunk_site_packages() {
     fi
 }
 
-restore_site_packages() {
+# Legacy function name for backward compatibility - now chunks entire venv
+chunk_site_packages() {
+    local venv_path="$1"
+    local output_dir="$2"
+    
+    log_info "Note: chunk_site_packages now chunks entire venv for completeness"
+    chunk_venv "$venv_path" "$output_dir"
+}
+
+restore_venv() {
     local chunk_dir="$1"
     local venv_path="$2"
     
-    # Try to find the site-packages directory in different possible locations
-    local site_packages=""
-    local possible_paths=(
-        "$venv_path/lib/python${PYTHON_VERSION}/site-packages"
-        "$venv_path/comfyui/lib/python${PYTHON_VERSION}/site-packages"
-        "$venv_path/*/lib/python${PYTHON_VERSION}/site-packages"
-    )
-    
-    for path in "${possible_paths[@]}"; do
-        # Handle glob expansion for the wildcard path
-        if [[ "$path" == *"*"* ]]; then
-            for expanded_path in $path; do
-                if [ -d "$(dirname "$expanded_path")" ]; then
-                    site_packages="$expanded_path"
-                    break 2
-                fi
-            done
-        elif [ -d "$(dirname "$path")" ]; then
-            site_packages="$path"
-            break
-        fi
-    done
-    
-    # If we still don't have a valid path, create the most likely one
-    if [ -z "$site_packages" ]; then
-        # Check if comfyui subdirectory exists
-        if [ -d "$venv_path/comfyui" ]; then
-            site_packages="$venv_path/comfyui/lib/python${PYTHON_VERSION}/site-packages"
-        else
-            site_packages="$venv_path/lib/python${PYTHON_VERSION}/site-packages"
-        fi
-    fi
-    
-    log_info "Target site-packages: $site_packages"
-    log_info "Starting chunked restoration to: $site_packages"
+    log_info "Starting chunked restoration of entire venv to: $venv_path"
     log_info "Source directory: $chunk_dir"
     
     # Verify chunks exist
@@ -504,22 +452,36 @@ restore_site_packages() {
     fi
     
     # Create target directory
-    mkdir -p "$site_packages"
+    mkdir -p "$venv_path"
     
-    # Extract chunks in parallel
-    if process_chunks_parallel "extract" "$chunk_dir" "$site_packages" ""; then
-        log_info "Successfully restored chunked site-packages"
+    # Extract chunks in parallel to restore entire venv
+    if process_chunks_parallel "extract" "$chunk_dir" "$venv_path" ""; then
+        log_info "Successfully restored chunked venv"
         
         # Log statistics
         local chunk_count
         chunk_count=$(ls "$chunk_dir"/${CHUNK_PREFIX}*.tar.gz 2>/dev/null | wc -l)
-        log_info "Restored $chunk_count chunks to: $site_packages"
+        log_info "Restored $chunk_count chunks to: $venv_path"
+        
+        # Make sure executables are executable
+        if [ -d "$venv_path/bin" ]; then
+            chmod +x "$venv_path/bin"/* 2>/dev/null || true
+        fi
         
         return 0
     else
         log_error "Failed to restore chunks"
         return 1
     fi
+}
+
+# Legacy function name for backward compatibility - now restores entire venv
+restore_site_packages() {
+    local chunk_dir="$1"
+    local venv_path="$2"
+    
+    log_info "Note: restore_site_packages now restores entire venv for completeness"
+    restore_venv "$chunk_dir" "$venv_path"
 }
 
 # Upload chunks to cloud storage
@@ -639,7 +601,7 @@ upload_chunks() {
     
     # Notify completion for user_shared uploads
     if [ "$sync_type" = "user_shared" ]; then
-        notify_sync_progress "user_shared" "PROGRESS" 100
+        notify_sync_progress "user_shared" "DONE" 100
     fi
     
     log_info "Successfully uploaded all chunks"
@@ -750,7 +712,7 @@ chunk_and_upload_venv() {
     temp_chunks_dir=$(mktemp -d)
     
     # Chunk the venv
-    if chunk_site_packages "$venv_path" "$temp_chunks_dir"; then
+    if chunk_venv "$venv_path" "$temp_chunks_dir"; then
         log_info "Venv chunking successful, uploading to S3..."
         
         # Upload chunks
@@ -786,7 +748,7 @@ download_and_reassemble_venv() {
         log_info "Chunks downloaded successfully, reassembling venv..."
         
         # Restore the venv from chunks
-        if restore_site_packages "$temp_chunks_dir" "$venv_path"; then
+        if restore_venv "$temp_chunks_dir" "$venv_path"; then
             log_info "Successfully reassembled venv from chunks"
             # Clean up temporary chunks
             rm -rf "$temp_chunks_dir"
@@ -819,7 +781,7 @@ main() {
                 log_error "Usage: $0 chunk <venv_path> <output_dir>"
                 exit 1
             fi
-            chunk_site_packages "$1" "$2"
+            chunk_venv "$1" "$2"
             ;;
             
         "restore")
@@ -827,7 +789,7 @@ main() {
                 log_error "Usage: $0 restore <chunk_dir> <venv_path>"
                 exit 1
             fi
-            restore_site_packages "$1" "$2"
+            restore_venv "$1" "$2"
             ;;
             
         "upload")
@@ -858,8 +820,8 @@ main() {
             echo "Usage: $0 {chunk|restore|upload|download|verify} [args...]"
             echo ""
             echo "Commands:"
-            echo "  chunk <venv_path> <output_dir>     - Create chunks from venv site-packages"
-            echo "  restore <chunk_dir> <venv_path>    - Restore chunks to venv site-packages"
+            echo "  chunk <venv_path> <output_dir>     - Create chunks from entire venv"
+            echo "  restore <chunk_dir> <venv_path>    - Restore chunks to entire venv"
             echo "  upload <chunk_dir> <s3_path>       - Upload chunks to S3"
             echo "  download <s3_path> <chunk_dir>     - Download chunks from S3"
             echo "  verify <chunk_dir> <checksum_file> - Verify chunk integrity"
