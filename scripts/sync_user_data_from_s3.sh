@@ -132,7 +132,7 @@ echo "--- Restoring Virtual Environment (Optimized) ---"
 venv_restored=false
 if download_and_restore_chunked_venv \
     "$S3_USER_SHARED_BASE/venv_chunks" \
-    "$NETWORK_VOLUME/venv" \
+    "$NETWORK_VOLUME/venv/comfyui" \
     "user venv (chunked)"; then
     venv_restored=true
     echo "  ✅ Chunked venv restoration successful"

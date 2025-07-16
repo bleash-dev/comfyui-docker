@@ -190,7 +190,7 @@ sync_user_shared_data_internal() {
     declare -A ARCHIVES_TO_UPLOAD
 
     # Handle venv with chunked optimization
-    local venv_dir="$NETWORK_VOLUME/venv"
+    local venv_dir="$NETWORK_VOLUME/venv/comfyui"
     if [[ -d "$venv_dir" ]] && [[ -n "$(find "$venv_dir" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
         echo "📦 Processing venv with chunked optimization..."
         notify_sync_progress "user_data" "PROGRESS" 10

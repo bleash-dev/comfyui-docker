@@ -24,6 +24,7 @@ VENV_LOG_FILE="${VENV_LOG_FILE:-$NETWORK_VOLUME/.venv_chunk_manager.log}"
 # Internal configuration
 CHUNK_PREFIX="venv_chunk_"
 CHECKSUM_FILE="venv_chunks.checksums"
+VENV_OTHER_ZIP="venv_other_folders.zip"
 
 # Logging functions
 log() {
@@ -68,7 +69,7 @@ trap cleanup_temp EXIT INT TERM
 check_dependencies() {
     local missing_deps=()
     
-    for cmd in tar gzip split cat awk; do
+    for cmd in tar gzip split cat awk zip unzip; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
             missing_deps+=("$cmd")
         fi
@@ -93,25 +94,34 @@ calculate_directory_checksum() {
     find "$dir" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
 }
 
-# Generate chunk list from site-packages
+# Generate chunk list from lib directory only
 generate_chunk_list() {
-    local site_packages="$1"
+    local venv_path="$1"
     local chunk_size_bytes=$((VENV_CHUNK_SIZE_MB * 1024 * 1024))
     local current_chunk=1
     local current_size=0
     local chunk_file
     
-    log_info "Generating chunk list for: $site_packages"
+    # Look for lib directory in venv
+    local lib_dir=""
+    if [ -d "$venv_path/lib" ]; then
+        lib_dir="$venv_path/lib"
+    else
+        log_error "No lib directory found in venv: $venv_path"
+        return 1
+    fi
+    
+    log_info "Generating chunk list for lib directory: $lib_dir"
     
     # Create temporary directory for chunk lists
     local TEMP_DIR
     TEMP_DIR=$(mktemp -d)
     chunk_file="$TEMP_DIR/chunk_${current_chunk}.list"
     
-    # Find all files and process them (avoid pipeline to preserve variables)
+    # Find all files in lib directory and process them
     local temp_file_list
     temp_file_list=$(mktemp)
-    find "$site_packages" -type f > "$temp_file_list"
+    find "$lib_dir" -type f > "$temp_file_list"
     
     while IFS= read -r file; do
         if [ ! -e "$file" ]; then
@@ -136,6 +146,115 @@ generate_chunk_list() {
     
     # Output the temporary directory path
     echo "$TEMP_DIR"
+}
+
+# Create zip archive of non-lib folders
+create_other_folders_zip() {
+    local venv_path="$1"
+    local output_file="$2"
+    
+    if [ ! -d "$venv_path" ]; then
+        log_error "Venv directory not found: $venv_path"
+        return 1
+    fi
+    
+    log_info "Creating zip of non-lib folders: $output_file"
+    
+    # Create a temporary list of folders to include (everything except lib)
+    local temp_include_list
+    temp_include_list=$(mktemp)
+    
+    # List all items in venv_path, exclude lib directory
+    for item in "$venv_path"/*; do
+        if [ -e "$item" ]; then
+            local basename_item
+            basename_item=$(basename "$item")
+            if [ "$basename_item" != "lib" ]; then
+                echo "$basename_item" >> "$temp_include_list"
+            fi
+        fi
+    done
+    
+    # Check if we have anything to zip
+    if [ ! -s "$temp_include_list" ]; then
+        log_info "No non-lib folders found to zip"
+        rm -f "$temp_include_list"
+        # Create empty zip file for consistency
+        echo | zip -q "$output_file" -
+        return 0
+    fi
+    
+    # Create zip archive of all non-lib items
+    if command -v zip >/dev/null 2>&1; then
+        cd "$venv_path" && zip -r "$output_file" $(cat "$temp_include_list") >/dev/null 2>&1
+        local zip_result=$?
+        cd - >/dev/null
+        
+        if [ $zip_result -eq 0 ]; then
+            log_info "Successfully created other folders zip: $output_file ($(du -h "$output_file" | cut -f1))"
+        else
+            log_error "Failed to create zip archive"
+            rm -f "$temp_include_list"
+            return 1
+        fi
+    else
+        log_error "zip command not found"
+        rm -f "$temp_include_list"
+        return 1
+    fi
+    
+    rm -f "$temp_include_list"
+    return 0
+}
+
+# Extract other folders zip
+extract_other_folders_zip() {
+    local zip_file="$1"
+    local dest_dir="$2"
+    
+    if [ ! -f "$zip_file" ]; then
+        log_error "Zip file not found: $zip_file"
+        return 1
+    fi
+    
+    # Check if zip file is empty (just contains empty entry)
+    if [ ! -s "$zip_file" ]; then
+        log_info "Empty zip file, no other folders to extract"
+        return 0
+    fi
+    
+    log_info "Extracting other folders zip: $zip_file to $dest_dir"
+    
+    mkdir -p "$dest_dir"
+    
+    # Extract zip file
+    if command -v unzip >/dev/null 2>&1; then
+        if unzip -q "$zip_file" -d "$dest_dir" 2>/dev/null; then
+            log_info "Successfully extracted other folders zip"
+            
+            # Restore executable permissions for bin directory files
+            if [ -d "$dest_dir/bin" ]; then
+                log_info "Restoring executable permissions for bin directory"
+                chmod +x "$dest_dir/bin"/* 2>/dev/null || true
+            fi
+            
+            return 0
+        else
+            # Check if it's an empty zip (common case)
+            local zip_entries
+            zip_entries=$(unzip -l "$zip_file" 2>/dev/null | wc -l)
+            if [ "$zip_entries" -le 3 ]; then  # Header + footer only
+                log_info "Empty zip file, no other folders to extract"
+                return 0
+            else
+                log_error "Failed to extract zip archive"
+                return 1
+            fi
+        fi
+    else
+        log_error "unzip command not found"
+        return 1
+    fi
 }
 
 # Create compressed chunk from file list
@@ -246,6 +365,7 @@ process_chunks_parallel() {
                 return 1
             fi
             
+            # Process lib directory chunks
             for chunk_list in "$chunk_lists_dir"/chunk_*.list; do
                 if [ ! -f "$chunk_list" ]; then
                     continue
@@ -274,9 +394,16 @@ process_chunks_parallel() {
                 pids+=($!)
                 job_count=$((job_count + 1))
             done
+            
+            # Create zip of other folders
+            local other_zip_file="$dest_dir/$VENV_OTHER_ZIP"
+            create_other_folders_zip "$source_dir" "$other_zip_file" &
+            pids+=($!)
+            job_count=$((job_count + 1))
             ;;
             
         "extract")
+            # Extract lib directory chunks
             for chunk_file in "$source_dir"/${CHUNK_PREFIX}*.tar.gz; do
                 if [ ! -f "$chunk_file" ]; then
                     continue
@@ -301,6 +428,28 @@ process_chunks_parallel() {
                 pids+=($!)
                 job_count=$((job_count + 1))
             done
+            
+            # Extract other folders zip if it exists
+            local other_zip_file="$source_dir/$VENV_OTHER_ZIP"
+            if [ -f "$other_zip_file" ]; then
+                # Wait for a slot
+                while [ $job_count -ge $max_jobs ]; do
+                    if [ ${#pids[@]} -gt 0 ]; then
+                        for i in "${!pids[@]}"; do
+                            if ! kill -0 "${pids[$i]}" 2>/dev/null; then
+                                wait "${pids[$i]}" 2>/dev/null || true
+                                unset 'pids[i]'
+                                job_count=$((job_count - 1))
+                            fi
+                        done
+                    fi
+                    sleep 0.1
+                done
+                
+                extract_other_folders_zip "$other_zip_file" "$dest_dir" &
+                pids+=($!)
+                job_count=$((job_count + 1))
+            fi
             ;;
     esac
     
@@ -319,15 +468,16 @@ process_chunks_parallel() {
     log_info "All parallel $action operations completed"
 }
 
-# Generate checksums for chunks
+# Generate checksums for chunks and other folders zip
 generate_checksums() {
     local chunk_dir="$1"
     local checksum_file="$2"
     
-    log_info "Generating checksums for chunks in: $chunk_dir"
+    log_info "Generating checksums for chunks and other folders in: $chunk_dir"
     
     > "$checksum_file"  # Clear file
     
+    # Checksum chunk files
     for chunk_file in "$chunk_dir"/${CHUNK_PREFIX}*.tar.gz; do
         if [ -f "$chunk_file" ]; then
             local checksum
@@ -336,10 +486,18 @@ generate_checksums() {
         fi
     done
     
+    # Checksum other folders zip
+    local other_zip="$chunk_dir/$VENV_OTHER_ZIP"
+    if [ -f "$other_zip" ]; then
+        local checksum
+        checksum=$(sha256sum "$other_zip" | cut -d' ' -f1)
+        echo "$checksum $(basename "$other_zip")" >> "$checksum_file"
+    fi
+    
     log_info "Generated checksums: $checksum_file"
 }
 
-# Verify chunks against checksums
+# Verify chunks and other folders zip against checksums
 verify_checksums() {
     local chunk_dir="$1"
     local checksum_file="$2"
@@ -349,29 +507,29 @@ verify_checksums() {
         return 1
     fi
     
-    log_info "Verifying chunks against checksums"
+    log_info "Verifying chunks and other folders against checksums"
     
     local failed_count=0
     
     while IFS= read -r line; do
         local expected_checksum
-        local chunk_name
+        local file_name
         expected_checksum=$(echo "$line" | cut -d' ' -f1)
-        chunk_name=$(echo "$line" | cut -d' ' -f2-)
+        file_name=$(echo "$line" | cut -d' ' -f2-)
         
-        local chunk_file="$chunk_dir/$chunk_name"
+        local file_path="$chunk_dir/$file_name"
         
-        if [ ! -f "$chunk_file" ]; then
-            log_error "Missing chunk: $chunk_file"
+        if [ ! -f "$file_path" ]; then
+            log_error "Missing file: $file_path"
             failed_count=$((failed_count + 1))
             continue
         fi
         
         local actual_checksum
-        actual_checksum=$(sha256sum "$chunk_file" | cut -d' ' -f1)
+        actual_checksum=$(sha256sum "$file_path" | cut -d' ' -f1)
         
         if [ "$expected_checksum" != "$actual_checksum" ]; then
-            log_error "Checksum mismatch for $chunk_file"
+            log_error "Checksum mismatch for $file_path"
             log_error "Expected: $expected_checksum"
             log_error "Actual: $actual_checksum"
             failed_count=$((failed_count + 1))
@@ -379,100 +537,15 @@ verify_checksums() {
     done < "$checksum_file"
     
     if [ $failed_count -eq 0 ]; then
-        log_info "All chunk checksums verified successfully"
+        log_info "All checksums verified successfully"
         return 0
     else
-        log_error "Checksum verification failed for $failed_count chunks"
+        log_error "Checksum verification failed for $failed_count files"
         return 1
     fi
 }
 
-# Fix venv paths for cross-environment compatibility
-fix_venv_paths() {
-    local venv_path="$1"
-    
-    if [ ! -d "$venv_path" ]; then
-        log_error "Venv path does not exist: $venv_path"
-        return 1
-    fi
-    
-    log_info "Fixing venv paths for cross-environment compatibility: $venv_path"
-    
-    # Find the current Python executable
-    local current_python
-    current_python=$(which python3 || which python || echo "/usr/bin/python3")
-    
-    # Fix pyvenv.cfg to point to current Python home
-    if [ -f "$venv_path/pyvenv.cfg" ]; then
-        log_info "Updating pyvenv.cfg"
-        local python_home
-        python_home=$(dirname "$(dirname "$current_python")")
-        
-        # Update the home path in pyvenv.cfg
-        sed -i.bak "s|^home = .*|home = $python_home/bin|g" "$venv_path/pyvenv.cfg" 2>/dev/null || {
-            # Fallback for systems where sed -i needs empty string
-            sed -i '' "s|^home = .*|home = $python_home/bin|g" "$venv_path/pyvenv.cfg" 2>/dev/null || {
-                # Manual replacement if sed fails
-                local temp_file
-                temp_file=$(mktemp)
-                awk -v new_home="$python_home/bin" '
-                    /^home = / { print "home = " new_home; next }
-                    { print }
-                ' "$venv_path/pyvenv.cfg" > "$temp_file" && mv "$temp_file" "$venv_path/pyvenv.cfg"
-            }
-        }
-        rm -f "$venv_path/pyvenv.cfg.bak" 2>/dev/null || true
-    fi
-    
-    # Fix shebang lines in bin/ scripts
-    if [ -d "$venv_path/bin" ]; then
-        log_info "Fixing shebang lines in venv executables"
-        local venv_python="$venv_path/bin/python"
-        
-        for script in "$venv_path/bin"/*; do
-            if [ -f "$script" ] && [ -x "$script" ]; then
-                # Check if it's a script with a shebang
-                if head -1 "$script" 2>/dev/null | grep -q "^#!.*python"; then
-                    # Replace the shebang to point to the venv's python
-                    if command -v sed >/dev/null 2>&1; then
-                        sed -i.bak "1s|^#!.*python.*|#!$venv_python|" "$script" 2>/dev/null || {
-                            sed -i '' "1s|^#!.*python.*|#!$venv_python|" "$script" 2>/dev/null || {
-                                # Manual replacement
-                                local temp_file
-                                temp_file=$(mktemp)
-                                {
-                                    echo "#!$venv_python"
-                                    tail -n +2 "$script"
-                                } > "$temp_file" && mv "$temp_file" "$script"
-                                chmod +x "$script"
-                            }
-                        }
-                        rm -f "$script.bak" 2>/dev/null || true
-                    fi
-                fi
-            fi
-        done
-    fi
-    
-    # Recreate the python symlink to ensure it points correctly
-    if [ -f "$current_python" ]; then
-        local venv_python_version
-        venv_python_version=$(basename "$current_python")
-        
-        # Remove old symlinks
-        rm -f "$venv_path/bin/python" "$venv_path/bin/python3" 2>/dev/null || true
-        
-        # Create new symlinks
-        ln -sf "$current_python" "$venv_path/bin/$venv_python_version" 2>/dev/null || true
-        ln -sf "$venv_python_version" "$venv_path/bin/python3" 2>/dev/null || true
-        ln -sf "python3" "$venv_path/bin/python" 2>/dev/null || true
-        
-        log_info "Updated venv Python symlinks to point to: $current_python"
-    fi
-    
-    log_info "Venv path fixing completed"
-    return 0
-}
+
 
 # Main functions
 chunk_venv() {
@@ -484,7 +557,7 @@ chunk_venv() {
         return 1
     fi
     
-    log_info "Starting chunked compression of entire venv: $venv_path"
+    log_info "Starting chunked compression of venv lib directory and zipping other folders: $venv_path"
     log_info "Output directory: $output_dir"
     log_info "Chunk size: ${VENV_CHUNK_SIZE_MB}MB, Parallel jobs: $VENV_MAX_PARALLEL"
     
@@ -505,40 +578,45 @@ chunk_venv() {
         fi
     fi
     
-    # Clean old chunks
+    # Clean old chunks and zip files
     rm -f "$output_dir"/${CHUNK_PREFIX}*.tar.gz
     rm -f "$output_dir/$CHECKSUM_FILE"
+    rm -f "$output_dir/$VENV_OTHER_ZIP"
     
-    # Create chunks in parallel from entire venv
+    # Create chunks from lib directory and zip other folders in parallel
     if process_chunks_parallel "create" "$venv_path" "$output_dir" ""; then
-        # Generate checksums
+        # Generate checksums for both chunks and other zip
         generate_checksums "$output_dir" "$output_dir/$CHECKSUM_FILE"
         
         # Save source checksum
         echo "$source_checksum" > "$source_checksum_file"
         
-        log_info "Successfully created chunked venv"
+        log_info "Successfully created chunked venv (lib directory) and other folders zip"
         
         # Log statistics
         local chunk_count
         chunk_count=$(ls "$output_dir"/${CHUNK_PREFIX}*.tar.gz 2>/dev/null | wc -l)
         local total_size
         total_size=$(du -sh "$output_dir" | cut -f1)
-        log_info "Created $chunk_count chunks, total size: $total_size"
+        local other_zip_size=""
+        if [ -f "$output_dir/$VENV_OTHER_ZIP" ]; then
+            other_zip_size=" (Other folders zip: $(du -h "$output_dir/$VENV_OTHER_ZIP" | cut -f1))"
+        fi
+        log_info "Created $chunk_count lib chunks, total size: $total_size$other_zip_size"
         
         return 0
     else
-        log_error "Failed to create chunks"
+        log_error "Failed to create chunks and zip"
         return 1
     fi
 }
 
-# Legacy function name for backward compatibility - now chunks entire venv
+# Legacy function name for backward compatibility - now chunks lib directory and zips other folders
 chunk_site_packages() {
     local venv_path="$1"
     local output_dir="$2"
     
-    log_info "Note: chunk_site_packages now chunks entire venv for completeness"
+    log_info "Note: chunk_site_packages now chunks lib directory and zips other folders"
     chunk_venv "$venv_path" "$output_dir"
 }
 
@@ -546,7 +624,7 @@ restore_venv() {
     local chunk_dir="$1"
     local venv_path="$2"
     
-    log_info "Starting chunked restoration of entire venv to: $venv_path"
+    log_info "Starting restoration of venv from lib chunks and other folders zip to: $venv_path"
     log_info "Source directory: $chunk_dir"
     
     # Verify chunks exist
@@ -568,46 +646,47 @@ restore_venv() {
     # Create target directory
     mkdir -p "$venv_path"
     
-    # Extract chunks in parallel to restore entire venv
+    # Extract chunks (lib directory) and other folders zip in parallel
     if process_chunks_parallel "extract" "$chunk_dir" "$venv_path" ""; then
-        log_info "Successfully restored chunked venv"
+        log_info "Successfully restored venv from chunks and other folders zip"
         
         # Log statistics
         local chunk_count
         chunk_count=$(ls "$chunk_dir"/${CHUNK_PREFIX}*.tar.gz 2>/dev/null | wc -l)
-        log_info "Restored $chunk_count chunks to: $venv_path"
+        local other_zip_info=""
+        if [ -f "$chunk_dir/$VENV_OTHER_ZIP" ]; then
+            other_zip_info=" and other folders zip"
+        fi
+        log_info "Restored $chunk_count lib chunks$other_zip_info to: $venv_path"
         
         # Make sure executables are executable
         if [ -d "$venv_path/bin" ]; then
             chmod +x "$venv_path/bin"/* 2>/dev/null || true
         fi
         
-        # Fix venv paths for cross-environment compatibility
-        fix_venv_paths "$venv_path"
-        
         return 0
     else
-        log_error "Failed to restore chunks"
+        log_error "Failed to restore chunks and other folders"
         return 1
     fi
 }
 
-# Legacy function name for backward compatibility - now restores entire venv
+# Legacy function name for backward compatibility - now restores lib directory and other folders
 restore_site_packages() {
     local chunk_dir="$1"
     local venv_path="$2"
     
-    log_info "Note: restore_site_packages now restores entire venv for completeness"
+    log_info "Note: restore_site_packages now restores lib directory and other folders"
     restore_venv "$chunk_dir" "$venv_path"
 }
 
-# Upload chunks to cloud storage
+# Upload chunks and other folders zip to cloud storage
 upload_chunks() {
     local chunk_dir="$1"
     local s3_path="$2"
     local sync_type="${3:-venv_sync}"
     
-    log_info "Uploading chunks to: $s3_path"
+    log_info "Uploading chunks and other folders zip to: $s3_path"
     
     # Count total chunks
     local total_chunks=0
@@ -617,23 +696,31 @@ upload_chunks() {
         fi
     done
     
-    if [ "$total_chunks" -eq 0 ]; then
-        log_error "No chunk files found in: $chunk_dir"
+    # Count other folders zip if exists
+    local has_other_zip=0
+    if [ -f "$chunk_dir/$VENV_OTHER_ZIP" ]; then
+        has_other_zip=1
+    fi
+    
+    local total_files=$((total_chunks + has_other_zip))
+    
+    if [ "$total_files" -eq 0 ]; then
+        log_error "No chunk files or other folders zip found in: $chunk_dir"
         return 1
     fi
     
-    log_info "Uploading $total_chunks chunks..."
+    log_info "Uploading $total_chunks chunks and $has_other_zip other folders zip..."
     
     # Notify start of upload if this is user_shared type
     if [ "$sync_type" = "user_shared" ]; then
         notify_sync_progress "user_shared" "PROGRESS" 0
     fi
     
-    # Upload chunks in parallel
+    # Upload chunks and other zip in parallel
     local pids=()
     local max_jobs=$VENV_MAX_PARALLEL
     local job_count=0
-    local completed_chunks=0
+    local completed_files=0
     
     # Upload chunk files
     for chunk_file in "$chunk_dir"/${CHUNK_PREFIX}*.tar.gz; do
@@ -649,11 +736,11 @@ upload_chunks() {
                         wait "${pids[$i]}" 2>/dev/null || true
                         unset 'pids[i]'
                         job_count=$((job_count - 1))
-                        completed_chunks=$((completed_chunks + 1))
+                        completed_files=$((completed_files + 1))
                         
                         # Update progress for user_shared uploads
                         if [ "$sync_type" = "user_shared" ]; then
-                            local progress=$((completed_chunks * 80 / total_chunks))
+                            local progress=$((completed_files * 80 / total_files))
                             notify_sync_progress "user_shared" "PROGRESS" "$progress"
                         fi
                     fi
@@ -677,6 +764,42 @@ upload_chunks() {
         job_count=$((job_count + 1))
     done
     
+    # Upload other folders zip if it exists
+    if [ -f "$chunk_dir/$VENV_OTHER_ZIP" ]; then
+        # Wait if we've reached max parallel jobs
+        while [ $job_count -ge $max_jobs ]; do
+            if [ ${#pids[@]} -gt 0 ]; then
+                for i in "${!pids[@]}"; do
+                    if ! kill -0 "${pids[$i]}" 2>/dev/null; then
+                        wait "${pids[$i]}" 2>/dev/null || true
+                        unset 'pids[i]'
+                        job_count=$((job_count - 1))
+                        completed_files=$((completed_files + 1))
+                        
+                        # Update progress for user_shared uploads
+                        if [ "$sync_type" = "user_shared" ]; then
+                            local progress=$((completed_files * 80 / total_files))
+                            notify_sync_progress "user_shared" "PROGRESS" "$progress"
+                        fi
+                    fi
+                done
+            fi
+            sleep 0.1
+        done
+        
+        # Start upload in background
+        (
+            if aws s3 cp "$chunk_dir/$VENV_OTHER_ZIP" "$s3_path/$VENV_OTHER_ZIP" --only-show-errors; then
+                log_info "Uploaded: $VENV_OTHER_ZIP"
+            else
+                log_error "Failed to upload: $VENV_OTHER_ZIP"
+                exit 1
+            fi
+        ) &
+        pids+=($!)
+        job_count=$((job_count + 1))
+    fi
+    
     # Wait for all uploads and update progress
     if [ ${#pids[@]} -gt 0 ]; then
         for pid in "${pids[@]}"; do
@@ -685,11 +808,11 @@ upload_chunks() {
                     log_error "Upload job failed: $pid"
                     return 1
                 }
-                completed_chunks=$((completed_chunks + 1))
+                completed_files=$((completed_files + 1))
                 
                 # Update progress for user_shared uploads
                 if [ "$sync_type" = "user_shared" ]; then
-                    local progress=$((completed_chunks * 80 / total_chunks))
+                    local progress=$((completed_files * 80 / total_files))
                     notify_sync_progress "user_shared" "PROGRESS" "$progress"
                 fi
             fi
@@ -721,15 +844,15 @@ upload_chunks() {
         notify_sync_progress "user_shared" "DONE" 100
     fi
     
-    log_info "Successfully uploaded all chunks"
+    log_info "Successfully uploaded all chunks and other folders zip"
 }
 
-# Download chunks from cloud storage
+# Download chunks and other folders zip from cloud storage
 download_chunks() {
     local s3_path="$1"
     local chunk_dir="$2"
     
-    log_info "Downloading chunks from: $s3_path"
+    log_info "Downloading chunks and other folders zip from: $s3_path"
     
     mkdir -p "$chunk_dir"
     
@@ -753,6 +876,7 @@ download_chunks() {
     temp_file_list=$(mktemp)
     echo "$chunk_files" > "$temp_file_list"
     
+    # Download chunk files
     while IFS= read -r filename; do
         if [ -z "$filename" ]; then
             continue
@@ -797,6 +921,32 @@ download_chunks() {
         job_count=$((job_count + 1))
     done < "$temp_file_list"
     
+    # Download other folders zip if available
+    (
+        # Wait for a slot
+        while [ $job_count -ge $max_jobs ]; do
+            if [ ${#pids[@]} -gt 0 ]; then
+                for i in "${!pids[@]}"; do
+                    if ! kill -0 "${pids[$i]}" 2>/dev/null; then
+                        wait "${pids[$i]}" 2>/dev/null || download_failures=$((download_failures + 1))
+                        unset 'pids[i]'
+                        job_count=$((job_count - 1))
+                    fi
+                done
+            fi
+            sleep 0.1
+        done
+        
+        local target_zip="$chunk_dir/$VENV_OTHER_ZIP"
+        if aws s3 cp "$s3_path/$VENV_OTHER_ZIP" "$target_zip" --only-show-errors 2>/dev/null; then
+            log_info "Downloaded: $VENV_OTHER_ZIP"
+        else
+            log_info "No other folders zip found (optional)"
+        fi
+    ) &
+    pids+=($!)
+    job_count=$((job_count + 1))
+    
     # Clean up temp file
     rm -f "$temp_file_list"
     
@@ -811,7 +961,7 @@ download_chunks() {
     
     # Check if we had any download failures
     if [ $download_failures -gt 0 ]; then
-        log_error "Failed to download $download_failures chunk files"
+        log_error "Failed to download $download_failures files"
         return 1
     fi
     
@@ -829,7 +979,7 @@ download_chunks() {
         log_info "No source checksum found (optional)"
     fi
     
-    log_info "Successfully downloaded all chunks"
+    log_info "Successfully downloaded all chunks and other folders zip"
 }
 
 # High-level wrapper functions for common operations
@@ -953,17 +1103,22 @@ main() {
             echo "Usage: $0 {chunk|restore|upload|download|verify} [args...]"
             echo ""
             echo "Commands:"
-            echo "  chunk <venv_path> <output_dir>     - Create chunks from entire venv"
-            echo "  restore <chunk_dir> <venv_path>    - Restore chunks to entire venv"
-            echo "  upload <chunk_dir> <s3_path>       - Upload chunks to S3"
-            echo "  download <s3_path> <chunk_dir>     - Download chunks from S3"
-            echo "  verify <chunk_dir> <checksum_file> - Verify chunk integrity"
+            echo "  chunk <venv_path> <output_dir>     - Create chunks from lib directory and zip other folders"
+            echo "  restore <chunk_dir> <venv_path>    - Restore chunks and other folders zip to venv"
+            echo "  upload <chunk_dir> <s3_path>       - Upload chunks and other folders zip to S3"
+            echo "  download <s3_path> <chunk_dir>     - Download chunks and other folders zip from S3"
+            echo "  verify <chunk_dir> <checksum_file> - Verify chunk and zip file integrity"
             echo ""
             echo "Environment variables:"
             echo "  VENV_CHUNK_SIZE_MB     - Chunk size in MB (default: 100)"
             echo "  VENV_MAX_PARALLEL      - Max parallel operations (default: 4)"
             echo "  VENV_COMPRESSION_LEVEL - Compression level 1-9 (default: 6)"
             echo "  VENV_LOG_FILE          - Log file path (default: /network_volume/.venv_chunk_manager.log)"
+            echo ""
+            echo "Strategy:"
+            echo "  - The lib directory is chunked into multiple compressed archives"
+            echo "  - All other folders (bin, include, etc.) are zipped into a single archive"
+            echo "  - This optimizes for the fact that lib contains most of the data"
             exit 1
             ;;
     esac
