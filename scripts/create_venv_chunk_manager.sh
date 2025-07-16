@@ -360,6 +360,93 @@ verify_checksums() {
     fi
 }
 
+# Fix venv paths for cross-environment compatibility
+fix_venv_paths() {
+    local venv_path="$1"
+    
+    if [ ! -d "$venv_path" ]; then
+        log_error "Venv path does not exist: $venv_path"
+        return 1
+    fi
+    
+    log_info "Fixing venv paths for cross-environment compatibility: $venv_path"
+    
+    # Find the current Python executable
+    local current_python
+    current_python=$(which python3 || which python || echo "/usr/bin/python3")
+    
+    # Fix pyvenv.cfg to point to current Python home
+    if [ -f "$venv_path/pyvenv.cfg" ]; then
+        log_info "Updating pyvenv.cfg"
+        local python_home
+        python_home=$(dirname "$(dirname "$current_python")")
+        
+        # Update the home path in pyvenv.cfg
+        sed -i.bak "s|^home = .*|home = $python_home/bin|g" "$venv_path/pyvenv.cfg" 2>/dev/null || {
+            # Fallback for systems where sed -i needs empty string
+            sed -i '' "s|^home = .*|home = $python_home/bin|g" "$venv_path/pyvenv.cfg" 2>/dev/null || {
+                # Manual replacement if sed fails
+                local temp_file
+                temp_file=$(mktemp)
+                awk -v new_home="$python_home/bin" '
+                    /^home = / { print "home = " new_home; next }
+                    { print }
+                ' "$venv_path/pyvenv.cfg" > "$temp_file" && mv "$temp_file" "$venv_path/pyvenv.cfg"
+            }
+        }
+        rm -f "$venv_path/pyvenv.cfg.bak" 2>/dev/null || true
+    fi
+    
+    # Fix shebang lines in bin/ scripts
+    if [ -d "$venv_path/bin" ]; then
+        log_info "Fixing shebang lines in venv executables"
+        local venv_python="$venv_path/bin/python"
+        
+        for script in "$venv_path/bin"/*; do
+            if [ -f "$script" ] && [ -x "$script" ]; then
+                # Check if it's a script with a shebang
+                if head -1 "$script" 2>/dev/null | grep -q "^#!.*python"; then
+                    # Replace the shebang to point to the venv's python
+                    if command -v sed >/dev/null 2>&1; then
+                        sed -i.bak "1s|^#!.*python.*|#!$venv_python|" "$script" 2>/dev/null || {
+                            sed -i '' "1s|^#!.*python.*|#!$venv_python|" "$script" 2>/dev/null || {
+                                # Manual replacement
+                                local temp_file
+                                temp_file=$(mktemp)
+                                {
+                                    echo "#!$venv_python"
+                                    tail -n +2 "$script"
+                                } > "$temp_file" && mv "$temp_file" "$script"
+                                chmod +x "$script"
+                            }
+                        }
+                        rm -f "$script.bak" 2>/dev/null || true
+                    fi
+                fi
+            fi
+        done
+    fi
+    
+    # Recreate the python symlink to ensure it points correctly
+    if [ -f "$current_python" ]; then
+        local venv_python_version
+        venv_python_version=$(basename "$current_python")
+        
+        # Remove old symlinks
+        rm -f "$venv_path/bin/python" "$venv_path/bin/python3" 2>/dev/null || true
+        
+        # Create new symlinks
+        ln -sf "$current_python" "$venv_path/bin/$venv_python_version" 2>/dev/null || true
+        ln -sf "$venv_python_version" "$venv_path/bin/python3" 2>/dev/null || true
+        ln -sf "python3" "$venv_path/bin/python" 2>/dev/null || true
+        
+        log_info "Updated venv Python symlinks to point to: $current_python"
+    fi
+    
+    log_info "Venv path fixing completed"
+    return 0
+}
+
 # Main functions
 chunk_venv() {
     local venv_path="$1"
@@ -467,6 +554,9 @@ restore_venv() {
         if [ -d "$venv_path/bin" ]; then
             chmod +x "$venv_path/bin"/* 2>/dev/null || true
         fi
+        
+        # Fix venv paths for cross-environment compatibility
+        fix_venv_paths "$venv_path"
         
         return 0
     else

@@ -23,7 +23,67 @@ if [ ! -d "$COMFYUI_VENV" ]; then
     echo "Creating ComfyUI virtual environment..."
     mkdir -p "$(dirname "$COMFYUI_VENV")"
     $PYTHON_CMD -m venv "$COMFYUI_VENV"
+else
+    echo "ComfyUI virtual environment exists, checking integrity..."
+    
+    # Check if the venv Python interpreter exists and works
+    if [ ! -f "$COMFYUI_VENV/bin/python" ] || ! "$COMFYUI_VENV/bin/python" --version >/dev/null 2>&1; then
+        echo "⚠️ Virtual environment is corrupted or incompatible, recreating..."
+        rm -rf "$COMFYUI_VENV"
+        mkdir -p "$(dirname "$COMFYUI_VENV")"
+        $PYTHON_CMD -m venv "$COMFYUI_VENV"
+        echo "✅ Virtual environment recreated successfully"
+    else
+        # Additional check: verify pip works in the venv
+        if ! "$COMFYUI_VENV/bin/python" -m pip --version >/dev/null 2>&1; then
+            echo "⚠️ Virtual environment pip is broken (likely path issue), recreating..."
+            rm -rf "$COMFYUI_VENV"
+            mkdir -p "$(dirname "$COMFYUI_VENV")"
+            $PYTHON_CMD -m venv "$COMFYUI_VENV"
+            echo "✅ Virtual environment recreated successfully"
+        else
+            echo "✅ Virtual environment is healthy"
+        fi
+    fi
 fi
+
+# Ensure pip is working correctly in the venv
+echo "🔧 Validating pip installation in virtual environment..."
+. $COMFYUI_VENV/bin/activate
+
+# Check if pip command exists and works
+if ! command -v pip >/dev/null 2>&1 || ! pip --version >/dev/null 2>&1; then
+    echo "⚠️ pip is not working, attempting to fix..."
+    
+    # Try to reinstall pip using ensurepip
+    if python -m ensurepip --upgrade 2>/dev/null; then
+        echo "✅ pip reinstalled via ensurepip"
+    else
+        echo "⚠️ ensurepip failed, trying alternative approach..."
+        
+        # Try to upgrade pip directly
+        python -m pip install --upgrade pip --disable-pip-version-check 2>/dev/null || {
+            echo "⚠️ pip upgrade failed, recreating venv..."
+            deactivate
+            rm -rf "$COMFYUI_VENV"
+            mkdir -p "$(dirname "$COMFYUI_VENV")"
+            $PYTHON_CMD -m venv "$COMFYUI_VENV"
+            . $COMFYUI_VENV/bin/activate
+            echo "✅ Virtual environment recreated"
+        }
+    fi
+    
+    # Final check
+    if pip --version >/dev/null 2>&1; then
+        echo "✅ pip is now working"
+    else
+        echo "❌ pip is still not working, but continuing..."
+    fi
+else
+    echo "✅ pip is working correctly"
+fi
+
+deactivate
 
 # Setup ComfyUI config - store directly in network volume
 network_comfyui_config="$NETWORK_VOLUME/.comfyui"
