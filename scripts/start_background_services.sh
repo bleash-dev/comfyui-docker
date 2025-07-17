@@ -12,8 +12,8 @@ echo "📋 Sync intervals configured:"
 echo "  📄 User data sync: every $((SYNC_INTERVAL_USER_DATA / 60)) minutes"
 echo "  🔄 Shared data sync: every $((SYNC_INTERVAL_SHARED_DATA / 60)) minutes"
 echo "  🌐 Global models sync: every $((SYNC_INTERVAL_GLOBAL_MODELS / 60)) minutes"
-echo "  � Pod metadata sync: every $((SYNC_INTERVAL_POD_METADATA / 60)) minutes"
-echo "  �📊 Log sync: every $((SYNC_INTERVAL_LOGS / 60)) minutes"
+echo "  📋 Pod metadata sync: every $((SYNC_INTERVAL_POD_METADATA / 60)) minutes"
+echo "  📊 Log sync: every $((SYNC_INTERVAL_LOGS / 60)) minutes"
 
 # Create PID file for all background processes
 BACKGROUND_PIDS_FILE="$NETWORK_VOLUME/.background_services.pids"
@@ -30,7 +30,9 @@ if [ -f "$NETWORK_VOLUME/scripts/models_config_watcher.sh" ]; then
     fi
 else
     echo "⚠️ Models config file watcher script not found"
-fit all background services (sync-only, no FUSE)
+fi
+
+# Start all background services (sync-only, no FUSE)
 
 echo "📝 Background service PIDs will be tracked in: $BACKGROUND_PIDS_FILE"
 
@@ -214,8 +216,8 @@ echo "✅ Background services started (sync-only mode)"
 echo "  📄 Pod-specific data sync: every $((SYNC_INTERVAL_USER_DATA / 60)) minutes"
 echo "  🔄 User-shared data sync: every $((SYNC_INTERVAL_SHARED_DATA / 60)) minutes"
 echo "  🌐 Global shared models sync: every $((SYNC_INTERVAL_GLOBAL_MODELS / 60)) minutes (no delete)"
-echo "  � ComfyUI assets sync: every $((SYNC_INTERVAL_GLOBAL_MODELS / 60)) minutes"
+echo "  📁 ComfyUI assets sync: every $((SYNC_INTERVAL_GLOBAL_MODELS / 60)) minutes"
 echo "  📋 Pod metadata sync: every $((SYNC_INTERVAL_POD_METADATA / 60)) minutes"
-echo "  �📊 Log sync: every $((SYNC_INTERVAL_LOGS / 60)) minutes"
+echo "  📊 Log sync: every $((SYNC_INTERVAL_LOGS / 60)) minutes"
 echo "  🔍 Model discovery: starts after ComfyUI is ready"
 echo "  📝 All PIDs stored in: $BACKGROUND_PIDS_FILE"
