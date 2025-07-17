@@ -13,6 +13,7 @@ env:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    environment: ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
 
     steps:
     - name: Checkout repository
@@ -21,12 +22,18 @@ jobs:
     - name: Verify Docker Hub secrets
       if: github.event_name != 'pull_request'
       run: |
+        echo "🔍 Environment: ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}"
+        echo "📂 Branch: ${{ github.ref }}"
+        echo "🎯 Event: ${{ github.event_name }}"
+        
         if [ -z "${{ secrets.DOCKER_HUB_USER_NAME }}" ]; then
           echo "❌ DOCKER_HUB_USER_NAME secret is not set"
+          echo "💡 Make sure the secret is configured in the correct environment"
           exit 1
         fi
         if [ -z "${{ secrets.DOCKER_HUB_PASSWORD }}" ]; then
           echo "❌ DOCKER_HUB_PASSWORD secret is not set"
+          echo "💡 Make sure the secret is configured in the correct environment"
           exit 1
         fi
         echo "✅ Docker Hub secrets are configured"
