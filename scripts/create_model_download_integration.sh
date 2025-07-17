@@ -644,7 +644,7 @@ download_model_with_progress() {
     fi
 }
 
-# Function to perform chunked S3 download with progress tracking and cancellation support (SEQUENTIAL VERSION)
+# Function to perform chunked S3 download with progress tracking and cancellation support (SEQUENTIAL VERSION with new chunking strategy)
 chunked_s3_download_with_progress() {
     local bucket="$1"
     local key="$2"
@@ -675,27 +675,27 @@ chunked_s3_download_with_progress() {
         log_download "INFO" "Retrieved actual file size from S3: $total_size bytes"
     fi
 
-    local chunk_size_mb
-    if [ "$total_size" -lt $((10 * 1024 * 1024)) ]; then            # < 10MB
-        chunk_size_mb=2
-    elif [ "$total_size" -lt $((100 * 1024 * 1024)) ]; then         # < 100MB
-        chunk_size_mb=20
-    elif [ "$total_size" -lt $((1024 * 1024 * 1024)) ]; then        # < 1GB
-        chunk_size_mb=100
-    elif [ "$total_size" -lt $((5 * 1024 * 1024 * 1024)) ]; then    # < 5GB
-        chunk_size_mb=200
-    elif [ "$total_size" -lt $((10 * 1024 * 1024 * 1024)) ]; then   # < 10GB
-        chunk_size_mb=400
-    elif [ "$total_size" -lt $((50 * 1024 * 1024 * 1024)) ]; then   # < 50GB
-        chunk_size_mb=500
-    else                                                            # ≥ 50GB
-        chunk_size_mb=1000
+    # ========================= NEW CHUNKING STRATEGY START =========================
+    local six_gb_in_bytes=$((6 * 1024 * 1024 * 1024))
+    local one_gb_in_bytes=$((1024 * 1024 * 1024))
+    local chunk_size
+    local num_chunks
+
+    if [ "$total_size" -lt "$six_gb_in_bytes" ]; then
+        # For files smaller than 6 GB, use a fixed chunk size of 1 GB.
+        log_download "INFO" "File is smaller than 6GB. Using 1GB chunk size."
+        chunk_size="$one_gb_in_bytes"
+        num_chunks=$(( (total_size + chunk_size - 1) / chunk_size ))
+    else
+        # For files 6 GB or larger, divide into 10 equal parts.
+        log_download "INFO" "File is 6GB or larger. Dividing into 10 chunks."
+        num_chunks=10
+        # Use ceiling division to ensure we cover the whole file
+        chunk_size=$(( (total_size + num_chunks - 1) / num_chunks ))
     fi
+    # ========================== NEW CHUNKING STRATEGY END ==========================
 
-    local chunk_size=$((chunk_size_mb * 1024 * 1024))
-    local num_chunks=$(( (total_size + chunk_size - 1) / chunk_size ))
-
-    log_download "INFO" "Chunk size: $chunk_size bytes (${chunk_size_mb}MB), Number of chunks: $num_chunks (Downloading sequentially)"
+    log_download "INFO" "Chunk size: $chunk_size bytes, Number of chunks: $num_chunks (Downloading sequentially)"
 
     # The progress monitor can still run in the background
     (
@@ -736,7 +736,7 @@ chunked_s3_download_with_progress() {
         local range="bytes=${start}-${end}"
         local chunk_file="$chunk_dir/part-$(printf "%04d" $i)"
         
-        log_download "DEBUG" "Starting chunk $i: $range"
+        log_download "DEBUG" "Starting chunk $i/$((num_chunks-1)): $range"
         
         local retry_count=0
         local max_retries=3
