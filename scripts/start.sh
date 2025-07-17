@@ -184,17 +184,6 @@ if [ ${#missing_scripts[@]} -gt 0 ]; then
 fi
 echo "✅ All required scripts on $NETWORK_VOLUME/scripts/ verified."
 
-
-# Start background services (using script from /scripts/ baked into image)
-echo "🚀 Starting background services via $SCRIPT_DIR/start_background_services.sh..."
-if [ -f "$SCRIPT_DIR/start_background_services.sh" ]; then
-    bash "$SCRIPT_DIR/start_background_services.sh" # Assuming this script backgrounds its own processes and logs appropriately
-    echo "✅ Background services script initiated."
-else
-    echo "ℹ️ No $SCRIPT_DIR/start_background_services.sh found, skipping."
-fi
-
-
 # Install runtime dependencies if needed
 echo "📦 Checking for runtime dependencies (jq, bc)..."
 missing_deps=()
@@ -229,14 +218,14 @@ echo "✅ All components setup script completed."
 echo "🚩 Marking setup as complete by creating $NETWORK_VOLUME/.setup_complete"
 touch "$NETWORK_VOLUME/.setup_complete"
 
-
-# Final sync and start ComfyUI
-echo "🔄 Performing final user data sync via $NETWORK_VOLUME/scripts/sync_user_data.sh..."
-if ! "$NETWORK_VOLUME/scripts/sync_user_data.sh"; then
-    echo "⚠️ WARNING: Final user data sync encountered issues. Proceeding to start ComfyUI..."
-    # Not exiting here, as ComfyUI might still start with partial data or defaults.
+# Start background services (using script from /scripts/ baked into image)
+echo "🚀 Starting background services via $SCRIPT_DIR/start_background_services.sh..."
+if [ -f "$SCRIPT_DIR/start_background_services.sh" ]; then
+    bash "$SCRIPT_DIR/start_background_services.sh" # Assuming this script backgrounds its own processes and logs appropriately
+    echo "✅ Background services script initiated."
+else
+    echo "ℹ️ No $SCRIPT_DIR/start_background_services.sh found, skipping."
 fi
-echo "✅ Final user data sync completed."
 
 echo "🚀🚀🚀 Executing main application: $NETWORK_VOLUME/start_comfyui_with_logs.sh 🚀🚀🚀"
 exec "$NETWORK_VOLUME/start_comfyui_with_logs.sh" # This replaces the current script process
