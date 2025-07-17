@@ -645,6 +645,7 @@ download_model_with_progress() {
 }
 
 # Function to perform chunked S3 download with progress tracking and cancellation support
+# Function to perform chunked S3 download with progress tracking and cancellation support
 chunked_s3_download_with_progress() {
     local bucket="$1"
     local key="$2"
@@ -706,7 +707,6 @@ chunked_s3_download_with_progress() {
     
     # Download chunks in parallel with limited concurrency
     local max_concurrent_chunks=5
-    local active_chunks=0
     local completed_chunks=0
     local failed_chunks=0
     
@@ -755,19 +755,35 @@ chunked_s3_download_with_progress() {
             break
         fi
         
-        # Wait if we have too many concurrent downloads
-        while [ "$active_chunks" -ge "$max_concurrent_chunks" ]; do
-            sleep 0.5
-            # Count active processes
-            active_chunks=0
+        # ==================== CORRECTED CONCURRENCY LOGIC START ====================
+        # Before launching a new chunk, check and wait if we are at the limit.
+        while true; do
+            local running_pids=0
+            # Prune the PID file of dead processes and count the live ones.
+            # Using a temp file for atomic update is safer.
+            local live_pids_file
+            live_pids_file=$(mktemp)
+
             if [ -f "$chunk_pids_file" ]; then
                 while IFS= read -r pid; do
                     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-                        active_chunks=$((active_chunks + 1))
+                        running_pids=$((running_pids + 1))
+                        echo "$pid" >> "$live_pids_file"
                     fi
                 done < "$chunk_pids_file"
+                # Atomically update the PID file with only live PIDs
+                mv "$live_pids_file" "$chunk_pids_file"
+            else
+                rm -f "$live_pids_file" # Clean up temp file if not used
+            fi
+
+            if [ "$running_pids" -lt "$max_concurrent_chunks" ]; then
+                break # A slot is available, break the while loop to launch the next chunk
+            else
+                sleep 0.5 # At the limit, wait and re-check
             fi
         done
+        # ===================== CORRECTED CONCURRENCY LOGIC END =====================
         
         local start=$((i * chunk_size))
         local end=$((start + chunk_size - 1))
@@ -824,7 +840,6 @@ chunked_s3_download_with_progress() {
         
         local chunk_pid=$!
         echo "$chunk_pid" >> "$chunk_pids_file"
-        active_chunks=$((active_chunks + 1))
     done
     
     # Wait for all chunks to complete
@@ -836,7 +851,8 @@ chunked_s3_download_with_progress() {
         while IFS= read -r pid; do
             if [ -n "$pid" ]; then
                 local exit_code=0
-                if wait "$pid" 2>/dev/null; then
+                # Use a subshell to avoid affecting the main script's error handling
+                if ( wait "$pid" 2>/dev/null ); then
                     exit_code=$?
                 else
                     exit_code=$?
@@ -869,11 +885,16 @@ chunked_s3_download_with_progress() {
         return 1
     fi
     
+    # All chunks are downloaded. Update status to "assembling".
+    log_download "INFO" "All chunks downloaded, now assembling final file..."
+    update_download_progress "$group" "$model_name" "$output_file" "$total_size" "$total_size" "assembling"
+
     # Verify all chunks exist
     for ((i = 0; i < num_chunks; i++)); do
         local chunk_file="$chunk_dir/part-$(printf "%04d" $i)"
         if [ ! -f "$chunk_file" ]; then
             log_download "ERROR" "Missing chunk file: $chunk_file"
+            update_download_progress "$group" "$model_name" "$output_file" "$total_size" "$total_size" "failed"
             return 1
         fi
     done
