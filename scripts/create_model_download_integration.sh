@@ -644,8 +644,7 @@ download_model_with_progress() {
     fi
 }
 
-# Function to perform chunked S3 download with progress tracking and cancellation support
-# Function to perform chunked S3 download with progress tracking and cancellation support
+# Function to perform chunked S3 download with progress tracking and cancellation support (SEQUENTIAL VERSION)
 chunked_s3_download_with_progress() {
     local bucket="$1"
     local key="$2"
@@ -654,16 +653,14 @@ chunked_s3_download_with_progress() {
     local group="$5"
     local model_name="$6"
     local expected_total_size="$7"
-    
-    # This definition is fine for the main function body
+
     local aws_cmd="aws"
     if [ -n "${AWS_CLI_OVERRIDE:-}" ] && [ -x "$AWS_CLI_OVERRIDE" ]; then
         aws_cmd="$AWS_CLI_OVERRIDE"
     fi
-    
+
     mkdir -p "$chunk_dir"
-    
-    # Use provided size if valid, otherwise get actual file size from S3
+
     local total_size
     if [ -n "$expected_total_size" ] && [ "$expected_total_size" -gt 0 ]; then
         total_size="$expected_total_size"
@@ -677,8 +674,7 @@ chunked_s3_download_with_progress() {
         fi
         log_download "INFO" "Retrieved actual file size from S3: $total_size bytes"
     fi
-    
-    # Determine chunk size (bytes) based on file size
+
     local chunk_size_mb
     if [ "$total_size" -lt $((10 * 1024 * 1024)) ]; then            # < 10MB
         chunk_size_mb=2
@@ -695,233 +691,94 @@ chunked_s3_download_with_progress() {
     else                                                            # ≥ 50GB
         chunk_size_mb=1000
     fi
-    
+
     local chunk_size=$((chunk_size_mb * 1024 * 1024))
     local num_chunks=$(( (total_size + chunk_size - 1) / chunk_size ))
-    
-    log_download "INFO" "Chunk size: $chunk_size bytes (${chunk_size_mb}MB)"
-    log_download "INFO" "Number of chunks: $num_chunks"
-    
-    # Store chunk PIDs for cancellation
-    local chunk_pids_file="$chunk_dir/.chunk_pids"
-    touch "$chunk_pids_file"
-    
-    # Download chunks in parallel with limited concurrency
-    local max_concurrent_chunks=5
-    local completed_chunks=0
-    local failed_chunks=0
-    
-    # Start progress monitoring in background
+
+    log_download "INFO" "Chunk size: $chunk_size bytes (${chunk_size_mb}MB), Number of chunks: $num_chunks (Downloading sequentially)"
+
+    # The progress monitor can still run in the background
     (
-        while [ "$completed_chunks" -lt "$num_chunks" ] && [ "$failed_chunks" -eq 0 ]; do
-            # Check for cancellation
-            if is_download_cancelled "$group" "$model_name"; then
-                log_download "INFO" "Cancellation detected during chunk download progress monitoring"
+        export -f update_download_progress log_download is_download_cancelled
+        while true; do
+            if [ -f "$chunk_dir/.complete" ] || [ -f "$chunk_dir/.failed" ]; then
                 break
             fi
             
-            # Calculate progress by monitoring chunk directory size
             local current_size=0
             if [ -d "$chunk_dir" ]; then
-                # Sum up all chunk file sizes
                 for chunk_file in "$chunk_dir"/part-*; do
                     if [ -f "$chunk_file" ]; then
-                        local chunk_file_size
-                        chunk_file_size=$(stat -f%z "$chunk_file" 2>/dev/null || stat -c%s "$chunk_file" 2>/dev/null || echo "0")
-                        current_size=$((current_size + chunk_file_size))
+                        current_size=$((current_size + $(stat -f%z "$chunk_file" 2>/dev/null || stat -c%s "$chunk_file" 2>/dev/null || echo "0")))
                     fi
                 done
             fi
             
-            # Update progress
             update_download_progress "$group" "$model_name" "$output_file" "$total_size" "$current_size" "progress"
-            
-            # Log progress
-            local percentage=0
-            if [ "$total_size" -gt 0 ]; then
-                percentage=$((current_size * 100 / total_size))
-            fi
-            log_download "INFO" "Download progress: $group/$model_name - ${percentage}% ($current_size/$total_size bytes)"
-            
             sleep 2
         done
     ) &
     local progress_monitor_pid=$!
-    
-    # Download chunks with retry logic
+
+    # Download chunks sequentially in the foreground
     for ((i = 0; i < num_chunks; i++)); do
-        # Check for cancellation before starting each chunk
         if is_download_cancelled "$group" "$model_name"; then
-            log_download "INFO" "Cancellation detected, stopping chunk downloads"
-            break
+            log_download "INFO" "Cancellation detected, aborting download."
+            touch "$chunk_dir/.failed" # Signal progress monitor to stop
+            kill "$progress_monitor_pid" 2>/dev/null || true
+            return 1
         fi
-        
-        # Before launching a new chunk, check and wait if we are at the limit.
-        while true; do
-            local running_pids=0
-            # Prune the PID file of dead processes and count the live ones.
-            # Using a temp file for atomic update is safer.
-            local live_pids_file
-            live_pids_file=$(mktemp)
 
-            if [ -f "$chunk_pids_file" ]; then
-                while IFS= read -r pid; do
-                    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-                        running_pids=$((running_pids + 1))
-                        echo "$pid" >> "$live_pids_file"
-                    fi
-                done < "$chunk_pids_file"
-                # Atomically update the PID file with only live PIDs
-                mv "$live_pids_file" "$chunk_pids_file"
-            else
-                rm -f "$live_pids_file" # Clean up temp file if not used
-            fi
-
-            if [ "$running_pids" -lt "$max_concurrent_chunks" ]; then
-                break # A slot is available, break the while loop to launch the next chunk
-            else
-                sleep 0.5 # At the limit, wait and re-check
-            fi
-        done
-        
         local start=$((i * chunk_size))
         local end=$((start + chunk_size - 1))
-        if [ "$end" -ge "$total_size" ]; then
-            end=$((total_size - 1))
-        fi
+        [ "$end" -ge "$total_size" ] && end=$((total_size - 1))
         
         local range="bytes=${start}-${end}"
         local chunk_file="$chunk_dir/part-$(printf "%04d" $i)"
         
         log_download "DEBUG" "Starting chunk $i: $range"
         
-        # Download chunk in background with retry
-        (
-            # ========================= FIX IS HERE =========================
-            # Define aws_cmd *inside* the subshell so it's always available.
-            local aws_cmd="aws"
-            if [ -n "${AWS_CLI_OVERRIDE:-}" ] && [ -x "$AWS_CLI_OVERRIDE" ]; then
-                aws_cmd="$AWS_CLI_OVERRIDE"
+        local retry_count=0
+        local max_retries=3
+        local success=false
+        while [ "$retry_count" -lt "$max_retries" ] && [ "$success" = false ]; do
+            if "$aws_cmd" s3api get-object --bucket "$bucket" --key "$key" --range "$range" "$chunk_file" >/dev/null 2>&1; then
+                success=true
+                log_download "DEBUG" "Chunk $i completed successfully"
+            else
+                retry_count=$((retry_count + 1))
+                log_download "WARN" "Chunk $i failed, retry $retry_count/$max_retries"
+                rm -f "$chunk_file"
+                sleep 1
             fi
-            # ======================= END OF FIX ==========================
+        done
 
-            local retry_count=0
-            local max_retries=3
-            local success=false
-            
-            while [ "$retry_count" -lt "$max_retries" ] && [ "$success" = false ]; do
-                # Check for cancellation before each retry
-                if is_download_cancelled "$group" "$model_name"; then
-                    log_download "DEBUG" "Chunk $i cancelled during retry loop"
-                    exit 2  # Use exit code 2 to indicate cancellation
-                fi
-                
-                if "$aws_cmd" s3api get-object \
-                    --bucket "$bucket" \
-                    --key "$key" \
-                    --range "$range" \
-                    "$chunk_file" >/dev/null 2>&1; then
-                    
-                    # Check for cancellation after successful download
-                    if is_download_cancelled "$group" "$model_name"; then
-                        log_download "DEBUG" "Chunk $i cancelled after download"
-                        rm -f "$chunk_file"  # Clean up the downloaded chunk
-                        exit 2  # Use exit code 2 to indicate cancellation
-                    fi
-                    
-                    success=true
-                    log_download "DEBUG" "Chunk $i completed successfully"
-                else
-                    retry_count=$((retry_count + 1))
-                    log_download "WARN" "Chunk $i failed, retry $retry_count/$max_retries"
-                    rm -f "$chunk_file"
-                    sleep 1
-                fi
-            done
-            
-            if [ "$success" = false ]; then
-                log_download "ERROR" "Chunk $i failed after $max_retries retries"
-                exit 1
-            fi
-        ) &
-        
-        local chunk_pid=$!
-        echo "$chunk_pid" >> "$chunk_pids_file"
-    done
-    
-    # Wait for all chunks to complete
-    log_download "INFO" "Waiting for all chunks to complete..."
-    local all_success=true
-    local cancelled_during_chunks=false
-    
-    if [ -f "$chunk_pids_file" ]; then
-        while IFS= read -r pid; do
-            if [ -n "$pid" ]; then
-                local exit_code=0
-                # Use a subshell to avoid affecting the main script's error handling
-                if ( wait "$pid" 2>/dev/null ); then
-                    exit_code=$?
-                else
-                    exit_code=$?
-                fi
-                
-                if [ "$exit_code" -eq 2 ]; then
-                    # Exit code 2 indicates cancellation
-                    log_download "DEBUG" "Chunk download process $pid was cancelled"
-                    cancelled_during_chunks=true
-                elif [ "$exit_code" -ne 0 ]; then
-                    log_download "ERROR" "Chunk download process $pid failed with exit code $exit_code"
-                    all_success=false
-                fi
-            fi
-        done < "$chunk_pids_file"
-    fi
-    
-    # Stop progress monitoring
-    kill "$progress_monitor_pid" 2>/dev/null || true
-    wait "$progress_monitor_pid" 2>/dev/null || true
-    
-    # Check for cancellation - either detected during chunk processing or via signal
-    if is_download_cancelled "$group" "$model_name" || [ "$cancelled_during_chunks" = true ]; then
-        log_download "INFO" "Download was cancelled during chunk processing"
-        return 1
-    fi
-    
-    if [ "$all_success" = false ]; then
-        log_download "ERROR" "Some chunks failed to download"
-        return 1
-    fi
-    
-    # All chunks are downloaded. Update status to "assembling".
-    log_download "INFO" "All chunks downloaded, now assembling final file..."
-    update_download_progress "$group" "$model_name" "$output_file" "$total_size" "$total_size" "assembling"
-
-    # Verify all chunks exist
-    for ((i = 0; i < num_chunks; i++)); do
-        local chunk_file="$chunk_dir/part-$(printf "%04d" $i)"
-        if [ ! -f "$chunk_file" ]; then
-            log_download "ERROR" "Missing chunk file: $chunk_file"
-            update_download_progress "$group" "$model_name" "$output_file" "$total_size" "$total_size" "failed"
+        if [ "$success" = false ]; then
+            log_download "ERROR" "Chunk $i failed after $max_retries retries. Aborting download."
+            touch "$chunk_dir/.failed" # Signal progress monitor to stop
+            kill "$progress_monitor_pid" 2>/dev/null || true
             return 1
         fi
     done
+
+    # All chunks downloaded successfully, stop the progress monitor
+    log_download "INFO" "All chunks downloaded successfully."
+    touch "$chunk_dir/.complete"
+    wait "$progress_monitor_pid" 2>/dev/null || true
     
-    log_download "INFO" "All chunks verified successfully"
+    # Update status to "assembling"
+    update_download_progress "$group" "$model_name" "$output_file" "$total_size" "$total_size" "assembling"
     
     # Assemble chunks into final file
     log_download "INFO" "Assembling chunks into: $output_file"
-    
-    # Use a temporary file for assembly, then move atomically
     local temp_output="$output_file.assembling"
     rm -f "$temp_output"
     
     if cat "$chunk_dir"/part-* > "$temp_output" 2>/dev/null; then
-        # Verify assembled file size
         local assembled_size
         assembled_size=$(stat -f%z "$temp_output" 2>/dev/null || stat -c%s "$temp_output" 2>/dev/null || echo "0")
         
         if [ "$assembled_size" -eq "$total_size" ]; then
-            # Move to final location atomically
             if mv "$temp_output" "$output_file"; then
                 log_download "INFO" "File assembled successfully: $output_file ($assembled_size bytes)"
                 return 0
