@@ -69,49 +69,76 @@ download_and_extract() {
     echo "" 
 }
 
-# --- Helper Function: Download and Restore Chunked Venv ---
-download_and_restore_chunked_venv() {
+# --- Helper Function: Download and Restore Chunked Venvs ---
+download_and_restore_chunked_venvs() {
     local s3_chunks_base="$1"
-    local local_venv_dir="$2"
+    local local_venv_base_dir="$2"
     local description="$3"
 
     echo "ℹ️ Checking for chunked $description: $s3_chunks_base"
 
-    # Check if chunks are available
+    # Check if any venv chunks are available
     if aws s3 ls "$s3_chunks_base/" >/dev/null 2>&1; then
-        local chunks_found
-        chunks_found=$(aws s3 ls "$s3_chunks_base/" | grep "chunk_.*\.tar\.gz$" | wc -l)
+        local venv_dirs_found
+        venv_dirs_found=$(aws s3 ls "$s3_chunks_base/" --recursive | grep "chunk_.*\.tar\.gz$" | awk '{print $4}' | cut -d'/' -f1 | sort -u)
         
-        if [ "$chunks_found" -gt 0 ]; then
-            echo "  📦 Found $chunks_found venv chunks, using optimized download..."
+        if [ -n "$venv_dirs_found" ]; then
+            local venv_count=$(echo "$venv_dirs_found" | wc -l)
+            local successful_restores=0
+            local failed_restores=0
+            
+            echo "  📦 Found $venv_count venv(s) with chunks, using optimized download..."
             
             if [ "$VENV_CHUNKS_AVAILABLE" = "true" ]; then
-                # Use optimized chunked download
-                if download_and_reassemble_venv "$s3_chunks_base" "$local_venv_dir"; then
-                    echo "  ✅ Successfully restored $description using chunked method"
-                    
-                    # Verify the restored venv is functional
-                    if [ -f "$local_venv_dir/bin/python" ] && "$local_venv_dir/bin/python" --version >/dev/null 2>&1; then
-                        echo "  ✅ Restored venv is functional"
-                        return 0
-                    else
-                        echo "  ⚠️ Restored venv appears corrupted, marking as failed"
-                        return 1
+                # Process each venv
+                while IFS= read -r venv_name; do
+                    if [ -n "$venv_name" ]; then
+                        local venv_s3_path="$s3_chunks_base/$venv_name"
+                        local venv_local_dir="$local_venv_base_dir/$venv_name"
+                        
+                        echo "    📦 Processing venv: $venv_name"
+                        
+                        # Use optimized chunked download
+                        if download_and_reassemble_venv "$venv_s3_path" "$venv_local_dir"; then
+                            echo "      ✅ Successfully restored $venv_name using chunked method"
+                            
+                            # Verify the restored venv is functional
+                            if [ -f "$venv_local_dir/bin/python" ] && "$venv_local_dir/bin/python" --version >/dev/null 2>&1; then
+                                echo "      ✅ Restored $venv_name venv is functional"
+                                successful_restores=$((successful_restores + 1))
+                            else
+                                echo "      ⚠️ Restored $venv_name venv appears corrupted"
+                                failed_restores=$((failed_restores + 1))
+                            fi
+                        else
+                            echo "      ⚠️ Chunked restoration failed for $venv_name"
+                            failed_restores=$((failed_restores + 1))
+                        fi
                     fi
+                done <<< "$venv_dirs_found"
+                
+                if [ $successful_restores -gt 0 ]; then
+                    echo "  ✅ Successfully restored $successful_restores/$venv_count venvs using chunked method"
+                    if [ $failed_restores -gt 0 ]; then
+                        echo "  ⚠️ $failed_restores venvs failed chunked restoration"
+                    fi
+                    return 0
                 else
-                    echo "  ⚠️ Chunked restoration failed, will try fallback method"
+                    echo "  ⚠️ All chunked venv restorations failed"
+                    return 1
                 fi
             else
                 echo "  ⚠️ Chunk manager not available, skipping chunked download"
+                return 1
             fi
         else
-            echo "  ⏭️ No chunks found at $s3_chunks_base"
+            echo "  ⏭️ No chunk files found at $s3_chunks_base"
+            return 1
         fi
     else
         echo "  ⏭️ Chunked $description not found at $s3_chunks_base"
+        return 1
     fi
-    
-    return 1
 }
 
 # --- Define S3 Base Paths and Archive Names (mirroring the upload script) ---
@@ -127,42 +154,79 @@ COMFYUI_USER_SHARED_ARCHIVE_FILES=("custom_nodes.tar.gz")
 OTHER_USER_SHARED_ARCHIVE_FILES=("_comfyui.tar.gz" "_cache.tar.gz")
 
 # --- Restore Order ---
-echo "--- Restoring Virtual Environment (Optimized) ---"
-# Try chunked venv first, fall back to traditional archive
+echo "--- Restoring Virtual Environments (Optimized) ---"
+# New multi-venv structure: S3 path is /venv_chunks/{venv_name}/ for each venv
+# This allows multiple venvs to coexist and be restored independently
+# Legacy single venv structure at /venv_chunks/ is still supported for backwards compatibility
+# Try chunked venvs first, fall back to traditional archive
 venv_restored=false
-if download_and_restore_chunked_venv \
+
+# Try new multi-venv structure first
+if download_and_restore_chunked_venvs \
     "$S3_USER_SHARED_BASE/venv_chunks" \
-    "$NETWORK_VOLUME/venv/comfyui" \
-    "user venv (chunked)"; then
+    "$NETWORK_VOLUME/venv" \
+    "user venvs (chunked)"; then
     venv_restored=true
-    echo "  ✅ Chunked venv restoration successful"
+    echo "  ✅ Chunked venvs restoration successful"
 else
-    echo "  🔄 Falling back to traditional venv archive..."
-    if download_and_extract \
-        "$S3_USER_SHARED_BASE/venv.tar.gz" \
-        "$NETWORK_VOLUME" \
-        "User-shared 'venv' data (fallback)"; then
-        venv_restored=true
-        echo "  ✅ Traditional venv restoration successful"
-    else
-        echo "  ⚠️ Both chunked and traditional venv restoration failed"
-        echo "  ℹ️ Will proceed without restored venv - new environment will be created"
-        venv_restored=false
+    echo "  🔄 New multi-venv structure not found, trying legacy single venv structure..."
+    
+    # Try legacy single venv structure (backwards compatibility)
+    if [ "$VENV_CHUNKS_AVAILABLE" = "true" ]; then
+        echo "  🔄 Checking for legacy single venv structure..."
+        if download_and_reassemble_venv \
+            "$S3_USER_SHARED_BASE/venv_chunks" \
+            "$NETWORK_VOLUME/venv/comfyui"; then
+            venv_restored=true
+            echo "  ✅ Legacy chunked venv restoration successful"
+            echo "  ℹ️ Legacy venv restored as ComfyUI venv - will be migrated to new structure on next sync"
+        else
+            echo "  ⚠️ Legacy chunked venv restoration failed"
+        fi
+    fi
+    
+    # Final fallback to traditional archive
+    if [ "$venv_restored" = "false" ]; then
+        echo "  🔄 Falling back to traditional venv archive..."
+        if download_and_extract \
+            "$S3_USER_SHARED_BASE/venv.tar.gz" \
+            "$NETWORK_VOLUME" \
+            "User-shared 'venv' data (fallback)"; then
+            venv_restored=true
+            echo "  ✅ Traditional venv restoration successful"
+        else
+            echo "  ⚠️ All venv restoration methods failed"
+            echo "  ℹ️ Will proceed without restored venvs - new environments will be created"
+            venv_restored=false
+        fi
     fi
 fi
 
-# Verify the restored venv (if any) is functional
+# Verify the restored venvs (if any) are functional
 if [ "$venv_restored" = "true" ] && [ -d "$NETWORK_VOLUME/venv" ]; then
-    # Check if ComfyUI venv specifically was restored properly
-    COMFYUI_VENV_PATH="$NETWORK_VOLUME/venv/comfyui"
-    if [ -d "$COMFYUI_VENV_PATH" ]; then
-        if [ -f "$COMFYUI_VENV_PATH/bin/python" ] && "$COMFYUI_VENV_PATH/bin/python" --version >/dev/null 2>&1; then
-            echo "  ✅ ComfyUI venv verified as functional"
-        else
-            echo "  ⚠️ ComfyUI venv appears corrupted - will be recreated during setup"
+    echo "  🔍 Verifying restored venvs..."
+    venv_count=0
+    functional_venvs=0
+    
+    # Check each venv subdirectory
+    for venv_dir in "$NETWORK_VOLUME/venv"/*; do
+        if [ -d "$venv_dir" ]; then
+            venv_count=$((venv_count + 1))
+            venv_name=$(basename "$venv_dir")
+            
+            if [ -f "$venv_dir/bin/python" ] && "$venv_dir/bin/python" --version >/dev/null 2>&1; then
+                echo "    ✅ $venv_name venv verified as functional"
+                functional_venvs=$((functional_venvs + 1))
+            else
+                echo "    ⚠️ $venv_name venv appears corrupted - will be recreated during setup"
+            fi
         fi
+    done
+    
+    if [ $venv_count -gt 0 ]; then
+        echo "  📊 Venv verification: $functional_venvs/$venv_count venvs are functional"
     else
-        echo "  ℹ️ ComfyUI venv not found in backup - will be created fresh"
+        echo "  ℹ️ No venvs found in backup - will be created fresh"
     fi
 fi
 
@@ -199,5 +263,16 @@ download_and_extract \
     "$OTHER_POD_SPECIFIC_ARCHIVE_S3_PATH" \
     "$NETWORK_VOLUME" \
     "Other pod-specific data"
+
+echo "📊 Restore Summary:"
+if [ "$venv_restored" = "true" ]; then
+    if [ -d "$NETWORK_VOLUME/venv" ]; then
+        venv_count=$(find "$NETWORK_VOLUME/venv" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+        echo "  📦 Virtual environments: $venv_count venv(s) restored"
+    fi
+else
+    echo "  📦 Virtual environments: No venvs restored - will be created fresh"
+fi
+echo "  📁 Other data: User-shared and pod-specific data restored from archives"
 
 echo "✅ User data sync from S3 (optimized) completed."

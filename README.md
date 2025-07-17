@@ -51,12 +51,47 @@ The template automatically detects and configures RunPod network storage. When e
 
 ```
 /runpod-volume/
-└── Comfyui/
-    ├── models/     # Store your models
-    ├── input/      # Input images and files
-    ├── output/     # Generated outputs
-    └── custom_nodes/ # Custom node installations
+├── Comfyui/
+│   ├── models/         # Store your models
+│   ├── input/          # Input images and files
+│   ├── output/         # Generated outputs
+│   └── custom_nodes/   # Custom node installations
+├── venv/
+│   ├── comfyui/        # ComfyUI virtual environment
+│   └── [other-venvs]/  # Additional virtual environments
+└── scripts/            # Sync and management scripts
 ```
+
+### 🔧 Virtual Environment Management
+
+The template includes advanced virtual environment management:
+- **Multi-venv Support**: Supports multiple Python virtual environments
+- **Chunked Optimization**: Large venvs are split into optimized chunks for faster sync
+- **Automatic Backup**: All venvs are automatically backed up to S3
+- **Smart Restoration**: Venvs are intelligently restored from chunked backups on startup
+- **Backwards Compatibility**: Seamlessly migrates from legacy single-venv structure
+
+### Creating Additional Virtual Environments
+
+You can create additional virtual environments alongside the default ComfyUI venv:
+
+```bash
+# Create a new venv for data science tools
+python3 -m venv /runpod-volume/venv/data_science
+
+# Activate and install packages
+source /runpod-volume/venv/data_science/bin/activate
+pip install pandas numpy scikit-learn
+
+# Create a specialized venv for image processing
+python3 -m venv /runpod-volume/venv/image_processing
+source /runpod-volume/venv/image_processing/bin/activate
+pip install opencv-python pillow imageio
+
+# All venvs will be automatically backed up and restored
+```
+
+The sync system will automatically detect and manage all venvs in the `/venv/` directory, using optimized chunked uploads for faster sync times.
 
 ## 🔗 Port Configuration
 
