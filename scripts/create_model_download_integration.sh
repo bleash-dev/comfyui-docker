@@ -655,6 +655,7 @@ chunked_s3_download_with_progress() {
     local model_name="$6"
     local expected_total_size="$7"
     
+    # This definition is fine for the main function body
     local aws_cmd="aws"
     if [ -n "${AWS_CLI_OVERRIDE:-}" ] && [ -x "$AWS_CLI_OVERRIDE" ]; then
         aws_cmd="$AWS_CLI_OVERRIDE"
@@ -755,7 +756,6 @@ chunked_s3_download_with_progress() {
             break
         fi
         
-        # ==================== CORRECTED CONCURRENCY LOGIC START ====================
         # Before launching a new chunk, check and wait if we are at the limit.
         while true; do
             local running_pids=0
@@ -783,7 +783,6 @@ chunked_s3_download_with_progress() {
                 sleep 0.5 # At the limit, wait and re-check
             fi
         done
-        # ===================== CORRECTED CONCURRENCY LOGIC END =====================
         
         local start=$((i * chunk_size))
         local end=$((start + chunk_size - 1))
@@ -798,6 +797,14 @@ chunked_s3_download_with_progress() {
         
         # Download chunk in background with retry
         (
+            # ========================= FIX IS HERE =========================
+            # Define aws_cmd *inside* the subshell so it's always available.
+            local aws_cmd="aws"
+            if [ -n "${AWS_CLI_OVERRIDE:-}" ] && [ -x "$AWS_CLI_OVERRIDE" ]; then
+                aws_cmd="$AWS_CLI_OVERRIDE"
+            fi
+            # ======================= END OF FIX ==========================
+
             local retry_count=0
             local max_retries=3
             local success=false
@@ -899,7 +906,7 @@ chunked_s3_download_with_progress() {
         fi
     done
     
-    log_download "INFO" "All chunks downloaded successfully"
+    log_download "INFO" "All chunks verified successfully"
     
     # Assemble chunks into final file
     log_download "INFO" "Assembling chunks into: $output_file"
