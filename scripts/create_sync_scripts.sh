@@ -1,266 +1,161 @@
 #!/bin/bash
-# Create all sync-related scripts
+# Create all sync-related scripts (Simplified - No Hashing/Caching)
 
-echo "📝 Creating sync scripts..."
+echo "📝 Creating simplified sync scripts (no checksum caching)..."
 
-# User data sync script (sync_user_data.sh - with intelligent caching)
+# User data sync script (Simplified)
 cat > "$NETWORK_VOLUME/scripts/sync_user_data.sh" << 'EOF'
 #!/bin/bash
-# Sync user-specific data to S3 by zipping and uploading archives with intelligent caching
+# Sync user-specific data to S3 by zipping and uploading archives.
+# This version syncs every time it is called.
 
 # Source the sync lock manager, API client, and model sync integration for progress notifications
 source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
 source "$NETWORK_VOLUME/scripts/api_client.sh"
 source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
 
-# Smart caching for user data sync
-SYNC_CACHE_DIR="$NETWORK_VOLUME/.sync_cache"
-USER_DATA_CACHE_FILE="$SYNC_CACHE_DIR/user_data_sync.hash"
-mkdir -p "$SYNC_CACHE_DIR"
+### REMOVED: All hash calculation and cache-checking functions ###
 
-# Function to calculate hash of user data directories
-calculate_user_data_hash() {
-    local hash_input=""
+sync_user_data_internal() {
+    # This script now always attempts to sync.
+    echo "🔄 Syncing user data to S3 (archived)..."
     
-    # Hash ComfyUI pod-specific content
+    # Send initial progress notification
+    notify_sync_progress "user_data" "PROGRESS" 0
+
+    EXCLUDE_SHARED_FOLDERS=("venv" ".comfyui" ".cache") 
+    EXCLUDE_COMFYUI_SHARED_FOLDERS=("models" "custom_nodes" ".browser-session")
+
+    COMFYUI_POD_SPECIFIC_ARCHIVE_NAME="comfyui_pod_specific_data.tar.gz"
+    S3_COMFYUI_POD_SPECIFIC_PATH="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/$COMFYUI_POD_SPECIFIC_ARCHIVE_NAME"
+    TEMP_COMFYUI_STAGING_DIR=$(mktemp -d /tmp/comfyui_pod_staging.XXXXXX)
+    COMFYUI_HAS_DATA_TO_SYNC=false
+
     if [[ -d "$NETWORK_VOLUME/ComfyUI" ]]; then
-        local EXCLUDE_COMFYUI_SHARED_FOLDERS=("models" "custom_nodes" ".browser-session")
+        echo "📦 Preparing ComfyUI pod-specific data for archival..."
+        notify_sync_progress "user_data" "PROGRESS" 10
         
+        shopt -s dotglob
         for item_path in "$NETWORK_VOLUME/ComfyUI"/*; do
-            if [[ -e "$item_path" ]]; then
-                local item_name=$(basename "$item_path")
-                local is_excluded=false
-                
-                for excluded in "${EXCLUDE_COMFYUI_SHARED_FOLDERS[@]}"; do
-                    if [[ "$item_name" == "$excluded" ]]; then
-                        is_excluded=true
-                        break
-                    fi
-                done
-                
-                if [[ "$is_excluded" == "false" ]]; then
-                    if [[ -d "$item_path" ]]; then
-                        hash_input+="comfyui_dir_${item_name}:$(find "$item_path" -type f -exec stat -f"%z %N" {} \; 2>/dev/null | sort | sha256sum | cut -d' ' -f1)"
-                    elif [[ -f "$item_path" ]]; then
-                        hash_input+="comfyui_file_${item_name}:$(stat -f"%z %m %N" "$item_path" 2>/dev/null | sha256sum | cut -d' ' -f1)"
-                    fi
+            item_name=$(basename "$item_path")
+            is_excluded=false
+            for excluded in "${EXCLUDE_COMFYUI_SHARED_FOLDERS[@]}"; do
+                if [[ "$item_name" == "$excluded" ]]; then
+                    is_excluded=true
+                    break
                 fi
+            done
+
+            if [[ "$is_excluded" == "true" ]]; then
+                echo "  ⏭️ Skipping ComfyUI shared/excluded item: $item_name"
+                continue
+            fi
+
+            if [[ -d "$item_path" ]]; then
+                if [[ -n "$(find "$item_path" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+                    echo "  ➕ Adding ComfyUI sub-folder to archive: $item_name"
+                    cp -R "$item_path" "$TEMP_COMFYUI_STAGING_DIR/"
+                    COMFYUI_HAS_DATA_TO_SYNC=true
+                else
+                    echo "  📭 Skipping empty ComfyUI sub-folder: $item_name"
+                fi
+            elif [[ -f "$item_path" ]]; then
+                echo "  ➕ Adding ComfyUI root file to archive: $item_name"
+                cp "$item_path" "$TEMP_COMFYUI_STAGING_DIR/"
+                COMFYUI_HAS_DATA_TO_SYNC=true
             fi
         done
-    fi
-    
-    # Hash other pod-specific content
-    local EXCLUDE_SHARED_FOLDERS=("venv" ".comfyui" ".cache" "ComfyUI")
-    find "$NETWORK_VOLUME" -mindepth 1 -maxdepth 1 -type d | while read -r dir_path; do
-        local folder_name=$(basename "$dir_path")
-        local is_excluded_shared=false
         
+        notify_sync_progress "user_data" "PROGRESS" 30
+        
+        if [[ "$COMFYUI_HAS_DATA_TO_SYNC" == "true" ]]; then
+            echo "  🗜️ Compressing ComfyUI pod-specific data..."
+            TEMP_ARCHIVE_PATH="/tmp/$COMFYUI_POD_SPECIFIC_ARCHIVE_NAME"
+            (cd "$TEMP_COMFYUI_STAGING_DIR" && tar -czf "$TEMP_ARCHIVE_PATH" .)
+            
+            notify_sync_progress "user_data" "PROGRESS" 40
+            
+            echo "  📤 Uploading $COMFYUI_POD_SPECIFIC_ARCHIVE_NAME to S3..."
+            if sync_to_s3_with_progress "$TEMP_ARCHIVE_PATH" "$S3_COMFYUI_POD_SPECIFIC_PATH" "user_data" 1 2 "cp"; then
+                echo "  ✅ Successfully uploaded $COMFYUI_POD_SPECIFIC_ARCHIVE_NAME"
+            else
+                echo "  ❌ Failed to sync $COMFYUI_POD_SPECIFIC_ARCHIVE_NAME"
+            fi
+            rm -f "$TEMP_ARCHIVE_PATH"
+        else
+            echo "  ℹ️ No ComfyUI pod-specific data found to sync."
+        fi
+    else
+        echo "⏭️ ComfyUI directory not found, skipping ComfyUI pod-specific sync."
+    fi
+    rm -rf "$TEMP_COMFYUI_STAGING_DIR"
+    echo "--- ComfyUI pod-specific sync finished ---"
+
+    notify_sync_progress "user_data" "PROGRESS" 50
+
+    OTHER_POD_SPECIFIC_ARCHIVE_NAME="other_pod_specific_data.tar.gz"
+    S3_OTHER_POD_SPECIFIC_PATH="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/$OTHER_POD_SPECIFIC_ARCHIVE_NAME"
+    TEMP_OTHER_STAGING_DIR=$(mktemp -d /tmp/other_pod_staging.XXXXXX)
+    OTHER_HAS_DATA_TO_SYNC=false
+
+    echo "📦 Preparing other pod-specific data for archival..."
+    find "$NETWORK_VOLUME" -mindepth 1 -maxdepth 1 -type d | while read -r dir_path; do
+        folder_name=$(basename "$dir_path")
+        
+        if [[ "$folder_name" == "ComfyUI" ]]; then
+            continue
+        fi
+        
+        is_excluded_shared=false
         for excluded in "${EXCLUDE_SHARED_FOLDERS[@]}"; do
             if [[ "$folder_name" == "$excluded" ]]; then
                 is_excluded_shared=true
                 break
             fi
         done
-        
-        if [[ "$is_excluded_shared" == "false" ]] && [[ ! "$folder_name" =~ ^\. ]] || [[ "$folder_name" == ".git" ]]; then
-            if [[ -n "$(find "$dir_path" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
-                hash_input+="other_dir_${folder_name}:$(find "$dir_path" -type f -exec stat -f"%z %N" {} \; 2>/dev/null | sort | sha256sum | cut -d' ' -f1)"
-            fi
-        fi
-    done
-    
-    # Include POD_ID to ensure pod-specific cache
-    hash_input+="pod_id:${POD_ID:-unknown}"
-    
-    echo -n "$hash_input" | sha256sum | cut -d' ' -f1
-}
-
-# Function to check if user data sync is needed
-needs_user_data_sync() {
-    local current_hash
-    local previous_hash=""
-    
-    current_hash=$(calculate_user_data_hash)
-    
-    if [[ -f "$USER_DATA_CACHE_FILE" ]]; then
-        previous_hash=$(cat "$USER_DATA_CACHE_FILE")
-    fi
-    
-    if [[ "$current_hash" != "$previous_hash" ]]; then
-        echo "🔍 User data changed since last sync:"
-        echo "   Previous: ${previous_hash:-none}"
-        echo "   Current:  $current_hash"
-        return 0  # needs sync
-    elif [[ "$(echo "${FORCE_SYNC_USER_DATA}" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
-        echo "🔄 FORCE_SYNC_USER_DATA=true - forcing user data sync"
-        return 0  # needs sync
-    else
-        echo "✅ User data unchanged since last sync (hash: ${current_hash:0:12}...)"
-        return 1  # no sync needed
-    fi
-}
-
-# Function to save user data sync state
-save_user_data_sync_state() {
-    local current_hash
-    current_hash=$(calculate_user_data_hash)
-    echo "$current_hash" > "$USER_DATA_CACHE_FILE"
-    echo "💾 User data sync state saved (hash: ${current_hash:0:12}...)"
-}
-
-sync_user_data_internal() {
-    echo "🔄 Checking if user data sync is needed..."
-    
-    # Check if sync is needed
-    if ! needs_user_data_sync; then
-        notify_sync_progress "user_data" "DONE" 100
-        echo "🚀 Skipped user data sync - no changes detected"
-        return 0
-    fi
-    
-    echo "🔄 Syncing user data to S3 (archived)..."
-    
-    # Send initial progress notification
-    notify_sync_progress "user_data" "PROGRESS" 0
-
-EXCLUDE_SHARED_FOLDERS=("venv" ".comfyui" ".cache") 
-EXCLUDE_COMFYUI_SHARED_FOLDERS=("models" "custom_nodes" ".browser-session")
-
-COMFYUI_POD_SPECIFIC_ARCHIVE_NAME="comfyui_pod_specific_data.tar.gz"
-S3_COMFYUI_POD_SPECIFIC_PATH="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/$COMFYUI_POD_SPECIFIC_ARCHIVE_NAME"
-TEMP_COMFYUI_STAGING_DIR=$(mktemp -d /tmp/comfyui_pod_staging.XXXXXX)
-COMFYUI_HAS_DATA_TO_SYNC=false
-
-if [[ -d "$NETWORK_VOLUME/ComfyUI" ]]; then
-    echo "📦 Preparing ComfyUI pod-specific data for archival..."
-    notify_sync_progress "user_data" "PROGRESS" 10
-    
-    shopt -s dotglob
-    for item_path in "$NETWORK_VOLUME/ComfyUI"/*; do
-        item_name=$(basename "$item_path")
-        is_excluded=false
-        for excluded in "${EXCLUDE_COMFYUI_SHARED_FOLDERS[@]}"; do
-            if [[ "$item_name" == "$excluded" ]]; then
-                is_excluded=true
-                break
-            fi
-        done
-
-        if [[ "$is_excluded" == "true" ]]; then
-            echo "  ⏭️ Skipping ComfyUI shared/excluded item: $item_name"
+        if [[ "$is_excluded_shared" == "true" ]]; then
+            echo "    ⏭️ Skipping user-shared folder: $folder_name (handled by shared sync)"
             continue
         fi
-
-        if [[ -d "$item_path" ]]; then
-            if [[ -n "$(find "$item_path" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
-                echo "  ➕ Adding ComfyUI sub-folder to archive: $item_name"
-                cp -R "$item_path" "$TEMP_COMFYUI_STAGING_DIR/"
-                COMFYUI_HAS_DATA_TO_SYNC=true
-            else
-                echo "  📭 Skipping empty ComfyUI sub-folder: $item_name"
-            fi
-        elif [[ -f "$item_path" ]]; then
-            echo "  ➕ Adding ComfyUI root file to archive: $item_name"
-            cp "$item_path" "$TEMP_COMFYUI_STAGING_DIR/"
-            COMFYUI_HAS_DATA_TO_SYNC=true
+        
+        if [[ "$folder_name" =~ ^\. ]] && [[ "$folder_name" != ".comfyui" ]] && [[ "$folder_name" != ".git" ]]; then 
+            echo "    ⏭️ Skipping hidden folder: $folder_name"
+            continue
+        fi
+            
+        if [[ -n "$(find "$dir_path" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+            echo "    ➕ Adding folder to 'other' pod-specific archive: $folder_name"
+            cp -R "$dir_path" "$TEMP_OTHER_STAGING_DIR/"
+            OTHER_HAS_DATA_TO_SYNC=true
+        else
+            echo "    📭 Skipping empty folder: $folder_name"
         fi
     done
-    
-    notify_sync_progress "user_data" "PROGRESS" 30
-    
-    if [[ "$COMFYUI_HAS_DATA_TO_SYNC" == "true" ]]; then
-        echo "  🗜️ Compressing ComfyUI pod-specific data..."
-        TEMP_ARCHIVE_PATH="/tmp/$COMFYUI_POD_SPECIFIC_ARCHIVE_NAME"
-        (cd "$TEMP_COMFYUI_STAGING_DIR" && tar -czf "$TEMP_ARCHIVE_PATH" .)
+
+    if [[ "$OTHER_HAS_DATA_TO_SYNC" == "true" ]]; then
+        echo "  🗜️ Compressing other pod-specific data..."
+        TEMP_ARCHIVE_PATH="/tmp/$OTHER_POD_SPECIFIC_ARCHIVE_NAME"
+        (cd "$TEMP_OTHER_STAGING_DIR" && tar -czf "$TEMP_ARCHIVE_PATH" .)
         
-        notify_sync_progress "user_data" "PROGRESS" 40
+        notify_sync_progress "user_data" "PROGRESS" 80
         
-        echo "  📤 Uploading $COMFYUI_POD_SPECIFIC_ARCHIVE_NAME to S3..."
-        # Use sync_to_s3_with_progress for better progress tracking
-        if sync_to_s3_with_progress "$TEMP_ARCHIVE_PATH" "$S3_COMFYUI_POD_SPECIFIC_PATH" "user_data" 1 2 "cp"; then
-            echo "  ✅ Successfully uploaded $COMFYUI_POD_SPECIFIC_ARCHIVE_NAME"
+        echo "  📤 Uploading $OTHER_POD_SPECIFIC_ARCHIVE_NAME to S3..."
+        if sync_to_s3_with_progress "$TEMP_ARCHIVE_PATH" "$S3_OTHER_POD_SPECIFIC_PATH" "user_data" 2 2 "cp"; then
+            echo "  ✅ Successfully uploaded $OTHER_POD_SPECIFIC_ARCHIVE_NAME"
         else
-            echo "  ❌ Failed to sync $COMFYUI_POD_SPECIFIC_ARCHIVE_NAME"
+            echo "  ❌ Failed to sync $OTHER_POD_SPECIFIC_ARCHIVE_NAME"
         fi
         rm -f "$TEMP_ARCHIVE_PATH"
     else
-        echo "  ℹ️ No ComfyUI pod-specific data found to sync."
+        echo "  ℹ️ No other pod-specific data found to sync."
     fi
-else
-    echo "⏭️ ComfyUI directory not found, skipping ComfyUI pod-specific sync."
-fi
-rm -rf "$TEMP_COMFYUI_STAGING_DIR"
-echo "--- ComfyUI pod-specific sync finished ---"
+    rm -rf "$TEMP_OTHER_STAGING_DIR"
+    echo "--- Other pod-specific sync finished ---"
 
-notify_sync_progress "user_data" "PROGRESS" 50
+    ### REMOVED: call to save_user_data_sync_state ###
 
-OTHER_POD_SPECIFIC_ARCHIVE_NAME="other_pod_specific_data.tar.gz"
-S3_OTHER_POD_SPECIFIC_PATH="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/$OTHER_POD_SPECIFIC_ARCHIVE_NAME"
-TEMP_OTHER_STAGING_DIR=$(mktemp -d /tmp/other_pod_staging.XXXXXX)
-OTHER_HAS_DATA_TO_SYNC=false
-
-echo "📦 Preparing other pod-specific data for archival..."
-find "$NETWORK_VOLUME" -mindepth 1 -maxdepth 1 -type d | while read -r dir_path; do
-    folder_name=$(basename "$dir_path")
-    # echo "  🔎 Checking top-level folder: $folder_name" # Optional: Less verbose
-    
-    if [[ "$folder_name" == "ComfyUI" ]]; then
-        # echo "    ⏭️ Skipping ComfyUI (handled separately)." # Optional: Less verbose
-        continue
-    fi
-    
-    is_excluded_shared=false
-    for excluded in "${EXCLUDE_SHARED_FOLDERS[@]}"; do
-        if [[ "$folder_name" == "$excluded" ]]; then
-            is_excluded_shared=true
-            break
-        fi
-    done
-    if [[ "$is_excluded_shared" == "true" ]]; then
-        echo "    ⏭️ Skipping user-shared folder: $folder_name (handled by shared sync)"
-        continue
-    fi
-    
-    if [[ "$folder_name" =~ ^\. ]] && [[ "$folder_name" != ".comfyui" ]] && [[ "$folder_name" != ".git" ]]; then 
-        echo "    ⏭️ Skipping hidden folder: $folder_name"
-        continue
-    fi
-        
-    if [[ -n "$(find "$dir_path" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
-        echo "    ➕ Adding folder to 'other' pod-specific archive: $folder_name"
-        cp -R "$dir_path" "$TEMP_OTHER_STAGING_DIR/"
-        OTHER_HAS_DATA_TO_SYNC=true
-    else
-        echo "    📭 Skipping empty folder: $folder_name"
-    fi
-done
-
-if [[ "$OTHER_HAS_DATA_TO_SYNC" == "true" ]]; then
-    echo "  🗜️ Compressing other pod-specific data..."
-    TEMP_ARCHIVE_PATH="/tmp/$OTHER_POD_SPECIFIC_ARCHIVE_NAME"
-    (cd "$TEMP_OTHER_STAGING_DIR" && tar -czf "$TEMP_ARCHIVE_PATH" .)
-    
-    notify_sync_progress "user_data" "PROGRESS" 80
-    
-    echo "  📤 Uploading $OTHER_POD_SPECIFIC_ARCHIVE_NAME to S3..."
-    # Use sync_to_s3_with_progress for better progress tracking
-    if sync_to_s3_with_progress "$TEMP_ARCHIVE_PATH" "$S3_OTHER_POD_SPECIFIC_PATH" "user_data" 2 2 "cp"; then
-        echo "  ✅ Successfully uploaded $OTHER_POD_SPECIFIC_ARCHIVE_NAME"
-    else
-        echo "  ❌ Failed to sync $OTHER_POD_SPECIFIC_ARCHIVE_NAME"
-    fi
-    rm -f "$TEMP_ARCHIVE_PATH"
-else
-    echo "  ℹ️ No other pod-specific data found to sync."
-fi
-rm -rf "$TEMP_OTHER_STAGING_DIR"
-echo "--- Other pod-specific sync finished ---"
-
-# Save sync state after successful completion
-save_user_data_sync_state
-
-notify_sync_progress "user_data" "DONE" 100
-echo "✅ User data archive sync completed"
+    notify_sync_progress "user_data" "DONE" 100
+    echo "✅ User data archive sync completed"
 }
 
 # Execute sync with lock management
@@ -269,11 +164,11 @@ EOF
 
 chmod +x "$NETWORK_VOLUME/scripts/sync_user_data.sh"
 
-# User shared data sync script (CORRECTED)
+# User shared data sync script (Simplified)
 cat > "$NETWORK_VOLUME/scripts/sync_user_shared_data.sh" << 'EOF'
 #!/bin/bash
 # Sync user-shared data to S3 (data that persists across different pods for the same user)
-# This script uses optimized chunking for venv and archives for other folders.
+# This version syncs every time it is called.
 
 # Source the sync lock manager, API client, model sync integration, and venv chunk manager
 source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
@@ -281,87 +176,10 @@ source "$NETWORK_VOLUME/scripts/api_client.sh"
 source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
 source "$NETWORK_VOLUME/scripts/venv_chunk_manager.sh"
 
-# Smart caching for user shared data sync
-SYNC_CACHE_DIR="$NETWORK_VOLUME/.sync_cache"
-USER_SHARED_CACHE_FILE="$SYNC_CACHE_DIR/user_shared_sync.hash"
-mkdir -p "$SYNC_CACHE_DIR"
-
-# Function to calculate hash of user shared directories
-calculate_user_shared_hash() {
-    local hash_input=""
-    
-    # Hash venv directory
-    if [[ -d "$NETWORK_VOLUME/venv" ]]; then
-        hash_input+="venv:$(find "$NETWORK_VOLUME/venv" -type f -exec stat -f"%z %N" {} \; 2>/dev/null | sort | sha256sum | cut -d' ' -f1)"
-    fi
-    
-    # Hash other shared folders (.comfyui, .cache)
-    local OTHER_SHARED_FOLDERS=(".comfyui" ".cache")
-    for folder_name in "${OTHER_SHARED_FOLDERS[@]}"; do
-        local folder_path="$NETWORK_VOLUME/$folder_name"
-        if [[ -d "$folder_path" ]]; then
-            hash_input+="${folder_name}:$(find "$folder_path" -type f -exec stat -f"%z %N" {} \; 2>/dev/null | sort | sha256sum | cut -d' ' -f1)"
-        fi
-    done
-    
-    # Hash ComfyUI shared folders (custom_nodes)
-    local COMFYUI_SHARED_FOLDERS=("custom_nodes")
-    for folder_name in "${COMFYUI_SHARED_FOLDERS[@]}"; do
-        local folder_path="$NETWORK_VOLUME/ComfyUI/$folder_name"
-        if [[ -d "$folder_path" ]]; then
-            hash_input+="comfyui_${folder_name}:$(find "$folder_path" -type f -exec stat -f"%z %N" {} \; 2>/dev/null | sort | sha256sum | cut -d' ' -f1)"
-        fi
-    done
-    
-    # Include POD_USER_NAME to ensure user-specific cache
-    hash_input+="user:${POD_USER_NAME:-unknown}"
-    
-    echo -n "$hash_input" | sha256sum | cut -d' ' -f1
-}
-
-# Function to check if user shared data sync is needed
-needs_user_shared_sync() {
-    local current_hash
-    local previous_hash=""
-    
-    current_hash=$(calculate_user_shared_hash)
-    
-    if [[ -f "$USER_SHARED_CACHE_FILE" ]]; then
-        previous_hash=$(cat "$USER_SHARED_CACHE_FILE")
-    fi
-    
-    if [[ "$current_hash" != "$previous_hash" ]]; then
-        echo "🔍 User shared data changed since last sync:"
-        echo "   Previous: ${previous_hash:-none}"
-        echo "   Current:  $current_hash"
-        return 0  # needs sync
-    elif [[ "$(echo "${FORCE_SYNC_USER_SHARED}" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
-        echo "🔄 FORCE_SYNC_USER_SHARED=true - forcing user shared data sync"
-        return 0  # needs sync
-    else
-        echo "✅ User shared data unchanged since last sync (hash: ${current_hash:0:12}...)"
-        return 1  # no sync needed
-    fi
-}
-
-# Function to save user shared data sync state
-save_user_shared_sync_state() {
-    local current_hash
-    current_hash=$(calculate_user_shared_hash)
-    echo "$current_hash" > "$USER_SHARED_CACHE_FILE"
-    echo "💾 User shared data sync state saved (hash: ${current_hash:0:12}...)"
-}
+### REMOVED: All hash calculation and cache-checking functions ###
 
 sync_user_shared_data_internal() {
-    echo "🔄 Checking if user shared data sync is needed..."
-    
-    # Check if sync is needed
-    if ! needs_user_shared_sync; then
-        notify_sync_progress "user_data" "DONE" 100
-        echo "🚀 Skipped user shared data sync - no changes detected"
-        return 0
-    fi
-    
+    # This script now always attempts to sync.
     echo "🔄 Syncing user-shared data to S3 (optimized)..."
 
     # Send initial progress notification and ensure tools are available
@@ -481,8 +299,7 @@ sync_user_shared_data_internal() {
     # Clean up temp file
     rm -f "$ARCHIVES_LIST_FILE"
 
-    # Save sync state after successful completion
-    save_user_shared_sync_state
+    ### REMOVED: call to save_user_shared_sync_state ###
 
     notify_sync_progress "user_data" "DONE" 100
     echo "✅ User-shared data sync completed (optimized)"
@@ -494,7 +311,7 @@ EOF
 
 chmod +x "$NETWORK_VOLUME/scripts/sync_user_shared_data.sh"
 
-# Graceful shutdown script (graceful_shutdown.sh - from previous correct version)
+# Graceful shutdown script (unchanged)
 cat > "$NETWORK_VOLUME/scripts/graceful_shutdown.sh" << 'EOF'
 #!/bin/bash
 # Graceful shutdown with data sync (no mounting)
@@ -551,7 +368,7 @@ EOF
 
 chmod +x "$NETWORK_VOLUME/scripts/graceful_shutdown.sh"
 
-# Signal handler script (signal_handler.sh - from previous correct version)
+# Signal handler script (unchanged)
 cat > "$NETWORK_VOLUME/scripts/signal_handler.sh" << 'EOF'
 #!/bin/bash
 # Signal handler for graceful shutdown
@@ -575,7 +392,7 @@ EOF
 
 chmod +x "$NETWORK_VOLUME/scripts/signal_handler.sh"
 
-# Global shared models sync script (sync_global_shared_models.sh - with model sync integration)
+# Global shared models sync script (unchanged - its sync logic is already robust)
 cat > "$NETWORK_VOLUME/scripts/sync_global_shared_models.sh" << 'EOF'
 #!/bin/bash
 # Sync global shared models and browser session to S3 with API integration and progress reporting
@@ -641,85 +458,22 @@ EOF
 
 chmod +x "$NETWORK_VOLUME/scripts/sync_global_shared_models.sh"
 
-# ComfyUI assets sync script (input/output directories)
+# ComfyUI assets sync script (Simplified)
 cat > "$NETWORK_VOLUME/scripts/sync_comfyui_assets.sh" << 'EOF'
 #!/bin/bash
 # Sync ComfyUI input/output directories to S3 (one-way: pod to S3 only, with deletions)
+# This version syncs every time it is called.
 
 # Source the sync lock manager, API client, and model sync integration for progress notifications
 source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
 source "$NETWORK_VOLUME/scripts/api_client.sh"
 source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
 
-# Smart caching for ComfyUI assets sync
-SYNC_CACHE_DIR="$NETWORK_VOLUME/.sync_cache"
-ASSETS_CACHE_FILE="$SYNC_CACHE_DIR/assets_sync.hash"
-mkdir -p "$SYNC_CACHE_DIR"
-
-# Function to calculate hash of ComfyUI assets
-calculate_assets_hash() {
-    local hash_input=""
-    
-    # Hash input directory
-    if [[ -d "$NETWORK_VOLUME/ComfyUI/input" ]]; then
-        hash_input+="input:$(find "$NETWORK_VOLUME/ComfyUI/input" -type f -exec stat -f"%z %N" {} \; 2>/dev/null | sort | sha256sum | cut -d' ' -f1)"
-    fi
-    
-    # Hash output directory
-    if [[ -d "$NETWORK_VOLUME/ComfyUI/output" ]]; then
-        hash_input+="output:$(find "$NETWORK_VOLUME/ComfyUI/output" -type f -exec stat -f"%z %N" {} \; 2>/dev/null | sort | sha256sum | cut -d' ' -f1)"
-    fi
-    
-    # Include POD_ID to ensure pod-specific cache
-    hash_input+="pod_id:${POD_ID:-unknown}"
-    
-    echo -n "$hash_input" | sha256sum | cut -d' ' -f1
-}
-
-# Function to check if assets sync is needed
-needs_assets_sync() {
-    local current_hash
-    local previous_hash=""
-    
-    current_hash=$(calculate_assets_hash)
-    
-    if [[ -f "$ASSETS_CACHE_FILE" ]]; then
-        previous_hash=$(cat "$ASSETS_CACHE_FILE")
-    fi
-    
-    if [[ "$current_hash" != "$previous_hash" ]]; then
-        echo "🔍 ComfyUI assets changed since last sync:"
-        echo "   Previous: ${previous_hash:-none}"
-        echo "   Current:  $current_hash"
-        return 0  # needs sync
-    elif [[ "$(echo "${FORCE_SYNC_ASSETS}" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
-        echo "🔄 FORCE_SYNC_ASSETS=true - forcing assets sync"
-        return 0  # needs sync
-    else
-        echo "✅ ComfyUI assets unchanged since last sync (hash: ${current_hash:0:12}...)"
-        return 1  # no sync needed
-    fi
-}
-
-# Function to save assets sync state
-save_assets_sync_state() {
-    local current_hash
-    current_hash=$(calculate_assets_hash)
-    echo "$current_hash" > "$ASSETS_CACHE_FILE"
-    echo "� Assets sync state saved (hash: ${current_hash:0:12}...)"
-}
+### REMOVED: All hash calculation and cache-checking functions ###
 
 sync_comfyui_assets_internal() {
-    echo "🔄 Checking if ComfyUI assets sync is needed..."
-    
-    # Check if sync is needed
-    if ! needs_assets_sync; then
-        notify_sync_progress "user_assets" "DONE" 100
-        echo "🚀 Skipped ComfyUI assets sync - no changes detected"
-        return 0
-    fi
-    
-    echo "�📁 Syncing ComfyUI assets to S3..."
+    # This script now always attempts to sync.
+    echo "📁 Syncing ComfyUI assets to S3..."
     
     # Send initial progress notification and ensure tools are available
     notify_sync_progress "user_assets" "PROGRESS" 0
@@ -774,8 +528,7 @@ sync_comfyui_assets_internal() {
         fi
     fi
 
-    # Save sync state after successful completion
-    save_assets_sync_state
+    ### REMOVED: call to save_assets_sync_state ###
 
     notify_sync_progress "user_assets" "DONE" 100
     echo "✅ ComfyUI assets sync completed"
@@ -787,84 +540,21 @@ EOF
 
 chmod +x "$NETWORK_VOLUME/scripts/sync_comfyui_assets.sh"
 
-# Pod metadata sync script (model config and workflows)
+# Pod metadata sync script (Simplified)
 cat > "$NETWORK_VOLUME/scripts/sync_pod_metadata.sh" << 'EOF'
 #!/bin/bash
 # Sync pod metadata to S3 (model configuration and user workflows)
+# This version syncs every time it is called.
 
 # Source the sync lock manager, API client, and model sync integration for progress notifications
 source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
 source "$NETWORK_VOLUME/scripts/api_client.sh"
 source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
 
-# Smart caching for pod metadata sync
-SYNC_CACHE_DIR="$NETWORK_VOLUME/.sync_cache"
-METADATA_CACHE_FILE="$SYNC_CACHE_DIR/metadata_sync.hash"
-mkdir -p "$SYNC_CACHE_DIR"
-
-# Function to calculate hash of pod metadata
-calculate_metadata_hash() {
-    local hash_input=""
-    
-    # Hash model configuration file
-    if [[ -f "$NETWORK_VOLUME/ComfyUI/models_config.json" ]]; then
-        hash_input+="models_config:$(stat -f"%z %m %N" "$NETWORK_VOLUME/ComfyUI/models_config.json" 2>/dev/null | sha256sum | cut -d' ' -f1)"
-    fi
-    
-    # Hash workflows directory
-    if [[ -d "$NETWORK_VOLUME/ComfyUI/user/default/workflows" ]]; then
-        hash_input+="workflows:$(find "$NETWORK_VOLUME/ComfyUI/user/default/workflows" -type f -exec stat -f"%z %N" {} \; 2>/dev/null | sort | sha256sum | cut -d' ' -f1)"
-    fi
-    
-    # Include POD_ID to ensure pod-specific cache
-    hash_input+="pod_id:${POD_ID:-unknown}"
-    
-    echo -n "$hash_input" | sha256sum | cut -d' ' -f1
-}
-
-# Function to check if metadata sync is needed
-needs_metadata_sync() {
-    local current_hash
-    local previous_hash=""
-    
-    current_hash=$(calculate_metadata_hash)
-    
-    if [[ -f "$METADATA_CACHE_FILE" ]]; then
-        previous_hash=$(cat "$METADATA_CACHE_FILE")
-    fi
-    
-    if [[ "$current_hash" != "$previous_hash" ]]; then
-        echo "🔍 Pod metadata changed since last sync:"
-        echo "   Previous: ${previous_hash:-none}"
-        echo "   Current:  $current_hash"
-        return 0  # needs sync
-    elif [[ "$(echo "${FORCE_SYNC_METADATA}" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
-        echo "🔄 FORCE_SYNC_METADATA=true - forcing metadata sync"
-        return 0  # needs sync
-    else
-        echo "✅ Pod metadata unchanged since last sync (hash: ${current_hash:0:12}...)"
-        return 1  # no sync needed
-    fi
-}
-
-# Function to save metadata sync state
-save_metadata_sync_state() {
-    local current_hash
-    current_hash=$(calculate_metadata_hash)
-    echo "$current_hash" > "$METADATA_CACHE_FILE"
-    echo "💾 Metadata sync state saved (hash: ${current_hash:0:12}...)"
-}
+### REMOVED: All hash calculation and cache-checking functions ###
 
 sync_pod_metadata_internal() {
-    echo "🔄 Checking if pod metadata sync is needed..."
-    
-    # Check if sync is needed
-    if ! needs_metadata_sync; then
-        notify_sync_progress "pod_metadata" "DONE" 100
-        echo "🚀 Skipped pod metadata sync - no changes detected"
-        return 0
-    fi
-    
+    # This script now always attempts to sync.
     echo "📋 Syncing pod metadata to S3..."
     
     # Send initial progress notification and ensure tools are available
@@ -921,8 +611,7 @@ sync_pod_metadata_internal() {
         fi
     fi
 
-    # Save sync state after successful completion
-    save_metadata_sync_state
+    ### REMOVED: call to save_metadata_sync_state ###
 
     notify_sync_progress "pod_metadata" "DONE" 100
     echo "✅ Pod metadata sync completed"
@@ -934,7 +623,7 @@ EOF
 
 chmod +x "$NETWORK_VOLUME/scripts/sync_pod_metadata.sh"
 
-# Models config file watcher script (models_config_watcher.sh - auto-trigger global sync on config changes)
+# Models config file watcher script (unchanged - its logic is beneficial)
 cat > "$NETWORK_VOLUME/scripts/models_config_watcher.sh" << 'EOF'
 #!/bin/bash
 # File watcher for models_config.json to auto-trigger global models sync on configuration changes
@@ -1265,4 +954,4 @@ EOF
 
 chmod +x "$NETWORK_VOLUME/scripts/models_config_watcher.sh"
 
-echo "✅ Sync scripts created"
+echo "✅ Simplified sync scripts created"
