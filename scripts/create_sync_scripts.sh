@@ -196,31 +196,70 @@ sync_user_shared_data_internal() {
     ARCHIVES_LIST_FILE="/tmp/user_shared_archives_$$"
     > "$ARCHIVES_LIST_FILE"
 
-    # Handle venv with chunked optimization
-    local venv_dir="$NETWORK_VOLUME/venv/comfyui"
-    if [[ -d "$venv_dir" ]] && [[ -n "$(find "$venv_dir" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
-        echo "📦 Processing venv with chunked optimization..."
+    # Handle all venvs with chunked optimization
+    # New structure: S3 path becomes /venv_chunks/{venv_name}/ for each venv
+    # This allows multiple venvs to coexist and be synced independently
+    # Legacy single venv structure at /venv_chunks/ is still supported for backwards compatibility
+    local venv_base_dir="$NETWORK_VOLUME/venv"
+    if [[ -d "$venv_base_dir" ]]; then
+        echo "📦 Processing venvs with chunked optimization..."
         notify_sync_progress "user_data" "PROGRESS" 10
         
-        # Use chunked upload for venv
-        local s3_venv_chunks_path="$S3_USER_SHARED_BASE/venv_chunks"
-        if chunk_and_upload_venv "$venv_dir" "$s3_venv_chunks_path" "user_shared"; then
-            echo "  ✅ Successfully uploaded venv using chunked method"
-        else
-            echo "  ⚠️ Chunked venv upload failed, falling back to traditional archive method"
-            # Fallback to traditional archiving
-            local archive_name="venv.tar.gz"
-            local temp_archive_path="/tmp/user_shared_${archive_name}"
-            echo "  🗜️ Compressing venv with traditional method..."
-            if tar -czf "$temp_archive_path" -C "$NETWORK_VOLUME" "venv"; then
-                ARCHIVES_TO_UPLOAD["$temp_archive_path"]="$S3_USER_SHARED_BASE/$archive_name"
-                echo "  📝 Added venv to upload queue (fallback method)"
-            else
-                echo "  ❌ Failed to compress venv"
+        local venv_processed=false
+        local venv_failures=()
+        
+        # Process each venv subdirectory
+        for venv_dir in "$venv_base_dir"/*; do
+            if [[ -d "$venv_dir" ]] && [[ -n "$(find "$venv_dir" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+                local venv_name=$(basename "$venv_dir")
+                echo "  📦 Processing venv: $venv_name"
+                
+                # Use chunked upload for this venv
+                local s3_venv_chunks_path="$S3_USER_SHARED_BASE/venv_chunks/$venv_name"
+                if chunk_and_upload_venv "$venv_dir" "$s3_venv_chunks_path" "user_shared"; then
+                    echo "    ✅ Successfully uploaded $venv_name venv using chunked method"
+                    venv_processed=true
+                else
+                    echo "    ⚠️ Chunked $venv_name venv upload failed, adding to fallback queue"
+                    venv_failures+=("$venv_name")
+                fi
+            fi
+        done
+        
+        # Clean up legacy single venv chunk structure if we successfully uploaded using new structure
+        if [[ "$venv_processed" == true ]]; then
+            echo "  🧹 Cleaning up legacy single venv chunk structure..."
+            local legacy_venv_chunks_path="$S3_USER_SHARED_BASE/venv_chunks"
+            # Check if legacy chunks exist at the root level (not in subdirectories)
+            if aws s3 ls "$legacy_venv_chunks_path/" 2>/dev/null | grep -q "venv_chunk_.*\.tar\.gz"; then
+                echo "    🗑️ Removing legacy venv chunks to avoid duplication..."
+                aws s3 rm "$legacy_venv_chunks_path" --recursive --exclude "*/" --include "venv_chunk_*" --quiet 2>/dev/null || true
+                aws s3 rm "$legacy_venv_chunks_path/venv_chunks.checksums" --quiet 2>/dev/null || true
+                aws s3 rm "$legacy_venv_chunks_path/source.checksum" --quiet 2>/dev/null || true
+                aws s3 rm "$legacy_venv_chunks_path/venv_other_folders.zip" --quiet 2>/dev/null || true
+                echo "    ✅ Legacy venv chunks cleaned up"
             fi
         fi
+        
+        # Handle failed venvs with traditional archive method (fallback)
+        if [[ ${#venv_failures[@]} -gt 0 ]]; then
+            echo "  🔄 Using traditional archive method for failed venvs: ${venv_failures[*]}"
+            local archive_name="venv.tar.gz"
+            local temp_archive_path="/tmp/user_shared_${archive_name}"
+            echo "    🗜️ Compressing venv with traditional method..."
+            if tar -czf "$temp_archive_path" -C "$NETWORK_VOLUME" "venv"; then
+                echo "$temp_archive_path|$S3_USER_SHARED_BASE/$archive_name" >> "$ARCHIVES_LIST_FILE"
+                echo "    📝 Added venv to upload queue (fallback method)"
+            else
+                echo "    ❌ Failed to compress venv"
+            fi
+        fi
+        
+        if [[ "$venv_processed" == false ]] && [[ ${#venv_failures[@]} -eq 0 ]]; then
+            echo "  ⏭️ No venvs found to process"
+        fi
     else
-        echo "  ⏭️ Skipping venv (missing or empty)"
+        echo "  ⏭️ Skipping venv (directory missing)"
     fi
 
     notify_sync_progress "user_data" "PROGRESS" 40
@@ -301,6 +340,19 @@ sync_user_shared_data_internal() {
 
     ### REMOVED: call to save_user_shared_sync_state ###
 
+    # Summary of sync operation
+    echo "📊 Sync Summary:"
+    if [[ "$venv_processed" == true ]]; then
+        local venv_count=$(find "$NETWORK_VOLUME/venv" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+        echo "  📦 Virtual environments: $venv_count venv(s) synced using chunked optimization"
+    fi
+    if [[ ${#venv_failures[@]} -gt 0 ]]; then
+        echo "  ⚠️ Failed venvs: ${#venv_failures[@]} venv(s) fell back to traditional archive method"
+    fi
+    if [ "$total_archives" -gt 0 ]; then
+        echo "  📁 Traditional archives: $total_archives archive(s) uploaded"
+    fi
+    
     notify_sync_progress "user_data" "DONE" 100
     echo "✅ User-shared data sync completed (optimized)"
 }
@@ -551,7 +603,6 @@ source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
 source "$NETWORK_VOLUME/scripts/api_client.sh"
 source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
 
-### REMOVED: All hash calculation and cache-checking functions ###
 
 sync_pod_metadata_internal() {
     # This script now always attempts to sync.
