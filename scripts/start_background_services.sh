@@ -1,5 +1,3 @@
-#!/bin/bash
-# Start all background services (sync-only, no FUSE)
 
 echo "🚀 Starting background services..."
 
@@ -20,6 +18,19 @@ echo "  �📊 Log sync: every $((SYNC_INTERVAL_LOGS / 60)) minutes"
 # Create PID file for all background processes
 BACKGROUND_PIDS_FILE="$NETWORK_VOLUME/.background_services.pids"
 > "$BACKGROUND_PIDS_FILE"  # Clear the file
+
+# Start models config file watcher for automatic global sync triggering
+echo "🔍 Starting models config file watcher..."
+if [ -f "$NETWORK_VOLUME/scripts/models_config_watcher.sh" ]; then
+    "$NETWORK_VOLUME/scripts/models_config_watcher.sh" start
+    if [ $? -eq 0 ]; then
+        echo "✅ Models config file watcher started successfully"
+    else
+        echo "⚠️ Failed to start models config file watcher"
+    fi
+else
+    echo "⚠️ Models config file watcher script not found"
+fit all background services (sync-only, no FUSE)
 
 echo "📝 Background service PIDs will be tracked in: $BACKGROUND_PIDS_FILE"
 

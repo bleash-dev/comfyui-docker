@@ -6,6 +6,19 @@ echo "🛑 Manually stopping background services..."
 # Set default network volume
 export NETWORK_VOLUME="${NETWORK_VOLUME:-/workspace}"
 
+# Stop models config file watcher first
+echo "🔍 Stopping models config file watcher..."
+if [ -f "$NETWORK_VOLUME/scripts/models_config_watcher.sh" ]; then
+    "$NETWORK_VOLUME/scripts/models_config_watcher.sh" stop
+    if [ $? -eq 0 ]; then
+        echo "✅ Models config file watcher stopped successfully"
+    else
+        echo "⚠️ Failed to stop models config file watcher gracefully"
+    fi
+else
+    echo "⚠️ Models config file watcher script not found"
+fi
+
 # Method 1: Use PID file if it exists
 BACKGROUND_PIDS_FILE="$NETWORK_VOLUME/.background_services.pids"
 if [ -f "$BACKGROUND_PIDS_FILE" ]; then

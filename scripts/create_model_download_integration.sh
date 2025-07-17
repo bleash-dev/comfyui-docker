@@ -516,19 +516,19 @@ update_download_progress() {
 }
 
 # Function to download a single model with progress tracking from S3 using chunked download
-# Function to download a single model using chunked S3 download with cancellation support
+# This is the simplest and most robust method, keeping the original function name.
 download_model_with_progress() {
     local group="$1"
     local model_name="$2"
-    local s3_path="$3"  # This is the originalS3Path from config
+    local s3_path="$3"
     local local_path="$4"
-    local provided_size="$5"  # Renamed for clarity - this will be ignored
-    
+    local provided_size="$5"
+
     if [ -z "$group" ] || [ -z "$model_name" ] || [ -z "$s3_path" ] || [ -z "$local_path" ]; then
         log_download "ERROR" "Missing required parameters for model download"
         return 1
     fi
-    
+
     # Parse S3 path to get bucket and key
     local bucket key
     if [[ "$s3_path" =~ ^s3://([^/]+)/(.*)$ ]]; then
@@ -541,107 +541,77 @@ download_model_with_progress() {
         bucket="${AWS_BUCKET_NAME:-}"
         key="$s3_path"
     fi
-    
+
     if [ -z "$bucket" ] || [ -z "$key" ]; then
         log_download "ERROR" "Could not parse S3 path: $s3_path"
+        update_download_progress "$group" "$model_name" "$local_path" 0 0 "failed"
         return 1
     fi
+
+    # Before starting, check if the download has been cancelled.
+    if is_download_cancelled "$group" "$model_name"; then
+        log_download "INFO" "Download cancelled before starting: $group/$model_name"
+        update_download_progress "$group" "$model_name" "$local_path" "${provided_size:-0}" 0 "cancelled"
+        return 1
+    fi
+
+    # Create the final destination directory if it doesn't exist
+    mkdir -p "$(dirname "$local_path")"
+
+    # Create a temporary file to download to. This ensures the final file is never incomplete.
+    # We create it in the same directory to make the final `mv` atomic.
+    local temp_download_path
+    temp_download_path=$(mktemp -p "$(dirname "$local_path")" "download_$(basename "$local_path")_XXXXXX.tmp")
     
-    # Always fetch the actual file size from S3, overriding any provided size
+    # Ensure the temporary file is cleaned up on script exit, failure, or cancellation
+    trap "rm -f '$temp_download_path'" EXIT INT TERM QUIT
+
+    # Get the actual file size for accurate progress status.
     local aws_cmd="aws"
     if [ -n "${AWS_CLI_OVERRIDE:-}" ] && [ -x "$AWS_CLI_OVERRIDE" ]; then
         aws_cmd="$AWS_CLI_OVERRIDE"
     fi
-    
-    log_download "INFO" "Getting actual file size from S3 for: $group/$model_name"
     local actual_total_size
-    actual_total_size=$("$aws_cmd" s3api head-object --bucket "$bucket" --key "$key" --query 'ContentLength' --output text 2>/dev/null || echo "")
-    if [ -z "$actual_total_size" ] || [ "$actual_total_size" -eq 0 ] || [ "$actual_total_size" = "None" ]; then
-        log_download "ERROR" "Failed to get file size from S3 for: $group/$model_name"
-        return 1
-    fi
+    actual_total_size=$("$aws_cmd" s3api head-object --bucket "$bucket" --key "$key" --query 'ContentLength' --output text 2>/dev/null || echo "${provided_size:-0}")
     
-    log_download "INFO" "Retrieved actual file size from S3: $actual_total_size bytes for: $group/$model_name"
-    
-    # Log if provided size differs from actual size
-    if [ -n "$provided_size" ] && [ "$provided_size" -gt 0 ] && [ "$provided_size" -ne "$actual_total_size" ]; then
-        log_download "WARN" "Provided size ($provided_size bytes) differs from actual S3 size ($actual_total_size bytes) for $group/$model_name. Using actual size."
-    fi
-    
-    # Check for cancellation before starting
-    if is_download_cancelled "$group" "$model_name"; then
-        log_download "INFO" "Download cancelled before starting: $group/$model_name"
-        update_download_progress "$group" "$model_name" "$local_path" "$actual_total_size" 0 "cancelled"
-        return 1
-    fi
-    
-    log_download "INFO" "Starting chunked S3 download: $group/$model_name from s3://$bucket/$key"
-    
-    # Create directory if needed
-    local dir_path
-    dir_path=$(dirname "$local_path")
-    if [ ! -d "$dir_path" ]; then
-        mkdir -p "$dir_path"
-    fi
-    
-    # Create temporary chunk directory
-    local chunk_dir
-    chunk_dir=$(mktemp -d -t "chunks_${group}_${model_name}_$$_XXXXXX")
-    
-    # Store chunk directory for cancellation cleanup
-    local chunk_dir_file="$MODEL_DOWNLOAD_DIR/.chunk_dir_${group}_${model_name}"
-    echo "$chunk_dir" > "$chunk_dir_file"
-    
-    # Ensure cleanup on exit
-    trap "cleanup_chunked_download '$group' '$model_name' '$chunk_dir' '$chunk_dir_file' '$local_path'" EXIT INT TERM QUIT
-    
-    # Update status to in progress with actual size
+    log_download "INFO" "Starting single-file download via 'aws s3 cp' for $group/$model_name"
+
+    # Update status to "in progress". There is no granular percentage with this method.
     update_download_progress "$group" "$model_name" "$local_path" "$actual_total_size" 0 "progress"
     
-    # Start chunked download - pass actual size
-    local download_result
-    download_result=$(chunked_s3_download_with_progress "$bucket" "$key" "$local_path" "$chunk_dir" "$group" "$model_name" "$actual_total_size")
-    local download_exit_code=$?
-    
-    # Check if download was cancelled
-    if is_download_cancelled "$group" "$model_name"; then
-        log_download "INFO" "Download was cancelled: $group/$model_name"
-        update_download_progress "$group" "$model_name" "$local_path" "$actual_total_size" 0 "cancelled"
-        trap - EXIT INT TERM QUIT
-        cleanup_chunked_download "$group" "$model_name" "$chunk_dir" "$chunk_dir_file" "$local_path"
-        return 1
-    fi
-    
-    if [ "$download_exit_code" -eq 0 ]; then
-        # Get final file size
-        local final_size
-        final_size=$(stat -f%z "$local_path" 2>/dev/null || stat -c%s "$local_path" 2>/dev/null || echo "0")
+    # Execute the download. `aws s3 cp` handles multipart transfer internally.
+    local s3_uri="s3://${bucket}/${key}"
+    if "$aws_cmd" s3 cp "$s3_uri" "$temp_download_path" --no-progress >/dev/null 2>&1; then
         
-        # Update final progress
-        update_download_progress "$group" "$model_name" "$local_path" "$final_size" "$final_size" "completed"
+        log_download "INFO" "Download successful. Moving to final destination: $local_path"
         
-        log_download "INFO" "Download completed successfully: $group/$model_name ($final_size bytes)"
-        
-        # Clean up
-        trap - EXIT INT TERM QUIT
-        cleanup_chunked_download "$group" "$model_name" "$chunk_dir" "$chunk_dir_file" ""
-        
-        # Resolve symlinks for this model
-        log_download "INFO" "Resolving symlinks for downloaded model: $group/$model_name"
-        if command -v resolve_symlinks >/dev/null 2>&1; then
-            resolve_symlinks "" "$model_name" false
+        # Atomically move the completed file to its final destination
+        if mv "$temp_download_path" "$local_path"; then
+            local final_size
+            final_size=$(stat -f%z "$local_path" 2>/dev/null || stat -c%s "$local_path" 2>/dev/null || echo "$actual_total_size")
+            
+            # Update status to completed
+            update_download_progress "$group" "$model_name" "$local_path" "$final_size" "$final_size" "completed"
+            log_download "INFO" "Download completed successfully: $group/$model_name ($final_size bytes)"
+            
+            # Clean up the trap and resolve symlinks
+            trap - EXIT INT TERM QUIT
+            if command -v resolve_symlinks >/dev/null 2>&1; then
+                resolve_symlinks "" "$model_name" false
+            fi
+            return 0
         else
-            log_download "WARN" "resolve_symlinks function not available"
+            log_download "ERROR" "Failed to move temporary file to final destination: $local_path"
         fi
-        
-        return 0
-    else
-        log_download "ERROR" "Chunked download failed: $group/$model_name"
-        update_download_progress "$group" "$model_name" "$local_path" "$total_size" 0 "failed"
-        trap - EXIT INT TERM QUIT
-        cleanup_chunked_download "$group" "$model_name" "$chunk_dir" "$chunk_dir_file" "$local_path"
-        return 1
     fi
+
+    # This part is reached if `aws s3 cp` or the `mv` command fails.
+    local exit_code=$?
+    log_download "ERROR" "Download failed for: $group/$model_name (Exit code: $exit_code)"
+    update_download_progress "$group" "$model_name" "$local_path" "$actual_total_size" 0 "failed"
+    
+    # The trap will automatically clean up the temporary file.
+    return 1
 }
 
 # Function to perform chunked S3 download with progress tracking and cancellation support (SEQUENTIAL VERSION with new chunking strategy)

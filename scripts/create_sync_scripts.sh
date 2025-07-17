@@ -584,72 +584,7 @@ cat > "$NETWORK_VOLUME/scripts/sync_global_shared_models.sh" << 'EOF'
 source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
 source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
 
-# Smart caching for global shared models sync
-SYNC_CACHE_DIR="$NETWORK_VOLUME/.sync_cache"
-GLOBAL_SHARED_CACHE_FILE="$SYNC_CACHE_DIR/global_shared_sync.hash"
-mkdir -p "$SYNC_CACHE_DIR"
-
-# Function to calculate hash of global shared resources
-calculate_global_shared_hash() {
-    local hash_input=""
-    
-    # Hash models directory
-    if [[ -d "$NETWORK_VOLUME/ComfyUI/models" ]]; then
-        hash_input+="models:$(find "$NETWORK_VOLUME/ComfyUI/models" -type f -exec stat -f"%z %N" {} \; 2>/dev/null | sort | sha256sum | cut -d' ' -f1)"
-    fi
-    
-    # Hash browser sessions directory
-    if [[ -d "$NETWORK_VOLUME/ComfyUI/.browser-session" ]]; then
-        hash_input+="browser_session:$(find "$NETWORK_VOLUME/ComfyUI/.browser-session" -type f -exec stat -f"%z %N" {} \; 2>/dev/null | sort | sha256sum | cut -d' ' -f1)"
-    fi
-    
-    # This is global shared content, so no user-specific hash component needed
-    echo -n "$hash_input" | sha256sum | cut -d' ' -f1
-}
-
-# Function to check if global shared sync is needed
-needs_global_shared_sync() {
-    local current_hash
-    local previous_hash=""
-    
-    current_hash=$(calculate_global_shared_hash)
-    
-    if [[ -f "$GLOBAL_SHARED_CACHE_FILE" ]]; then
-        previous_hash=$(cat "$GLOBAL_SHARED_CACHE_FILE")
-    fi
-    
-    if [[ "$current_hash" != "$previous_hash" ]]; then
-        echo "🔍 Global shared resources changed since last sync:"
-        echo "   Previous: ${previous_hash:-none}"
-        echo "   Current:  $current_hash"
-        return 0  # needs sync
-    elif [[ "$(echo "${FORCE_SYNC_GLOBAL_SHARED}" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
-        echo "🔄 FORCE_SYNC_GLOBAL_SHARED=true - forcing global shared sync"
-        return 0  # needs sync
-    else
-        echo "✅ Global shared resources unchanged since last sync (hash: ${current_hash:0:12}...)"
-        return 1  # no sync needed
-    fi
-}
-
-# Function to save global shared sync state
-save_global_shared_sync_state() {
-    local current_hash
-    current_hash=$(calculate_global_shared_hash)
-    echo "$current_hash" > "$GLOBAL_SHARED_CACHE_FILE"
-    echo "💾 Global shared sync state saved (hash: ${current_hash:0:12}...)"
-}
-
 sync_global_shared_models_internal() {
-    echo "🔄 Checking if global shared resources sync is needed..."
-    
-    # Check if sync is needed
-    if ! needs_global_shared_sync; then
-        notify_model_sync_progress "global_shared" "DONE" 100
-        echo "🚀 Skipped global shared resources sync - no changes detected"
-        return 0
-    fi
-    
     echo "🌐 Syncing global shared resources to S3..."
     
     S3_GLOBAL_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/global_shared/models"
@@ -694,9 +629,6 @@ sync_global_shared_models_internal() {
     else
         echo "ℹ️ No browser sessions directory found at $LOCAL_BROWSER_SESSIONS_BASE"
     fi
-
-    # Save sync state after successful completion
-    save_global_shared_sync_state
 
     # Send completion notification
     notify_model_sync_progress "global_shared" "DONE" 100
@@ -1001,5 +933,336 @@ execute_with_sync_lock "pod_metadata" "sync_pod_metadata_internal"
 EOF
 
 chmod +x "$NETWORK_VOLUME/scripts/sync_pod_metadata.sh"
+
+# Models config file watcher script (models_config_watcher.sh - auto-trigger global sync on config changes)
+cat > "$NETWORK_VOLUME/scripts/models_config_watcher.sh" << 'EOF'
+#!/bin/bash
+# File watcher for models_config.json to auto-trigger global models sync on configuration changes
+
+# Configuration
+MODELS_CONFIG_FILE="$NETWORK_VOLUME/ComfyUI/models_config.json"
+WATCHER_PID_FILE="$NETWORK_VOLUME/.models_config_watcher.pid"
+WATCHER_LOG_FILE="$NETWORK_VOLUME/.models_config_watcher.log"
+WATCHER_STATE_FILE="$NETWORK_VOLUME/.models_config_watcher.state"
+SYNC_TRIGGER_COOLDOWN=10  # Minimum seconds between sync triggers
+
+# Ensure log file exists
+mkdir -p "$(dirname "$WATCHER_LOG_FILE")"
+touch "$WATCHER_LOG_FILE"
+
+# Function to log watcher activities
+log_watcher() {
+    local level="$1"
+    shift
+    local message="$*"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] [$level] Config Watcher: $message" | tee -a "$WATCHER_LOG_FILE" >&2
+}
+
+# Function to get file modification time
+get_file_mtime() {
+    local file="$1"
+    if [ -f "$file" ]; then
+        stat -f%m "$file" 2>/dev/null || stat -c%Y "$file" 2>/dev/null || echo "0"
+    else
+        echo "0"
+    fi
+}
+
+# Function to get file content hash
+get_file_hash() {
+    local file="$1"
+    if [ -f "$file" ]; then
+        sha256sum "$file" 2>/dev/null | cut -d' ' -f1 || echo "missing"
+    else
+        echo "missing"
+    fi
+}
+
+# Function to check if sync cooldown period has passed
+can_trigger_sync() {
+    local current_time=$(date +%s)
+    local last_trigger_time=0
+    
+    if [ -f "$WATCHER_STATE_FILE" ]; then
+        last_trigger_time=$(jq -r '.lastTriggerTime // 0' "$WATCHER_STATE_FILE" 2>/dev/null || echo "0")
+    fi
+    
+    local time_since_last=$((current_time - last_trigger_time))
+    
+    if [ "$time_since_last" -ge "$SYNC_TRIGGER_COOLDOWN" ]; then
+        return 0  # Can trigger
+    else
+        local remaining=$((SYNC_TRIGGER_COOLDOWN - time_since_last))
+        log_watcher "DEBUG" "Sync cooldown active, ${remaining}s remaining"
+        return 1  # Cannot trigger yet
+    fi
+}
+
+# Function to update watcher state
+update_watcher_state() {
+    local file_hash="$1"
+    local trigger_time="$2"
+    
+    local state_data
+    state_data=$(jq -n \
+        --arg fileHash "$file_hash" \
+        --argjson triggerTime "$trigger_time" \
+        --arg timestamp "$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")" \
+        '{
+            lastFileHash: $fileHash,
+            lastTriggerTime: $triggerTime,
+            lastUpdated: $timestamp
+        }')
+    
+    echo "$state_data" > "$WATCHER_STATE_FILE"
+}
+
+# Function to trigger global models sync
+trigger_global_models_sync() {
+    local reason="$1"
+    local current_time=$(date +%s)
+    
+    log_watcher "INFO" "Triggering global models sync: $reason"
+    
+    # Check if sync script exists
+    if [ ! -f "$NETWORK_VOLUME/scripts/sync_global_shared_models.sh" ]; then
+        log_watcher "ERROR" "Global models sync script not found"
+        return 1
+    fi
+    
+    # Update state before triggering sync to prevent rapid re-triggers
+    local current_hash
+    current_hash=$(get_file_hash "$MODELS_CONFIG_FILE")
+    update_watcher_state "$current_hash" "$current_time"
+    
+    # Trigger sync in background with output capture
+    (
+        log_watcher "INFO" "Starting background global models sync"
+        if "$NETWORK_VOLUME/scripts/sync_global_shared_models.sh" >> "$WATCHER_LOG_FILE" 2>&1; then
+            log_watcher "INFO" "Global models sync completed successfully"
+        else
+            log_watcher "ERROR" "Global models sync failed"
+        fi
+    ) &
+    
+    local sync_pid=$!
+    log_watcher "INFO" "Global models sync started in background (PID: $sync_pid)"
+    
+    return 0
+}
+
+# Function to start file watcher
+start_watcher() {
+    # Check if watcher is already running
+    if [ -f "$WATCHER_PID_FILE" ]; then
+        local existing_pid
+        existing_pid=$(cat "$WATCHER_PID_FILE" 2>/dev/null || echo "")
+        if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
+            log_watcher "INFO" "Watcher already running (PID: $existing_pid)"
+            return 0
+        else
+            log_watcher "INFO" "Removing stale PID file"
+            rm -f "$WATCHER_PID_FILE"
+        fi
+    fi
+    
+    # Start watcher in background
+    (
+        # Write PID and setup cleanup
+        echo $$ > "$WATCHER_PID_FILE"
+        trap "rm -f '$WATCHER_PID_FILE'; exit 0" EXIT INT TERM QUIT
+        
+        log_watcher "INFO" "Models config file watcher started (PID: $$)"
+        log_watcher "INFO" "Monitoring: $MODELS_CONFIG_FILE"
+        
+        # Initialize state
+        local last_hash
+        last_hash=$(get_file_hash "$MODELS_CONFIG_FILE")
+        local last_mtime
+        last_mtime=$(get_file_mtime "$MODELS_CONFIG_FILE")
+        
+        # Load previous state if available
+        local previous_hash=""
+        if [ -f "$WATCHER_STATE_FILE" ]; then
+            previous_hash=$(jq -r '.lastFileHash // ""' "$WATCHER_STATE_FILE" 2>/dev/null || echo "")
+        fi
+        
+        # Trigger initial sync if file exists and hash differs from previous state
+        if [ -f "$MODELS_CONFIG_FILE" ] && [ "$last_hash" != "$previous_hash" ] && [ -n "$previous_hash" ]; then
+            log_watcher "INFO" "Models config changed since last watcher run"
+            if can_trigger_sync; then
+                trigger_global_models_sync "Initial change detection"
+            fi
+        fi
+        
+        # Main watcher loop
+        while true; do
+            if [ ! -f "$MODELS_CONFIG_FILE" ]; then
+                # File doesn't exist, wait for it to be created
+                sleep 2
+                continue
+            fi
+            
+            local current_hash
+            current_hash=$(get_file_hash "$MODELS_CONFIG_FILE")
+            local current_mtime
+            current_mtime=$(get_file_mtime "$MODELS_CONFIG_FILE")
+            
+            # Check if file has changed (both hash and mtime for reliability)
+            if [ "$current_hash" != "$last_hash" ] || [ "$current_mtime" != "$last_mtime" ]; then
+                log_watcher "INFO" "Models config file changed detected"
+                log_watcher "DEBUG" "Hash: $last_hash -> $current_hash"
+                log_watcher "DEBUG" "MTime: $last_mtime -> $current_mtime"
+                
+                # Wait for file to stabilize (handle multiple rapid writes)
+                sleep 1
+                local stable_hash
+                stable_hash=$(get_file_hash "$MODELS_CONFIG_FILE")
+                
+                if [ "$stable_hash" = "$current_hash" ] && can_trigger_sync; then
+                    trigger_global_models_sync "File modification detected"
+                    last_hash="$stable_hash"
+                    last_mtime=$(get_file_mtime "$MODELS_CONFIG_FILE")
+                elif [ "$stable_hash" != "$current_hash" ]; then
+                    log_watcher "DEBUG" "File still changing, waiting for stabilization"
+                fi
+            fi
+            
+            # Check every 2 seconds
+            sleep 2
+        done
+    ) &
+    
+    local watcher_pid=$!
+    
+    # Give watcher a moment to start and write PID file
+    sleep 0.5
+    
+    if kill -0 "$watcher_pid" 2>/dev/null; then
+        log_watcher "INFO" "Models config file watcher started successfully (PID: $watcher_pid)"
+        return 0
+    else
+        log_watcher "ERROR" "Failed to start models config file watcher"
+        return 1
+    fi
+}
+
+# Function to stop file watcher
+stop_watcher() {
+    log_watcher "INFO" "Stopping models config file watcher"
+    
+    if [ -f "$WATCHER_PID_FILE" ]; then
+        local pid
+        pid=$(cat "$WATCHER_PID_FILE" 2>/dev/null || echo "")
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            log_watcher "INFO" "Stopping watcher process (PID: $pid)"
+            kill -TERM "$pid" 2>/dev/null || true
+            
+            # Wait for graceful shutdown
+            local wait_count=0
+            while [ $wait_count -lt 5 ] && kill -0 "$pid" 2>/dev/null; do
+                sleep 1
+                wait_count=$((wait_count + 1))
+            done
+            
+            # Force kill if still running
+            if kill -0 "$pid" 2>/dev/null; then
+                log_watcher "WARN" "Force killing watcher process (PID: $pid)"
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+            
+            log_watcher "INFO" "Watcher stopped successfully"
+        fi
+        rm -f "$WATCHER_PID_FILE"
+    else
+        log_watcher "INFO" "No watcher PID file found"
+    fi
+    
+    return 0
+}
+
+# Function to get watcher status
+get_watcher_status() {
+    local output_file="${1:-}"
+    if [ -z "$output_file" ]; then
+        output_file=$(mktemp)
+    fi
+    
+    local status="stopped"
+    local pid=""
+    local monitoring_file=""
+    local last_trigger=""
+    
+    if [ -f "$WATCHER_PID_FILE" ]; then
+        pid=$(cat "$WATCHER_PID_FILE" 2>/dev/null || echo "")
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            status="running"
+            monitoring_file="$MODELS_CONFIG_FILE"
+        else
+            status="stale"
+        fi
+    fi
+    
+    if [ -f "$WATCHER_STATE_FILE" ]; then
+        last_trigger=$(jq -r '.lastUpdated // ""' "$WATCHER_STATE_FILE" 2>/dev/null || echo "")
+    fi
+    
+    jq -n \
+        --arg status "$status" \
+        --arg pid "$pid" \
+        --arg monitoringFile "$monitoring_file" \
+        --arg lastTrigger "$last_trigger" \
+        --arg timestamp "$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")" \
+        '{
+            status: $status,
+            pid: $pid,
+            monitoringFile: $monitoringFile,
+            lastTrigger: $lastTrigger,
+            timestamp: $timestamp
+        }' > "$output_file"
+    
+    echo "$output_file"
+}
+
+# Function to restart watcher (stop + start)
+restart_watcher() {
+    log_watcher "INFO" "Restarting models config file watcher"
+    stop_watcher
+    sleep 1
+    start_watcher
+}
+
+# Main command handling
+case "${1:-}" in
+    "start")
+        start_watcher
+        ;;
+    "stop")
+        stop_watcher
+        ;;
+    "restart")
+        restart_watcher
+        ;;
+    "status")
+        get_watcher_status
+        ;;
+    "trigger")
+        # Manual trigger for testing
+        if can_trigger_sync; then
+            trigger_global_models_sync "Manual trigger"
+        else
+            log_watcher "INFO" "Cannot trigger sync - cooldown period active"
+        fi
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status|trigger}"
+        echo "Models Config File Watcher - Auto-triggers global models sync on configuration changes"
+        exit 1
+        ;;
+esac
+EOF
+
+chmod +x "$NETWORK_VOLUME/scripts/models_config_watcher.sh"
 
 echo "✅ Sync scripts created"
