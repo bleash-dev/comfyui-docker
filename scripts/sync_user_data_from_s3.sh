@@ -80,7 +80,11 @@ download_and_restore_chunked_venvs() {
     # Check if any venv chunks are available
     if aws s3 ls "$s3_chunks_base/" >/dev/null 2>&1; then
         local venv_dirs_found
-        venv_dirs_found=$(aws s3 ls "$s3_chunks_base/" --recursive | grep "chunk_.*\.tar\.gz$" | awk '{print $4}' | cut -d'/' -f1 | sort -u)
+        venv_dirs_found=$(aws s3 ls "$s3_chunks_base/" --recursive \
+| grep -E '\.zip$|\.tar\.gz$' \
+| awk '{print $4}' \
+| awk -F'/' '{print $(NF-1)}' \
+| sort -u)
         
         if [ -n "$venv_dirs_found" ]; then
             local venv_count=$(echo "$venv_dirs_found" | wc -l)
