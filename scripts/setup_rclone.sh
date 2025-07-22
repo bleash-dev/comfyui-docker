@@ -33,6 +33,23 @@ else
     echo "⚠️ WARNING: create_venv_chunk_manager.sh not found in $SCRIPT_DIR"
 fi
 
+# Create S3 interactor script early - needed by other scripts
+echo "🔧 Creating S3 interactor..."
+if [ -f "$SCRIPT_DIR/create_s3_interactor.sh" ]; then
+    if ! bash "$SCRIPT_DIR/create_s3_interactor.sh" "$NETWORK_VOLUME/scripts"; then
+        echo "❌ CRITICAL: Failed to create S3 interactor."
+        exit 1
+    fi
+    echo "  ✅ S3 interactor created/configured."
+else
+    echo "⚠️ WARNING: create_s3_interactor.sh not found in $SCRIPT_DIR"
+fi
+
+# Source S3 interactor for use in this script
+if [ -f "$NETWORK_VOLUME/scripts/s3_interactor.sh" ]; then
+    source "$NETWORK_VOLUME/scripts/s3_interactor.sh"
+fi
+
 # Validate required environment variables
 required_vars=("AWS_BUCKET_NAME" "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" "AWS_REGION" "POD_USER_NAME" "POD_ID")
 for var in "${required_vars[@]}"; do
@@ -97,20 +114,20 @@ else
     echo "✅ Cache directory symlink already exists"
 fi
 
-# Test AWS S3 connection
+# Test S3 connection
 echo "🔍 Testing S3 connection to bucket '$AWS_BUCKET_NAME'..."
 
-# First try to get bucket location
-echo "   Attempting bucket location test..."
-if ! bucket_location_output=$(aws s3api get-bucket-location --bucket "$AWS_BUCKET_NAME" 2>&1); then
+# Use S3 interactor connectivity test
+echo "   Attempting S3 connectivity test..."
+if s3_test_connectivity; then
+    echo "✅ S3 connection successful."
+else
     echo "❌ CRITICAL: Failed basic connectivity test to S3 bucket '$AWS_BUCKET_NAME'."
-    echo "   Bucket location test error output:"
-    echo "   $bucket_location_output"
     echo "   Trying alternative connection test..."
 
     # Fallback test: try to list bucket contents
     echo "   Attempting bucket list test..."
-    if ! bucket_list_output=$(aws s3 ls "s3://$AWS_BUCKET_NAME/" 2>&1); then
+    if ! bucket_list_output=$(s3_list "s3://$AWS_BUCKET_NAME/" 2>&1); then
         echo "❌ CRITICAL: All S3 connection tests failed for bucket '$AWS_BUCKET_NAME'."
         echo "   Bucket list test error output:"
         echo "   $bucket_list_output"
@@ -120,11 +137,11 @@ if ! bucket_location_output=$(aws s3api get-bucket-location --bucket "$AWS_BUCKE
         echo "   - Bucket name is correct: '$AWS_BUCKET_NAME'"
         echo "   - AWS region is correct: '$AWS_REGION'"
         echo "   - Bucket exists and you have access permissions"
-        echo "   - Network connectivity to AWS S3"
+        echo "   - Network connectivity to S3"
 
         # Try to give more specific error information with debug output
         echo "🔍 Attempting diagnostic test with debug output..."
-        aws s3 ls "s3://$AWS_BUCKET_NAME/" --debug 2>&1 | head -20 || true
+        s3_list "s3://$AWS_BUCKET_NAME/" 2>&1 | head -20 || true
 
         exit 1
     else
@@ -146,20 +163,20 @@ test_local_file="/tmp/.aws_test"
 echo "$test_file_content" > "$test_local_file"
 
 echo "   Attempting to write test file..."
-if upload_output=$(aws s3 cp "$test_local_file" "$test_s3_path" 2>&1); then
+if upload_output=$(s3_copy_to "$test_local_file" "$test_s3_path" 2>&1); then
     echo "   Test file upload successful, attempting to read back..."
     # Verify we can read it back
-    if downloaded_content=$(aws s3 cp "$test_s3_path" - 2>&1) && \
+    if downloaded_content=$(s3_copy_from "$test_s3_path" "-" 2>&1) && \
        [ "$downloaded_content" = "$test_file_content" ]; then
         echo "✅ S3 write/read permissions verified."
         # Clean up test file
-        aws s3 rm "$test_s3_path" >/dev/null 2>&1 || true
+        s3_remove "$test_s3_path" >/dev/null 2>&1 || true
     else
         echo "⚠️ WARNING: S3 write successful but read verification failed."
         echo "   Read error output: $downloaded_content"
         echo "   This may indicate permission issues or eventual consistency delays."
         # Still clean up test file
-        aws s3 rm "$test_s3_path" >/dev/null 2>&1 || true
+        s3_remove "$test_s3_path" >/dev/null 2>&1 || true
     fi
 else
     echo "⚠️ WARNING: S3 write test failed."
@@ -295,9 +312,9 @@ s3_browser_sessions_base="s3://$AWS_BUCKET_NAME/pod_sessions/global_shared/.brow
 mkdir -p "$browser_sessions_dir"
 
 echo "📥 Syncing global shared browser session from S3..."
-if aws s3 ls "$s3_browser_sessions_base/" >/dev/null 2>&1; then
+if s3_list "$s3_browser_sessions_base/" >/dev/null 2>&1; then
     echo "  📥 Downloading browser session from $s3_browser_sessions_base/"
-    if aws s3 sync "$s3_browser_sessions_base/" "$browser_sessions_dir/" --only-show-errors; then
+    if s3_sync_from "$s3_browser_sessions_base/" "$browser_sessions_dir/" "--only-show-errors"; then
         echo "  ✅ Browser session synced successfully"
     else
         echo "  ⚠️ WARNING: Failed to sync browser session from S3, starting with empty directory"
@@ -344,9 +361,9 @@ if [ -f "$LOCAL_MODEL_CONFIG" ]; then
     rm -f "$LOCAL_MODEL_CONFIG"
 fi
 
-if aws s3 ls "$s3_config_path" >/dev/null 2>&1; then
+if s3_list "$s3_config_path" >/dev/null 2>&1; then
     echo "    📥 Downloading model config from $s3_config_path"
-    if aws s3 cp "$s3_config_path" "$LOCAL_MODEL_CONFIG" --only-show-errors; then
+    if s3_copy_from "$s3_config_path" "$LOCAL_MODEL_CONFIG" "--only-show-errors"; then
         echo "    ✅ Model configuration synced successfully"
 
         # Validate the downloaded JSON
@@ -367,7 +384,7 @@ fi
 echo "  📥 Syncing user workflows from S3..."
 s3_workflows_path="$S3_METADATA_BASE/workflows/"
 
-if aws s3 ls "$s3_workflows_path" >/dev/null 2>&1; then
+if s3_list "$s3_workflows_path" >/dev/null 2>&1; then
     # Remove existing local workflows directory if it exists to ensure clean sync
     if [ -d "$LOCAL_WORKFLOWS_DIR" ] && [ -n "$(find "$LOCAL_WORKFLOWS_DIR" -mindepth 1 -print -quit 2>/dev/null)" ]; then
         echo "    🗑️ Removing existing local workflows for clean sync"
@@ -376,7 +393,7 @@ if aws s3 ls "$s3_workflows_path" >/dev/null 2>&1; then
     fi
 
     echo "    📥 Downloading workflows from $s3_workflows_path"
-    if aws s3 sync "$s3_workflows_path" "$LOCAL_WORKFLOWS_DIR/" --delete --only-show-errors; then
+    if s3_sync_from "$s3_workflows_path" "$LOCAL_WORKFLOWS_DIR/" "--delete --only-show-errors"; then
         echo "    ✅ User workflows synced successfully"
 
         # Count downloaded workflows

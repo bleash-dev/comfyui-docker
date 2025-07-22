@@ -3,6 +3,11 @@
 
 echo "🏥 Running health check..."
 
+# Source S3 interactor for cloud storage operations
+if [ -f "$NETWORK_VOLUME/scripts/s3_interactor.sh" ]; then
+    source "$NETWORK_VOLUME/scripts/s3_interactor.sh"
+fi
+
 # Check if ComfyUI is running
 if curl -f http://localhost:8080 >/dev/null 2>&1; then
     echo "✅ ComfyUI is running"
@@ -45,7 +50,7 @@ else
 fi
 
 # Check S3 connectivity instead of mount status
-if aws s3 ls "s3://$AWS_BUCKET_NAME/" >/dev/null 2>&1; then
+if s3_list "s3://$AWS_BUCKET_NAME/" >/dev/null 2>&1; then
     echo "✅ S3 connectivity working"
 else
     echo "⚠️ S3 connectivity issues detected"

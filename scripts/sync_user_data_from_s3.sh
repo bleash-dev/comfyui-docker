@@ -27,6 +27,13 @@ else
     VENV_CHUNKS_AVAILABLE=false
 fi
 
+# Source S3 interactor
+if [ -f "$NETWORK_VOLUME/scripts/s3_interactor.sh" ]; then
+    source "$NETWORK_VOLUME/scripts/s3_interactor.sh"
+else
+    echo "⚠️ S3 interactor not found, falling back to direct AWS CLI commands"
+fi
+
 # --- Helper Function: Download and Extract ---
 download_and_extract() {
     local archive_s3_uri="$1"          
@@ -43,13 +50,14 @@ download_and_extract() {
         return 1
     fi
 
-    echo "ℹ️ Checking for $archive_description archive: s3://$bucket_name/$key"
+    echo "ℹ️ Checking for $archive_description archive: $archive_s3_uri"
 
-    if aws s3api head-object --bucket "$bucket_name" --key "$key" >/dev/null 2>&1; then
+    # Check if the archive exists on S3 using S3 interactor
+    if command -v s3_object_exists >/dev/null 2>&1 && s3_object_exists "$archive_s3_uri"; then
         tmp_archive_file=$(mktemp "/tmp/s3_archive_dl_$(basename "$key" .tar.gz)_XXXXXX.tar.gz")
 
         echo "  📥 Downloading $archive_description..."
-        if aws s3 cp "s3://$bucket_name/$key" "$tmp_archive_file" --only-show-errors; then
+        if s3_copy_from "$archive_s3_uri" "$tmp_archive_file" "--only-show-errors"; then
             echo "  📦 Extracting to $local_extract_target_dir..."
             mkdir -p "$local_extract_target_dir"
             if tar -xzf "$tmp_archive_file" -C "$local_extract_target_dir"; then
@@ -77,10 +85,10 @@ download_and_restore_chunked_venvs() {
 
     echo "ℹ️ Checking for chunked $description: $s3_chunks_base"
 
-    # Check if any venv chunks are available
-    if aws s3 ls "$s3_chunks_base/" >/dev/null 2>&1; then
+    # Check if any venv chunks are available using S3 interactor
+    if command -v s3_list >/dev/null 2>&1 && s3_list "$s3_chunks_base/" >/dev/null 2>&1; then
         local venv_dirs_found
-        venv_dirs_found=$(aws s3 ls "$s3_chunks_base/" --recursive \
+        venv_dirs_found=$(s3_list "$s3_chunks_base/" "--recursive" \
 | grep -E '\.zip$|\.tar\.gz$' \
 | awk '{print $4}' \
 | awk -F'/' '{print $(NF-1)}' \

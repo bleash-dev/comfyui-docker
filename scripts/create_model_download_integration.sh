@@ -16,6 +16,7 @@ cat > "$TARGET_DIR/model_download_integration.sh" << 'EOF'
 # Source required scripts
 source "$NETWORK_VOLUME/scripts/api_client.sh"
 source "$NETWORK_VOLUME/scripts/model_config_manager.sh"
+source "$NETWORK_VOLUME/scripts/s3_interactor.sh"
 
 # Configuration
 MODEL_DOWNLOAD_LOG="$NETWORK_VOLUME/.model_download_integration.log"
@@ -567,21 +568,17 @@ download_model_with_progress() {
     trap "rm -f '$temp_download_path'" EXIT INT TERM QUIT
 
     # Get the actual file size for accurate progress status.
-    local aws_cmd="aws"
-    if [ -n "${AWS_CLI_OVERRIDE:-}" ] && [ -x "$AWS_CLI_OVERRIDE" ]; then
-        aws_cmd="$AWS_CLI_OVERRIDE"
-    fi
     local actual_total_size
-    actual_total_size=$("$aws_cmd" s3api head-object --bucket "$bucket" --key "$key" --query 'ContentLength' --output text 2>/dev/null || echo "${provided_size:-0}")
+    actual_total_size=$(s3_get_object_size "s3://${bucket}/${key}" || echo "${provided_size:-0}")
     
-    log_download "INFO" "Starting single-file download via 'aws s3 cp' for $group/$model_name"
+    log_download "INFO" "Starting single-file download via S3 for $group/$model_name"
 
     # Update status to "in progress". There is no granular percentage with this method.
     update_download_progress "$group" "$model_name" "$local_path" "$actual_total_size" 0 "progress"
     
-    # Execute the download. `aws s3 cp` handles multipart transfer internally.
+    # Execute the download using S3 interactor
     local s3_uri="s3://${bucket}/${key}"
-    if "$aws_cmd" s3 cp "$s3_uri" "$temp_download_path" --no-progress >/dev/null 2>&1; then
+    if s3_copy_from "$s3_uri" "$temp_download_path" "--no-progress"; then
         
         log_download "INFO" "Download successful. Moving to final destination: $local_path"
         
@@ -605,7 +602,7 @@ download_model_with_progress() {
         fi
     fi
 
-    # This part is reached if `aws s3 cp` or the `mv` command fails.
+    # This part is reached if S3 copy or the `mv` command fails.
     local exit_code=$?
     log_download "ERROR" "Download failed for: $group/$model_name (Exit code: $exit_code)"
     update_download_progress "$group" "$model_name" "$local_path" "$actual_total_size" 0 "failed"
@@ -624,19 +621,14 @@ chunked_s3_download_with_progress() {
     local model_name="$6"
     local expected_total_size="$7"
 
-    local aws_cmd="aws"
-    if [ -n "${AWS_CLI_OVERRIDE:-}" ] && [ -x "$AWS_CLI_OVERRIDE" ]; then
-        aws_cmd="$AWS_CLI_OVERRIDE"
-    fi
-
-    # Get file size
+    # Get file size using S3 interactor
     local total_size
     if [ -n "$expected_total_size" ] && [ "$expected_total_size" -gt 0 ]; then
         total_size="$expected_total_size"
         log_download "INFO" "Using provided file size: $total_size bytes"
     else
         log_download "INFO" "Getting actual file size from S3..."
-        total_size=$("$aws_cmd" s3api head-object --bucket "$bucket" --key "$key" --query 'ContentLength' --output text 2>/dev/null || echo "")
+        total_size=$(s3_get_object_size "s3://${bucket}/${key}" || echo "")
         if [ -z "$total_size" ] || [ "$total_size" -eq 0 ] || [ "$total_size" = "None" ]; then
             log_download "ERROR" "Failed to get file size from S3"
             return 1
@@ -660,11 +652,11 @@ chunked_s3_download_with_progress() {
     # Update progress to show download starting
     update_download_progress "$group" "$model_name" "$output_file" "$total_size" 0 "progress"
     
-    # Perform the download using aws s3 cp
+    # Perform the download using S3 interactor
     local s3_uri="s3://${bucket}/${key}"
     log_download "INFO" "Starting download: $s3_uri -> $output_file"
     
-    if "$aws_cmd" s3 cp "$s3_uri" "$temp_file" --no-progress >/dev/null 2>&1; then
+    if s3_copy_from "$s3_uri" "$temp_file" "--no-progress"; then
         # Verify file size
         local downloaded_size
         downloaded_size=$(stat -f%z "$temp_file" 2>/dev/null || stat -c%s "$temp_file" 2>/dev/null || echo "0")

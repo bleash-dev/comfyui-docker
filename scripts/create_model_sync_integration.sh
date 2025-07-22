@@ -12,6 +12,7 @@ cat > "$NETWORK_VOLUME/scripts/model_sync_integration.sh" << 'EOF'
 # Source required scripts
 source "$NETWORK_VOLUME/scripts/api_client.sh"
 source "$NETWORK_VOLUME/scripts/model_config_manager.sh"
+source "$NETWORK_VOLUME/scripts/s3_interactor.sh"
 
 # Configuration
 MODEL_SYNC_LOG="$NETWORK_VOLUME/.model_sync_integration.log"
@@ -72,7 +73,7 @@ sync_to_s3_with_progress() {
     case "$operation" in
         "cp")
             if [ -f "$source_path" ]; then
-                if aws s3 cp "$source_path" "$s3_destination" --only-show-errors; then
+                if s3_copy_to "$source_path" "$s3_destination"; then
                     success=true
                 fi
             else
@@ -82,7 +83,7 @@ sync_to_s3_with_progress() {
             ;;
         "sync")
             if [ -d "$source_path" ]; then
-                if aws s3 sync "$source_path" "$s3_destination" --only-show-errors; then
+                if s3_sync_to "$source_path" "$s3_destination"; then
                     success=true
                 fi
             else
@@ -92,7 +93,7 @@ sync_to_s3_with_progress() {
             ;;
         "sync-delete")
             if [ -d "$source_path" ]; then
-                if aws s3 sync "$source_path" "$s3_destination" --delete --only-show-errors; then
+                if s3_sync_to "$source_path" "$s3_destination" "--delete"; then
                     success=true
                 fi
             else
@@ -175,10 +176,17 @@ upload_file_with_progress() {
         # Use pv for files larger than 10MB
         log_model_sync "INFO" "Using pv for progress tracking: $file_name"
         
-        if pv "$local_file" | aws s3 cp - "$s3_destination" $metadata_args --only-show-errors; then
+        # Use pv to show progress, then upload the file
+        log_model_sync "INFO" "Showing progress with pv: $file_name"
+        pv "$local_file" > /dev/null &  # Show progress
+        local pv_pid=$!
+        
+        if s3_copy_to "$local_file" "$s3_destination" $metadata_args; then
+            kill $pv_pid 2>/dev/null || true
             log_model_sync "INFO" "Successfully uploaded with pv: $file_name"
             return 0
         else
+            kill $pv_pid 2>/dev/null || true
             log_model_sync "ERROR" "Failed to upload with pv: $file_name"
             return 1
         fi
@@ -187,16 +195,12 @@ upload_file_with_progress() {
         if [ "$file_size" -gt 104857600 ]; then
             log_model_sync "INFO" "Using multipart upload for large file: $file_name"
             
-            # Use aws s3 cp with custom progress tracking
+            # Use S3 copy with custom progress tracking
             local temp_progress_file
             temp_progress_file=$(mktemp)
             
             # Start upload in background
-            aws s3 cp "$local_file" "$s3_destination" \
-                $metadata_args \
-                --cli-read-timeout 0 \
-                --cli-write-timeout 0 \
-                --only-show-errors &
+            s3_copy_to "$local_file" "$s3_destination" $metadata_args &
             
             local upload_pid=$!
             local start_time=$(date +%s)
@@ -233,7 +237,7 @@ upload_file_with_progress() {
             fi
         else
             # For smaller files, use regular upload
-            if aws s3 cp "$local_file" "$s3_destination" $metadata_args --only-show-errors; then
+            if s3_copy_to "$local_file" "$s3_destination" $metadata_args; then
                 log_model_sync "INFO" "Successfully uploaded: $file_name"
                 return 0
             else
@@ -275,15 +279,12 @@ sync_directory_with_progress() {
     
     log_model_sync "INFO" "Found $total_files files to sync"
     
-    # Use aws s3 sync with --cli-write-timeout for better progress tracking
+    # Use S3 sync with progress tracking
     local sync_output
     sync_output=$(mktemp)
     
-    # Run aws s3 sync in background and track its progress
-    aws s3 sync "$local_dir" "$s3_destination" \
-        --only-show-errors \
-        --cli-read-timeout 0 \
-        --cli-write-timeout 0 > "$sync_output" 2>&1 &
+    # Run s3 sync in background and track its progress
+    s3_sync_to "$local_dir" "$s3_destination" > "$sync_output" 2>&1 &
     
     local sync_pid=$!
     local files_synced=0
@@ -292,7 +293,7 @@ sync_directory_with_progress() {
     while kill -0 "$sync_pid" 2>/dev/null; do
         # Check how many files have been processed by looking at S3
         local current_s3_count
-        current_s3_count=$(aws s3 ls "$s3_destination" --recursive 2>/dev/null | wc -l || echo "0")
+        current_s3_count=$(s3_list "$s3_destination" --recursive 2>/dev/null | wc -l || echo "0")
         
         if [ "$current_s3_count" -gt "$files_synced" ]; then
             files_synced="$current_s3_count"

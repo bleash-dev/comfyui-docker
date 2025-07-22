@@ -20,6 +20,11 @@ for var in "${required_vars[@]}"; do
     fi
 done
 
+# Source S3 interactor for cloud storage operations
+if [ -f "$NETWORK_VOLUME/scripts/s3_interactor.sh" ]; then
+    source "$NETWORK_VOLUME/scripts/s3_interactor.sh"
+fi
+
 # Define tracking paths
 TRACKING_DIR="$NETWORK_VOLUME/.pod_tracking"
 LOCAL_TRACKING_FILE="$TRACKING_DIR/current_session.json"
@@ -100,7 +105,7 @@ create_session_data() {
         startup_completed_val="true"
     fi
     # Remove FUSE mount detection, use S3 connection test instead
-    s3_connected_val=$(aws s3 ls "s3://$AWS_BUCKET_NAME/" >/dev/null 2>&1 && echo "true" || echo "false")
+    s3_connected_val=$(s3_list "s3://$AWS_BUCKET_NAME/" >/dev/null 2>&1 && echo "true" || echo "false")
 
     cat > "$LOCAL_TRACKING_FILE" << EOF
 {
@@ -182,14 +187,14 @@ sync_tracking_data() {
 
         if command -v jq >/dev/null 2>&1; then
             # Update S3 connectivity status instead of mount status
-            local s3_connected=$(aws s3 ls "s3://$AWS_BUCKET_NAME/" >/dev/null 2>&1 && echo "true" || echo "false")
+            local s3_connected=$(s3_list "s3://$AWS_BUCKET_NAME/" >/dev/null 2>&1 && echo "true" || echo "false")
             jq ".session.duration_seconds = $duration | .session.duration_human = \"$(printf '%02d:%02d:%02d' $((duration/3600)) $((duration%3600/60)) $((duration%60)))\" | .session.last_update = \"$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)\" | .session.last_timestamp = $current_time | .metrics.s3_connected = $s3_connected" "$LOCAL_TRACKING_FILE" > "$LOCAL_TRACKING_FILE.tmp" && mv "$LOCAL_TRACKING_FILE.tmp" "$LOCAL_TRACKING_FILE"
         else
             # If jq not found, create_session_data (called by periodic loop) will handle updating duration
             :
         fi
         
-        if aws s3 cp "$LOCAL_TRACKING_FILE" "$S3_SESSION_FILE" --only-show-errors; then
+        if s3_copy_to "$LOCAL_TRACKING_FILE" "$S3_SESSION_FILE" "--only-show-errors"; then
             echo "✅ Tracking data synced to S3: $S3_SESSION_FILE"
         else
             echo "❌ Failed to sync tracking data to S3."
@@ -211,7 +216,7 @@ update_execution_summary() {
     local temp_summary_download="$TRACKING_DIR/execution_summary_download.json"
 
     # Try to download existing summary from S3
-    if aws s3 cp "$S3_SUMMARY_FILE" "$temp_summary_download" --only-show-errors 2>/dev/null; then
+    if s3_copy_from "$S3_SUMMARY_FILE" "$temp_summary_download" "--only-show-errors" 2>/dev/null; then
         echo "ℹ️ Downloaded existing execution summary from S3."
         mv "$temp_summary_download" "$temp_summary_local"
     else
@@ -259,7 +264,7 @@ EOF
        "$temp_summary_local" > "$temp_summary_local.tmp" && mv "$temp_summary_local.tmp" "$temp_summary_local"
 
     # Upload updated summary to S3
-    if aws s3 cp "$temp_summary_local" "$S3_SUMMARY_FILE" --only-show-errors; then
+    if s3_copy_to "$temp_summary_local" "$S3_SUMMARY_FILE" "--only-show-errors"; then
         echo "✅ Execution summary updated for pod: $POD_ID to $S3_SUMMARY_FILE"
     else
         echo "❌ Failed to update execution summary to S3."
@@ -310,7 +315,7 @@ sync_tracking_data
 echo "⏳ Waiting indefinitely for S3 setup to complete (AWS CLI setup or $NETWORK_VOLUME/.setup_complete)..."
 s3_setup_done=false
 while true; do
-    if aws s3 ls "s3://$AWS_BUCKET_NAME/" >/dev/null 2>&1 || [ -f "$NETWORK_VOLUME/.setup_complete" ]; then
+    if s3_list "s3://$AWS_BUCKET_NAME/" >/dev/null 2>&1 || [ -f "$NETWORK_VOLUME/.setup_complete" ]; then
         echo "✅ S3 setup detected as complete."
         update_timestamp "s3_setup_complete"
         s3_setup_done=true # Set flag

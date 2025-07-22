@@ -9,10 +9,11 @@ cat > "$NETWORK_VOLUME/scripts/sync_user_data.sh" << 'EOF'
 # Sync user-specific data to S3 by zipping and uploading archives.
 # This version syncs every time it is called.
 
-# Source the sync lock manager, API client, and model sync integration for progress notifications
+# Source the sync lock manager, API client, model sync integration, and S3 interactor for progress notifications
 source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
 source "$NETWORK_VOLUME/scripts/api_client.sh"
 source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
+source "$NETWORK_VOLUME/scripts/s3_interactor.sh"
 
 ### REMOVED: All hash calculation and cache-checking functions ###
 
@@ -170,11 +171,12 @@ cat > "$NETWORK_VOLUME/scripts/sync_user_shared_data.sh" << 'EOF'
 # Sync user-shared data to S3 (data that persists across different pods for the same user)
 # This version syncs every time it is called.
 
-# Source the sync lock manager, API client, model sync integration, and venv chunk manager
+# Source the sync lock manager, API client, model sync integration, venv chunk manager, and S3 interactor
 source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
 source "$NETWORK_VOLUME/scripts/api_client.sh"
 source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
 source "$NETWORK_VOLUME/scripts/venv_chunk_manager.sh"
+source "$NETWORK_VOLUME/scripts/s3_interactor.sh"
 
 ### REMOVED: All hash calculation and cache-checking functions ###
 
@@ -231,12 +233,12 @@ sync_user_shared_data_internal() {
             echo "  🧹 Cleaning up legacy single venv chunk structure..."
             local legacy_venv_chunks_path="$S3_USER_SHARED_BASE/venv_chunks"
             # Check if legacy chunks exist at the root level (not in subdirectories)
-            if aws s3 ls "$legacy_venv_chunks_path/" 2>/dev/null | grep -q "venv_chunk_.*\.tar\.gz"; then
+            if s3_list "$legacy_venv_chunks_path/" 2>/dev/null | grep -q "venv_chunk_.*\.tar\.gz"; then
                 echo "    🗑️ Removing legacy venv chunks to avoid duplication..."
-                aws s3 rm "$legacy_venv_chunks_path" --recursive --exclude "*/" --include "venv_chunk_*" --quiet 2>/dev/null || true
-                aws s3 rm "$legacy_venv_chunks_path/venv_chunks.checksums" --quiet 2>/dev/null || true
-                aws s3 rm "$legacy_venv_chunks_path/source.checksum" --quiet 2>/dev/null || true
-                aws s3 rm "$legacy_venv_chunks_path/venv_other_folders.zip" --quiet 2>/dev/null || true
+                s3_remove "$legacy_venv_chunks_path" "--recursive --exclude "*/" --include "venv_chunk_*" --quiet" 2>/dev/null || true
+                s3_remove "$legacy_venv_chunks_path/venv_chunks.checksums" "--quiet" 2>/dev/null || true
+                s3_remove "$legacy_venv_chunks_path/source.checksum" "--quiet" 2>/dev/null || true
+                s3_remove "$legacy_venv_chunks_path/venv_other_folders.zip" "--quiet" 2>/dev/null || true
                 echo "    ✅ Legacy venv chunks cleaned up"
             fi
         fi
@@ -449,9 +451,10 @@ cat > "$NETWORK_VOLUME/scripts/sync_global_shared_models.sh" << 'EOF'
 #!/bin/bash
 # Sync global shared models and browser session to S3 with API integration and progress reporting
 
-# Source the sync lock manager and model sync integration
+# Source the sync lock manager, model sync integration, and S3 interactor
 source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
 source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
+source "$NETWORK_VOLUME/scripts/s3_interactor.sh"
 
 sync_global_shared_models_internal() {
     echo "🌐 Syncing global shared resources to S3..."
@@ -516,10 +519,11 @@ cat > "$NETWORK_VOLUME/scripts/sync_comfyui_assets.sh" << 'EOF'
 # Sync ComfyUI input/output directories to S3 (one-way: pod to S3 only, with deletions)
 # This version syncs every time it is called.
 
-# Source the sync lock manager, API client, and model sync integration for progress notifications
+# Source the sync lock manager, API client, model sync integration, and S3 interactor for progress notifications
 source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
 source "$NETWORK_VOLUME/scripts/api_client.sh"
 source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
+source "$NETWORK_VOLUME/scripts/s3_interactor.sh"
 
 ### REMOVED: All hash calculation and cache-checking functions ###
 
@@ -539,8 +543,8 @@ sync_comfyui_assets_internal() {
         notify_sync_progress "user_assets" "PROGRESS" 25
         s3_input_path="$S3_ASSETS_BASE/input/"
         
-        # Use aws s3 sync directly with proper error handling
-        if aws s3 sync "$LOCAL_INPUT_DIR" "$s3_input_path" --delete --only-show-errors; then
+        # Use S3 interactor sync with proper error handling
+        if s3_sync_to "$LOCAL_INPUT_DIR" "$s3_input_path" "--delete --only-show-errors"; then
             echo "  ✅ Successfully synced input assets"
         else
             echo "  ❌ Failed to sync input assets"
@@ -550,9 +554,9 @@ sync_comfyui_assets_internal() {
         notify_sync_progress "user_assets" "PROGRESS" 25
         # If local directory doesn't exist, optionally delete all S3 content
         s3_input_path="$S3_ASSETS_BASE/input/"
-        if aws s3 ls "$s3_input_path" >/dev/null 2>&1; then
+        if s3_list "$s3_input_path" >/dev/null 2>&1; then
             echo "  🗑️ Local input directory missing, cleaning S3 input directory..."
-            aws s3 rm "$s3_input_path" --recursive --only-show-errors || \
+            s3_remove "$s3_input_path" "--recursive --only-show-errors" || \
                 echo "  ⚠️ Failed to clean S3 input directory"
         fi
     fi
@@ -563,8 +567,8 @@ sync_comfyui_assets_internal() {
         echo "  📤 Syncing output assets to S3 (with deletions)..."
         s3_output_path="$S3_ASSETS_BASE/output/"
         
-        # Use aws s3 sync directly with proper error handling
-        if aws s3 sync "$LOCAL_OUTPUT_DIR" "$s3_output_path" --only-show-errors; then
+        # Use S3 interactor sync with proper error handling
+        if s3_sync_to "$LOCAL_OUTPUT_DIR" "$s3_output_path" "--only-show-errors"; then
             echo "  ✅ Successfully synced output assets"
         else
             echo "  ❌ Failed to sync output assets"
@@ -573,9 +577,9 @@ sync_comfyui_assets_internal() {
         echo "ℹ️ No output directory found at $LOCAL_OUTPUT_DIR"
         # If local directory doesn't exist, optionally delete all S3 content
         s3_output_path="$S3_ASSETS_BASE/output/"
-        if aws s3 ls "$s3_output_path" >/dev/null 2>&1; then
+        if s3_list "$s3_output_path" >/dev/null 2>&1; then
             echo "  🗑️ Local output directory missing, cleaning S3 output directory..."
-            aws s3 rm "$s3_output_path" --recursive --only-show-errors || \
+            s3_remove "$s3_output_path" "--recursive --only-show-errors" || \
                 echo "  ⚠️ Failed to clean S3 output directory"
         fi
     fi
@@ -655,9 +659,9 @@ sync_pod_metadata_internal() {
         notify_sync_progress "pod_metadata" "PROGRESS" 90
         # If local directory doesn't exist, optionally clean S3 workflows directory
         s3_workflows_path="$S3_METADATA_BASE/workflows/"
-        if aws s3 ls "$s3_workflows_path" >/dev/null 2>&1; then
+        if s3_list "$s3_workflows_path" >/dev/null 2>&1; then
             echo "  🗑️ Local workflows directory missing, cleaning S3 workflows directory..."
-            aws s3 rm "$s3_workflows_path" --recursive --only-show-errors || \
+            s3_remove "$s3_workflows_path" "--recursive --only-show-errors" || \
                 echo "  ⚠️ Failed to clean S3 workflows directory"
         fi
     fi
