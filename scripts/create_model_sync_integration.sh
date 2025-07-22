@@ -30,6 +30,64 @@ log_model_sync() {
     echo "[$timestamp] [$level] Model Sync: $message" | tee -a "$MODEL_SYNC_LOG" >&2
 }
 
+# Function to compress model file to .tar.zst format
+compress_model_file() {
+    local source_file="$1"
+    local temp_dir="$2"
+    local compressed_file_output="$3"  # Variable name to store the compressed file path
+    
+    if [ -z "$source_file" ] || [ -z "$temp_dir" ] || [ -z "$compressed_file_output" ]; then
+        log_model_sync "ERROR" "Missing parameters for compress_model_file"
+        return 1
+    fi
+    
+    if [ ! -f "$source_file" ]; then
+        log_model_sync "ERROR" "Source file does not exist: $source_file"
+        return 1
+    fi
+    
+    # Check if zstd is available
+    if ! command -v zstd >/dev/null 2>&1; then
+        log_model_sync "ERROR" "zstd command not found. Cannot compress model."
+        return 1
+    fi
+    
+    local file_name=$(basename "$source_file")
+    local compressed_file="$temp_dir/${file_name}.tar.zst"
+    
+    log_model_sync "INFO" "Compressing model file: $file_name"
+    
+    # Create a tar archive and compress it with zstd in one step
+    # Use maximum compression level (22) for best compression ratio
+    if tar -cf - -C "$(dirname "$source_file")" "$(basename "$source_file")" | zstd -22 -T0 -o "$compressed_file"; then
+        log_model_sync "INFO" "Successfully compressed $file_name to $(basename "$compressed_file")"
+        
+        # Get compressed file size
+        local compressed_size
+        compressed_size=$(stat -f%z "$compressed_file" 2>/dev/null || stat -c%s "$compressed_file" 2>/dev/null || echo "0")
+        
+        # Get original file size
+        local original_size
+        original_size=$(stat -f%z "$source_file" 2>/dev/null || stat -c%s "$source_file" 2>/dev/null || echo "0")
+        
+        # Calculate compression ratio
+        local compression_ratio=0
+        if [ "$original_size" -gt 0 ]; then
+            compression_ratio=$(echo "scale=2; $compressed_size * 100 / $original_size" | bc 2>/dev/null || echo "0")
+        fi
+        
+        log_model_sync "INFO" "Compression: $original_size bytes -> $compressed_size bytes (${compression_ratio}%)"
+        
+        # Return the compressed file path through the variable name
+        eval "$compressed_file_output='$compressed_file'"
+        return 0
+    else
+        log_model_sync "ERROR" "Failed to compress model file: $file_name"
+        rm -f "$compressed_file"
+        return 1
+    fi
+}
+
 # Function to sync files/directories to S3 with progress tracking (for non-model uploads)
 sync_to_s3_with_progress() {
     local source_path="$1"
@@ -167,9 +225,41 @@ upload_file_with_progress() {
     
     log_model_sync "INFO" "Uploading $file_name to S3 (${file_size} bytes)"
     
-    # Prepare metadata with download URL (required) - escape URL for metadata
-    local metadata_args="--metadata downloadUrl=$download_url"
-    log_model_sync "INFO" "Including download URL in metadata: $download_url"
+    # Prepare metadata with download URL (required) and original file size
+    local metadata_args="--metadata downloadUrl=$download_url,uncompressed-size=$file_size"
+    log_model_sync "INFO" "Including download URL and uncompressed size in metadata: $download_url, size: $file_size"
+    
+    # Create temporary directory for compression
+    local temp_dir
+    temp_dir=$(mktemp -d)
+    trap "rm -rf '$temp_dir'" EXIT INT TERM QUIT
+    
+    # Compress the model file
+    local compressed_file=""
+    local upload_file="$local_file"
+    local compressed_s3_destination="${s3_destination}.tar.zst"
+    
+    # Check if compression should be used (for files larger than 10MB)
+    if [ "$file_size" -gt 10485760 ]; then
+        log_model_sync "INFO" "File is larger than 10MB, applying compression: $file_name"
+        
+        if compress_model_file "$local_file" "$temp_dir" compressed_file; then
+            upload_file="$compressed_file"
+            s3_destination="$compressed_s3_destination"
+            
+            # Get compressed file size for progress tracking
+            file_size=$(stat -f%z "$upload_file" 2>/dev/null || stat -c%s "$upload_file" 2>/dev/null || echo "0")
+            log_model_sync "INFO" "Using compressed file for upload: $(basename "$upload_file") (${file_size} bytes)"
+        else
+            log_model_sync "WARN" "Compression failed, uploading uncompressed file: $file_name"
+            # Remove compressed-specific metadata if compression failed
+            metadata_args="--metadata downloadUrl=$download_url"
+        fi
+    else
+        log_model_sync "INFO" "File is smaller than 10MB, uploading uncompressed: $file_name"
+        # Remove compressed-specific metadata for small files
+        metadata_args="--metadata downloadUrl=$download_url"
+    fi
     
     # Check if pv (pipe viewer) is available for better progress tracking
     if command -v pv >/dev/null 2>&1 && [ "$file_size" -gt 10485760 ]; then
@@ -178,10 +268,10 @@ upload_file_with_progress() {
         
         # Use pv to show progress, then upload the file
         log_model_sync "INFO" "Showing progress with pv: $file_name"
-        pv "$local_file" > /dev/null &  # Show progress
+        pv "$upload_file" > /dev/null &  # Show progress
         local pv_pid=$!
         
-        if s3_copy_to "$local_file" "$s3_destination" $metadata_args; then
+        if s3_copy_to "$upload_file" "$s3_destination" $metadata_args; then
             kill $pv_pid 2>/dev/null || true
             log_model_sync "INFO" "Successfully uploaded with pv: $file_name"
             return 0
@@ -200,7 +290,7 @@ upload_file_with_progress() {
             temp_progress_file=$(mktemp)
             
             # Start upload in background
-            s3_copy_to "$local_file" "$s3_destination" $metadata_args &
+            s3_copy_to "$upload_file" "$s3_destination" $metadata_args &
             
             local upload_pid=$!
             local start_time=$(date +%s)
@@ -237,7 +327,7 @@ upload_file_with_progress() {
             fi
         else
             # For smaller files, use regular upload
-            if s3_copy_to "$local_file" "$s3_destination" $metadata_args; then
+            if s3_copy_to "$upload_file" "$s3_destination" $metadata_args; then
                 log_model_sync "INFO" "Successfully uploaded: $file_name"
                 return 0
             else

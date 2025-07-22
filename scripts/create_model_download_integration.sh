@@ -33,6 +33,111 @@ MAX_CONCURRENT_DOWNLOADS=3
 mkdir -p "$(dirname "$MODEL_DOWNLOAD_LOG")"
 touch "$MODEL_DOWNLOAD_LOG"
 
+# Function to compress model file to .tar.zst format
+compress_model_file() {
+    local source_file="$1"
+    local temp_dir="$2"
+    local compressed_file_output="$3"  # Variable name to store the compressed file path
+    
+    if [ -z "$source_file" ] || [ -z "$temp_dir" ] || [ -z "$compressed_file_output" ]; then
+        log_download "ERROR" "Missing parameters for compress_model_file"
+        return 1
+    fi
+    
+    if [ ! -f "$source_file" ]; then
+        log_download "ERROR" "Source file does not exist: $source_file"
+        return 1
+    fi
+    
+    # Check if zstd is available
+    if ! command -v zstd >/dev/null 2>&1; then
+        log_download "ERROR" "zstd command not found. Cannot compress model."
+        return 1
+    fi
+    
+    local file_name=$(basename "$source_file")
+    local compressed_file="$temp_dir/${file_name}.tar.zst"
+    
+    log_download "INFO" "Compressing model file: $file_name"
+    
+    # Create a tar archive and compress it with zstd in one step
+    # Use maximum compression level (22) for best compression ratio
+    if tar -cf - -C "$(dirname "$source_file")" "$(basename "$source_file")" | zstd -22 -T0 -o "$compressed_file"; then
+        log_download "INFO" "Successfully compressed $file_name to $(basename "$compressed_file")"
+        
+        # Get compressed file size
+        local compressed_size
+        compressed_size=$(stat -f%z "$compressed_file" 2>/dev/null || stat -c%s "$compressed_file" 2>/dev/null || echo "0")
+        
+        # Get original file size
+        local original_size
+        original_size=$(stat -f%z "$source_file" 2>/dev/null || stat -c%s "$source_file" 2>/dev/null || echo "0")
+        
+        # Calculate compression ratio
+        local compression_ratio=0
+        if [ "$original_size" -gt 0 ]; then
+            compression_ratio=$(echo "scale=2; $compressed_size * 100 / $original_size" | bc 2>/dev/null || echo "0")
+        fi
+        
+        log_download "INFO" "Compression: $original_size bytes -> $compressed_size bytes (${compression_ratio}%)"
+        
+        # Return the compressed file path through the variable name
+        eval "$compressed_file_output='$compressed_file'"
+        return 0
+    else
+        log_download "ERROR" "Failed to compress model file: $file_name"
+        rm -f "$compressed_file"
+        return 1
+    fi
+}
+
+# Function to decompress model file from .tar.zst format
+decompress_model_file() {
+    local compressed_file="$1"
+    local output_dir="$2"
+    local decompressed_file_output="$3"  # Variable name to store the decompressed file path
+    
+    if [ -z "$compressed_file" ] || [ -z "$output_dir" ] || [ -z "$decompressed_file_output" ]; then
+        log_download "ERROR" "Missing parameters for decompress_model_file"
+        return 1
+    fi
+    
+    if [ ! -f "$compressed_file" ]; then
+        log_download "ERROR" "Compressed file does not exist: $compressed_file"
+        return 1
+    fi
+    
+    # Check if zstd is available
+    if ! command -v zstd >/dev/null 2>&1; then
+        log_download "ERROR" "zstd command not found. Cannot decompress model."
+        return 1
+    fi
+    
+    log_download "INFO" "Decompressing model file: $(basename "$compressed_file")"
+    
+    # Create output directory
+    mkdir -p "$output_dir"
+    
+    # Decompress and extract in one step
+    if zstd -d -c "$compressed_file" | tar -xf - -C "$output_dir"; then
+        # Find the extracted file (should be the only file in the output directory)
+        local extracted_file
+        extracted_file=$(find "$output_dir" -type f -maxdepth 1 | head -1)
+        
+        if [ -n "$extracted_file" ] && [ -f "$extracted_file" ]; then
+            log_download "INFO" "Successfully decompressed to: $(basename "$extracted_file")"
+            eval "$decompressed_file_output='$extracted_file'"
+            return 0
+        else
+            log_download "ERROR" "No file found after decompression"
+            return 1
+        fi
+    else
+        log_download "ERROR" "Failed to decompress model file: $(basename "$compressed_file")"
+        return 1
+    fi
+}
+
 # Function to log download activities
 log_download() {
     local level="$1"
@@ -516,7 +621,119 @@ update_download_progress() {
     fi
 }
 
-# Function to download a single model with progress tracking from S3 using chunked download
+# Function to check if compressed version exists and get metadata
+check_compressed_version() {
+    local s3_path="$1"
+    local compressed_metadata_output="$2"  # Variable name to store metadata
+    
+    # Create compressed S3 path by adding .tar.zst extension
+    local compressed_s3_path="${s3_path}.tar.zst"
+    
+    log_download "DEBUG" "Checking for compressed version: $compressed_s3_path"
+    
+    # Check if compressed version exists and get its metadata
+    if s3_object_exists "$compressed_s3_path"; then
+        log_download "INFO" "Found compressed version: $compressed_s3_path"
+        
+        # Get metadata including uncompressed-size
+        local metadata
+        metadata=$(s3_get_object_metadata "$compressed_s3_path" 2>/dev/null || echo "{}")
+        
+        if [ -n "$metadata" ] && [ "$metadata" != "{}" ]; then
+            eval "$compressed_metadata_output='$metadata'"
+            echo "$compressed_s3_path"  # Return compressed path
+            return 0
+        else
+            log_download "WARN" "Compressed version exists but metadata could not be retrieved"
+        fi
+    fi
+    
+    log_download "DEBUG" "No compressed version found, will use original: $s3_path"
+    echo "$s3_path"  # Return original path
+    return 1
+}
+
+# Function to download and decompress model if needed
+download_and_decompress_model() {
+    local s3_uri="$1"
+    local final_output_path="$2"
+    local group="$3"
+    local model_name="$4"
+    local is_compressed="$5"
+    local uncompressed_size="$6"
+    
+    if [ -z "$s3_uri" ] || [ -z "$final_output_path" ] || [ -z "$group" ] || [ -z "$model_name" ]; then
+        log_download "ERROR" "Missing parameters for download_and_decompress_model"
+        return 1
+    fi
+    
+    # Create temporary file for download
+    local temp_download_path="${final_output_path}.download.tmp"
+    local temp_decompress_dir
+    
+    # Download the file (compressed or uncompressed)
+    log_download "INFO" "Downloading: $s3_uri"
+    if ! s3_copy_from "$s3_uri" "$temp_download_path" "--no-progress"; then
+        log_download "ERROR" "Failed to download: $s3_uri"
+        rm -f "$temp_download_path"
+        return 1
+    fi
+    
+    # If it's compressed, decompress it
+    if [ "$is_compressed" = "true" ]; then
+        log_download "INFO" "Decompressing downloaded file: $(basename "$temp_download_path")"
+        
+        # Create temporary directory for decompression
+        temp_decompress_dir=$(mktemp -d)
+        trap "rm -rf '$temp_decompress_dir'" EXIT INT TERM QUIT
+        
+        local decompressed_file=""
+        if decompress_model_file "$temp_download_path" "$temp_decompress_dir" decompressed_file; then
+            # Move decompressed file to final location
+            if mv "$decompressed_file" "$final_output_path"; then
+                log_download "INFO" "Successfully decompressed and moved to: $final_output_path"
+                
+                # Verify uncompressed size if provided
+                if [ -n "$uncompressed_size" ] && [ "$uncompressed_size" -gt 0 ]; then
+                    local actual_size
+                    actual_size=$(stat -f%z "$final_output_path" 2>/dev/null || stat -c%s "$final_output_path" 2>/dev/null || echo "0")
+                    
+                    if [ "$actual_size" -ne "$uncompressed_size" ]; then
+                        log_download "WARN" "Decompressed size ($actual_size) doesn't match expected size ($uncompressed_size)"
+                    else
+                        log_download "INFO" "Decompressed size verified: $actual_size bytes"
+                    fi
+                fi
+                
+                # Clean up
+                rm -f "$temp_download_path"
+                rm -rf "$temp_decompress_dir"
+                return 0
+            else
+                log_download "ERROR" "Failed to move decompressed file to final location"
+                rm -f "$temp_download_path"
+                rm -rf "$temp_decompress_dir"
+                return 1
+            fi
+        else
+            log_download "ERROR" "Failed to decompress downloaded file"
+            rm -f "$temp_download_path"
+            rm -rf "$temp_decompress_dir"
+            return 1
+        fi
+    else
+        # Not compressed, just move to final location
+        if mv "$temp_download_path" "$final_output_path"; then
+            log_download "INFO" "Successfully moved uncompressed file to: $final_output_path"
+            return 0
+        else
+            log_download "ERROR" "Failed to move file to final location"
+            rm -f "$temp_download_path"
+            return 1
+        fi
+    fi
+}
+
 # This is the simplest and most robust method, keeping the original function name.
 download_model_with_progress() {
     local group="$1"
@@ -556,160 +773,64 @@ download_model_with_progress() {
         return 1
     fi
 
+    # Check for compressed version first
+    local download_s3_path="s3://${bucket}/${key}"
+    local compressed_metadata=""
+    local actual_download_path
+    local is_compressed=false
+    local uncompressed_size="$provided_size"
+    
+    actual_download_path=$(check_compressed_version "$download_s3_path" compressed_metadata)
+    
+    if [ "$actual_download_path" != "$download_s3_path" ]; then
+        # Found compressed version
+        is_compressed=true
+        log_download "INFO" "Using compressed version for download: $(basename "$actual_download_path")"
+        
+        # Extract uncompressed size from metadata if available
+        if [ -n "$compressed_metadata" ]; then
+            local metadata_uncompressed_size
+            metadata_uncompressed_size=$(echo "$compressed_metadata" | jq -r '.uncompressed-size // empty' 2>/dev/null)
+            if [ -n "$metadata_uncompressed_size" ] && [ "$metadata_uncompressed_size" != "null" ]; then
+                uncompressed_size="$metadata_uncompressed_size"
+                log_download "INFO" "Using uncompressed size from metadata: $uncompressed_size bytes"
+            fi
+        fi
+    else
+        log_download "INFO" "Using uncompressed version for download: $(basename "$actual_download_path")"
+    fi
+
     # Create the final destination directory if it doesn't exist
     mkdir -p "$(dirname "$local_path")"
 
-    # Create a temporary file to download to. This ensures the final file is never incomplete.
-    # We create it in the same directory to make the final `mv` atomic.
-    local temp_download_path
-    temp_download_path=$(mktemp -p "$(dirname "$local_path")" "download_$(basename "$local_path")_XXXXXX.tmp")
+    # Get the actual file size for progress tracking (of the file we're downloading)
+    local download_file_size
+    download_file_size=$(s3_get_object_size "$actual_download_path" || echo "${provided_size:-0}")
     
-    # Ensure the temporary file is cleaned up on script exit, failure, or cancellation
-    trap "rm -f '$temp_download_path'" EXIT INT TERM QUIT
+    log_download "INFO" "Starting download via S3 for $group/$model_name"
+    log_download "INFO" "Download size: $download_file_size bytes, Final size: ${uncompressed_size:-$download_file_size} bytes"
 
-    # Get the actual file size for accurate progress status.
-    local actual_total_size
-    actual_total_size=$(s3_get_object_size "s3://${bucket}/${key}" || echo "${provided_size:-0}")
+    # Update status to "in progress" using the final uncompressed size for progress reporting
+    update_download_progress "$group" "$model_name" "$local_path" "${uncompressed_size:-$download_file_size}" 0 "progress"
     
-    log_download "INFO" "Starting single-file download via S3 for $group/$model_name"
-
-    # Update status to "in progress". There is no granular percentage with this method.
-    update_download_progress "$group" "$model_name" "$local_path" "$actual_total_size" 0 "progress"
-    
-    # Execute the download using S3 interactor
-    local s3_uri="s3://${bucket}/${key}"
-    if s3_copy_from "$s3_uri" "$temp_download_path" "--no-progress"; then
+    # Download and decompress if needed
+    if download_and_decompress_model "$actual_download_path" "$local_path" "$group" "$model_name" "$is_compressed" "$uncompressed_size"; then
+        local final_size
+        final_size=$(stat -f%z "$local_path" 2>/dev/null || stat -c%s "$local_path" 2>/dev/null || echo "${uncompressed_size:-$download_file_size}")
         
-        log_download "INFO" "Download successful. Moving to final destination: $local_path"
+        # Update status to completed
+        update_download_progress "$group" "$model_name" "$local_path" "$final_size" "$final_size" "completed"
+        log_download "INFO" "Download completed successfully: $group/$model_name ($final_size bytes)"
         
-        # Atomically move the completed file to its final destination
-        if mv "$temp_download_path" "$local_path"; then
-            local final_size
-            final_size=$(stat -f%z "$local_path" 2>/dev/null || stat -c%s "$local_path" 2>/dev/null || echo "$actual_total_size")
-            
-            # Update status to completed
-            update_download_progress "$group" "$model_name" "$local_path" "$final_size" "$final_size" "completed"
-            log_download "INFO" "Download completed successfully: $group/$model_name ($final_size bytes)"
-            
-            # Clean up the trap and resolve symlinks
-            trap - EXIT INT TERM QUIT
-            if command -v resolve_symlinks >/dev/null 2>&1; then
-                resolve_symlinks "" "$model_name" false
-            fi
-            return 0
-        else
-            log_download "ERROR" "Failed to move temporary file to final destination: $local_path"
+        # Resolve symlinks if function is available
+        if command -v resolve_symlinks >/dev/null 2>&1; then
+            resolve_symlinks "" "$model_name" false
         fi
-    fi
-
-    # This part is reached if S3 copy or the `mv` command fails.
-    local exit_code=$?
-    log_download "ERROR" "Download failed for: $group/$model_name (Exit code: $exit_code)"
-    update_download_progress "$group" "$model_name" "$local_path" "$actual_total_size" 0 "failed"
-    
-    # The trap will automatically clean up the temporary file.
-    return 1
-}
-
-# Function to perform simplified S3 download with progress tracking
-chunked_s3_download_with_progress() {
-    local bucket="$1"
-    local key="$2"
-    local output_file="$3"
-    local chunk_dir="$4"  # Not used anymore but kept for compatibility
-    local group="$5"
-    local model_name="$6"
-    local expected_total_size="$7"
-
-    # Get file size using S3 interactor
-    local total_size
-    if [ -n "$expected_total_size" ] && [ "$expected_total_size" -gt 0 ]; then
-        total_size="$expected_total_size"
-        log_download "INFO" "Using provided file size: $total_size bytes"
+        return 0
     else
-        log_download "INFO" "Getting actual file size from S3..."
-        total_size=$(s3_get_object_size "s3://${bucket}/${key}" || echo "")
-        if [ -z "$total_size" ] || [ "$total_size" -eq 0 ] || [ "$total_size" = "None" ]; then
-            log_download "ERROR" "Failed to get file size from S3"
-            return 1
-        fi
-        log_download "INFO" "Retrieved actual file size from S3: $total_size bytes"
-    fi
-
-    # Check for cancellation before starting
-    if is_download_cancelled "$group" "$model_name"; then
-        log_download "INFO" "Download cancelled before starting: $group/$model_name"
-        update_download_progress "$group" "$model_name" "$output_file" "$total_size" 0 "cancelled"
+        log_download "ERROR" "Download/decompression failed for: $group/$model_name"
+        update_download_progress "$group" "$model_name" "$local_path" "${uncompressed_size:-$download_file_size}" 0 "failed"
         return 1
-    fi
-
-    # Create directory for output file
-    mkdir -p "$(dirname "$output_file")"
-
-    # Create temporary file for atomic move
-    local temp_file="${output_file}.tmp"
-    
-    # Update progress to show download starting
-    update_download_progress "$group" "$model_name" "$output_file" "$total_size" 0 "progress"
-    
-    # Perform the download using S3 interactor
-    local s3_uri="s3://${bucket}/${key}"
-    log_download "INFO" "Starting download: $s3_uri -> $output_file"
-    
-    if s3_copy_from "$s3_uri" "$temp_file" "--no-progress"; then
-        # Verify file size
-        local downloaded_size
-        downloaded_size=$(stat -f%z "$temp_file" 2>/dev/null || stat -c%s "$temp_file" 2>/dev/null || echo "0")
-        
-        if [ "$downloaded_size" -eq "$total_size" ]; then
-            # Move to final location
-            if mv "$temp_file" "$output_file"; then
-                log_download "INFO" "Download completed successfully: $output_file ($downloaded_size bytes)"
-                update_download_progress "$group" "$model_name" "$output_file" "$total_size" "$total_size" "completed"
-                return 0
-            else
-                log_download "ERROR" "Failed to move temporary file to final location"
-                rm -f "$temp_file"
-                update_download_progress "$group" "$model_name" "$output_file" "$total_size" 0 "failed"
-                return 1
-            fi
-        else
-            log_download "ERROR" "Downloaded file size ($downloaded_size) doesn't match expected size ($total_size)"
-            rm -f "$temp_file"
-            update_download_progress "$group" "$model_name" "$output_file" "$total_size" 0 "failed"
-            return 1
-        fi
-    else
-        log_download "ERROR" "S3 download failed for: $s3_uri"
-        rm -f "$temp_file"
-        update_download_progress "$group" "$model_name" "$output_file" "$total_size" 0 "failed"
-        return 1
-    fi
-}
-
-# Function to clean up chunked download resources
-cleanup_chunked_download() {
-    local group="$1"
-    local model_name="$2"
-    local chunk_dir="$3"
-    local chunk_dir_file="$4"
-    local output_file="$5"  # If provided and cancellation, don't create this file
-    
-    # Remove chunk directory (no longer used for simplified download)
-    if [ -n "$chunk_dir" ] && [ -d "$chunk_dir" ]; then
-        log_download "DEBUG" "Cleaning up chunk directory: $chunk_dir"
-        rm -rf "$chunk_dir"
-    fi
-    
-    # Remove chunk directory tracking file
-    if [ -n "$chunk_dir_file" ] && [ -f "$chunk_dir_file" ]; then
-        rm -f "$chunk_dir_file"
-    fi
-    
-    # If this is a cancellation and we have an output file, make sure it doesn't exist
-    if [ -n "$output_file" ] && is_download_cancelled "$group" "$model_name"; then
-        rm -f "$output_file" "$output_file.tmp"
-        log_download "DEBUG" "Removed output file due to cancellation: $output_file"
     fi
 }
 
