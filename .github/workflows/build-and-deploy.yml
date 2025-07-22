@@ -52,7 +52,7 @@ jobs:
       uses: docker/metadata-action@v5
       with:
         images: |
-          ${{ secrets.DOCKER_HUB_USER_NAME }}/${{ env.IMAGE_NAME }} ${{github.ref == 'refs/heads/dev' && '-dev' || ''}}
+          ${{ secrets.DOCKER_HUB_USER_NAME }}/${{ env.IMAGE_NAME }}${{github.ref == 'refs/heads/dev' && '-dev' || ''}}
         tags: |
           type=sha,prefix=main-
           type=raw,value=latest,enable={{is_default_branch}}
