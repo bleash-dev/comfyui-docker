@@ -33,56 +33,64 @@ MAX_CONCURRENT_DOWNLOADS=3
 mkdir -p "$(dirname "$MODEL_DOWNLOAD_LOG")"
 touch "$MODEL_DOWNLOAD_LOG"
 
+# Function to log download activities
+log_download() {
+    local level="$1"
+    shift
+    local message="$*"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] [$level] Download: $message" | tee -a "$MODEL_DOWNLOAD_LOG" >&2
+}
+
 # Function to compress model file to .tar.zst format
 compress_model_file() {
     local source_file="$1"
     local temp_dir="$2"
-    local compressed_file_output="$3"  # Variable name to store the compressed file path
-    
-    if [ -z "$source_file" ] || [ -z "$temp_dir" ] || [ -z "$compressed_file_output" ]; then
+
+    if [ -z "$source_file" ] || [ -z "$temp_dir" ]; then
         log_download "ERROR" "Missing parameters for compress_model_file"
         return 1
     fi
-    
+
     if [ ! -f "$source_file" ]; then
         log_download "ERROR" "Source file does not exist: $source_file"
         return 1
     fi
-    
+
     # Check if zstd is available
     if ! command -v zstd >/dev/null 2>&1; then
         log_download "ERROR" "zstd command not found. Cannot compress model."
         return 1
     fi
-    
+
     local file_name=$(basename "$source_file")
     local compressed_file="$temp_dir/${file_name}.tar.zst"
-    
+
     log_download "INFO" "Compressing model file: $file_name"
-    
+
     # Create a tar archive and compress it with zstd in one step
     # Use maximum compression level (22) for best compression ratio
     if tar -cf - -C "$(dirname "$source_file")" "$(basename "$source_file")" | zstd -22 -T0 -o "$compressed_file"; then
         log_download "INFO" "Successfully compressed $file_name to $(basename "$compressed_file")"
-        
+
         # Get compressed file size
         local compressed_size
         compressed_size=$(stat -f%z "$compressed_file" 2>/dev/null || stat -c%s "$compressed_file" 2>/dev/null || echo "0")
-        
+
         # Get original file size
         local original_size
         original_size=$(stat -f%z "$source_file" 2>/dev/null || stat -c%s "$source_file" 2>/dev/null || echo "0")
-        
+
         # Calculate compression ratio
         local compression_ratio=0
         if [ "$original_size" -gt 0 ]; then
             compression_ratio=$(echo "scale=2; $compressed_size * 100 / $original_size" | bc 2>/dev/null || echo "0")
         fi
-        
+
         log_download "INFO" "Compression: $original_size bytes -> $compressed_size bytes (${compression_ratio}%)"
-        
-        # Return the compressed file path through the variable name
-        eval "$compressed_file_output='$compressed_file'"
+
+        # Return the compressed file path via standard output
+        echo "$compressed_file"
         return 0
     else
         log_download "ERROR" "Failed to compress model file: $file_name"
@@ -95,38 +103,38 @@ compress_model_file() {
 decompress_model_file() {
     local compressed_file="$1"
     local output_dir="$2"
-    local decompressed_file_output="$3"  # Variable name to store the decompressed file path
-    
-    if [ -z "$compressed_file" ] || [ -z "$output_dir" ] || [ -z "$decompressed_file_output" ]; then
+
+    if [ -z "$compressed_file" ] || [ -z "$output_dir" ]; then
         log_download "ERROR" "Missing parameters for decompress_model_file"
         return 1
     fi
-    
+
     if [ ! -f "$compressed_file" ]; then
         log_download "ERROR" "Compressed file does not exist: $compressed_file"
         return 1
     fi
-    
+
     # Check if zstd is available
     if ! command -v zstd >/dev/null 2>&1; then
         log_download "ERROR" "zstd command not found. Cannot decompress model."
         return 1
     fi
-    
+
     log_download "INFO" "Decompressing model file: $(basename "$compressed_file")"
-    
+
     # Create output directory
     mkdir -p "$output_dir"
-    
+
     # Decompress and extract in one step
     if zstd -d -c "$compressed_file" | tar -xf - -C "$output_dir"; then
         # Find the extracted file (should be the only file in the output directory)
         local extracted_file
         extracted_file=$(find "$output_dir" -type f -maxdepth 1 | head -1)
-        
+
         if [ -n "$extracted_file" ] && [ -f "$extracted_file" ]; then
             log_download "INFO" "Successfully decompressed to: $(basename "$extracted_file")"
-            eval "$decompressed_file_output='$extracted_file'"
+            # Return the decompressed file path via standard output
+            echo "$extracted_file"
             return 0
         else
             log_download "ERROR" "No file found after decompression"
@@ -136,15 +144,6 @@ decompress_model_file() {
         log_download "ERROR" "Failed to decompress model file: $(basename "$compressed_file")"
         return 1
     fi
-}
-
-# Function to log download activities
-log_download() {
-    local level="$1"
-    shift
-    local message="$*"
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] [$level] Download: $message" | tee -a "$MODEL_DOWNLOAD_LOG" >&2
 }
 
 # Function to send download progress notification over API
@@ -687,8 +686,10 @@ download_and_decompress_model() {
         temp_decompress_dir=$(mktemp -d)
         trap "rm -rf '$temp_decompress_dir'" EXIT INT TERM QUIT
         
-        local decompressed_file=""
-        if decompress_model_file "$temp_download_path" "$temp_decompress_dir" decompressed_file; then
+        local decompressed_file
+        decompressed_file=$(decompress_model_file "$temp_download_path" "$temp_decompress_dir")
+        
+        if [ $? -eq 0 ] && [ -n "$decompressed_file" ]; then
             # Move decompressed file to final location
             if mv "$decompressed_file" "$final_output_path"; then
                 log_download "INFO" "Successfully decompressed and moved to: $final_output_path"
@@ -911,7 +912,7 @@ start_download_worker() {
     # Acquire the main worker lock for the duration of the worker process
     if ! (
         set -C  # noclobber - fail if file exists
-        echo "$$:$(date +%s)" > "$lock_file"
+        echo "$$:$current_time" > "$lock_file"
     ) 2>/dev/null; then
         log_download "DEBUG" "Could not acquire worker lock - another worker may have started"
         rm -f "$start_lock_file"
@@ -1055,6 +1056,10 @@ start_download_worker() {
     log_download "INFO" "Download worker started in background"
     return 0
 }
+
+# (The rest of the script remains the same and is provided below for completeness)
+
+# ... [The remaining functions from stop_download_worker to the end are unchanged] ...
 
 # Function to stop download worker
 # Works independently regardless of execution scope and cleans up locks
@@ -1961,10 +1966,8 @@ list_active_downloads() {
     return 0
 }
 
-
-
 EOF
 
-chmod +x "$NETWORK_VOLUME/scripts/model_download_integration.sh"
+chmod +x "$TARGET_DIR/model_download_integration.sh"
 
-echo "✅ Model download integration script created at $NETWORK_VOLUME/scripts/model_download_integration.sh"
+echo "✅ Model download integration script created at $TARGET_DIR/model_download_integration.sh"

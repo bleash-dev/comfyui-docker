@@ -1,8 +1,3 @@
-#!/bin/bash
-# Create integrated model sync script
-
-echo "📝 Creating integrated model sync script..."
-
 # Create the model sync integration script
 cat > "$NETWORK_VOLUME/scripts/model_sync_integration.sh" << 'EOF'
 #!/bin/bash
@@ -34,52 +29,51 @@ log_model_sync() {
 compress_model_file() {
     local source_file="$1"
     local temp_dir="$2"
-    local compressed_file_output="$3"  # Variable name to store the compressed file path
-    
-    if [ -z "$source_file" ] || [ -z "$temp_dir" ] || [ -z "$compressed_file_output" ]; then
+
+    if [ -z "$source_file" ] || [ -z "$temp_dir" ]; then
         log_model_sync "ERROR" "Missing parameters for compress_model_file"
         return 1
     fi
-    
+
     if [ ! -f "$source_file" ]; then
         log_model_sync "ERROR" "Source file does not exist: $source_file"
         return 1
     fi
-    
+
     # Check if zstd is available
     if ! command -v zstd >/dev/null 2>&1; then
         log_model_sync "ERROR" "zstd command not found. Cannot compress model."
         return 1
     fi
-    
+
     local file_name=$(basename "$source_file")
     local compressed_file="$temp_dir/${file_name}.tar.zst"
-    
+
     log_model_sync "INFO" "Compressing model file: $file_name"
-    
+
     # Create a tar archive and compress it with zstd in one step
     # Use maximum compression level (22) for best compression ratio
     if tar -cf - -C "$(dirname "$source_file")" "$(basename "$source_file")" | zstd -22 -T0 -o "$compressed_file"; then
         log_model_sync "INFO" "Successfully compressed $file_name to $(basename "$compressed_file")"
-        
+
         # Get compressed file size
         local compressed_size
         compressed_size=$(stat -f%z "$compressed_file" 2>/dev/null || stat -c%s "$compressed_file" 2>/dev/null || echo "0")
-        
+
         # Get original file size
         local original_size
         original_size=$(stat -f%z "$source_file" 2>/dev/null || stat -c%s "$source_file" 2>/dev/null || echo "0")
-        
+
         # Calculate compression ratio
         local compression_ratio=0
         if [ "$original_size" -gt 0 ]; then
             compression_ratio=$(echo "scale=2; $compressed_size * 100 / $original_size" | bc 2>/dev/null || echo "0")
         fi
-        
+
         log_model_sync "INFO" "Compression: $original_size bytes -> $compressed_size bytes (${compression_ratio}%)"
-        
-        # Return the compressed file path through the variable name
-        eval "$compressed_file_output='$compressed_file'"
+
+        # Return the compressed file path via standard output
+        echo "$compressed_file"
         return 0
     else
         log_model_sync "ERROR" "Failed to compress model file: $file_name"
@@ -243,20 +237,24 @@ upload_file_with_progress() {
     if [ "$file_size" -gt 10485760 ]; then
         log_model_sync "INFO" "File is larger than 10MB, applying compression: $file_name"
         
-        if compress_model_file "$local_file" "$temp_dir" compressed_file; then
-            if [ -n "$compressed_file" ] && [ -f "$compressed_file" ]; then
-                upload_file="$compressed_file"
-                s3_destination="$compressed_s3_destination"
-                
-                # Get compressed file size for progress tracking
-                file_size=$(stat -f%z "$upload_file" 2>/dev/null || stat -c%s "$upload_file" 2>/dev/null || echo "0")
-                log_model_sync "INFO" "Using compressed file for upload: $(basename "$upload_file") (${file_size} bytes)"
-            else
-                log_model_sync "ERROR" "Compressed file was not created properly: $compressed_file"
+        local compressed_file_result
+        compressed_file_result=$(compress_model_file "$local_file" "$temp_dir")
+        
+        if [ $? -eq 0 ] && [ -n "$compressed_file_result" ]; then
+            upload_file="$compressed_file_result"
+            s3_destination="$compressed_s3_destination"
+            
+            # Verify the compressed file exists
+            if [ ! -f "$upload_file" ]; then
+                log_model_sync "ERROR" "Compressed file was not created properly: $upload_file"
                 log_model_sync "WARN" "Falling back to uncompressed file: $file_name"
                 upload_file="$local_file"
                 s3_destination="${s3_destination%.tar.zst}"  # Remove .tar.zst suffix
                 metadata_args="--metadata downloadUrl=$download_url"
+            else
+                # Get compressed file size for progress tracking
+                file_size=$(stat -f%z "$upload_file" 2>/dev/null || stat -c%s "$upload_file" 2>/dev/null || echo "0")
+                log_model_sync "INFO" "Using compressed file for upload: $(basename "$upload_file") (${file_size} bytes)"
             fi
         else
             log_model_sync "WARN" "Compression failed, uploading uncompressed file: $file_name"
@@ -1037,7 +1035,6 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     echo "  notify_model_sync_progress <sync_type> <status> <percentage>"
     echo "  batch_process_models <models_dir> <s3_base_path> <sync_type>"
     echo "  sanitize_model_config"
-    echo "  sanitize_model_config"
     echo ""
     echo "Example usage:"
     echo "  source \"\$NETWORK_VOLUME/scripts/model_sync_integration.sh\""
@@ -1057,7 +1054,3 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     echo "  Model Config: $MODEL_CONFIG_LOG"
 fi
 EOF
-
-chmod +x "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
-
-echo "✅ Model sync integration script created at $NETWORK_VOLUME/scripts/model_sync_integration.sh"
