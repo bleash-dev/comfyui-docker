@@ -118,6 +118,17 @@ echo "User: $(whoami)"
 echo "----------------------------------------------------"
 echo "📁 Network Volume set to: $NETWORK_VOLUME"
 
+# Create S3 interactor script early - needed by other scripts
+echo "🔧 Creating S3 interactor..."
+if [ -f "$SCRIPT_DIR/create_s3_interactor.sh" ]; then
+    if ! bash "$SCRIPT_DIR/create_s3_interactor.sh" "$NETWORK_VOLUME/scripts"; then
+        echo "❌ CRITICAL: Failed to create S3 interactor."
+        exit 1
+    fi
+    echo "  ✅ S3 interactor created/configured."
+else
+    echo "⚠️ WARNING: create_s3_interactor.sh not found in $SCRIPT_DIR"
+fi
 # Start pod execution tracking early
 echo "🕐 Starting pod execution tracking..."
 mkdir -p "$(dirname "$NETWORK_VOLUME/.pod_tracker.log")"

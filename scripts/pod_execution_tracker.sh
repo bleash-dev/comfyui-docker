@@ -23,6 +23,7 @@ done
 # Source S3 interactor for cloud storage operations
 if [ -f "$NETWORK_VOLUME/scripts/s3_interactor.sh" ]; then
     source "$NETWORK_VOLUME/scripts/s3_interactor.sh"
+    echo "✅ Interactor sourced successfully."
 fi
 
 # Define tracking paths
