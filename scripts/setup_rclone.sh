@@ -149,9 +149,6 @@ else
         echo "   Bucket list output preview:"
         echo "   $(echo "$bucket_list_output" | head -3)"
     fi
-else
-    echo "✅ S3 connection successful (bucket accessible)."
-    echo "   Bucket location: $(echo "$bucket_location_output" | jq -r '.LocationConstraint // "us-east-1"' 2>/dev/null || echo "unknown")"
 fi
 
 # Additional test: try to create and read a test file to verify write permissions
