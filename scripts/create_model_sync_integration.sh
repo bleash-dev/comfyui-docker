@@ -244,12 +244,20 @@ upload_file_with_progress() {
         log_model_sync "INFO" "File is larger than 10MB, applying compression: $file_name"
         
         if compress_model_file "$local_file" "$temp_dir" compressed_file; then
-            upload_file="$compressed_file"
-            s3_destination="$compressed_s3_destination"
-            
-            # Get compressed file size for progress tracking
-            file_size=$(stat -f%z "$upload_file" 2>/dev/null || stat -c%s "$upload_file" 2>/dev/null || echo "0")
-            log_model_sync "INFO" "Using compressed file for upload: $(basename "$upload_file") (${file_size} bytes)"
+            if [ -n "$compressed_file" ] && [ -f "$compressed_file" ]; then
+                upload_file="$compressed_file"
+                s3_destination="$compressed_s3_destination"
+                
+                # Get compressed file size for progress tracking
+                file_size=$(stat -f%z "$upload_file" 2>/dev/null || stat -c%s "$upload_file" 2>/dev/null || echo "0")
+                log_model_sync "INFO" "Using compressed file for upload: $(basename "$upload_file") (${file_size} bytes)"
+            else
+                log_model_sync "ERROR" "Compressed file was not created properly: $compressed_file"
+                log_model_sync "WARN" "Falling back to uncompressed file: $file_name"
+                upload_file="$local_file"
+                s3_destination="${s3_destination%.tar.zst}"  # Remove .tar.zst suffix
+                metadata_args="--metadata downloadUrl=$download_url"
+            fi
         else
             log_model_sync "WARN" "Compression failed, uploading uncompressed file: $file_name"
             # Remove compressed-specific metadata if compression failed
