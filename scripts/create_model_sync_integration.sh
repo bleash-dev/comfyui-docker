@@ -240,9 +240,9 @@ upload_file_with_progress() {
     local compressed_s3_destination="${s3_destination}.tar.zst"
     
     # Check if compression should be used (for files larger than 10MB)
-    # Allow disabling compression via environment variable
-    if [ "${DISABLE_MODEL_COMPRESSION:-false}" = "true" ]; then
-        log_model_sync "INFO" "Model compression disabled via DISABLE_MODEL_COMPRESSION environment variable"
+    # Compression is disabled by default - can be enabled via environment variable
+    if [ "${DISABLE_MODEL_COMPRESSION:-true}" = "true" ]; then
+        log_model_sync "INFO" "Model compression disabled (default behavior - set DISABLE_MODEL_COMPRESSION=false to enable)"
         upload_file="$local_file"
         s3_destination="${s3_destination%.tar.zst}"  # Remove .tar.zst suffix
         metadata_args="--metadata downloadUrl=$download_url"

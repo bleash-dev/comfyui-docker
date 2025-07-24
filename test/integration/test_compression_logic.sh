@@ -119,29 +119,9 @@ test_compression_disable_flag() {
         return 0
     }
     
-    # Test with compression enabled (default)
-    echo "Testing with compression enabled..."
+    # Test with compression disabled (default)
+    echo "Testing with compression disabled (default)..."
     unset DISABLE_MODEL_COMPRESSION
-    source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
-    
-    # Call upload function
-    upload_file_with_progress "$test_file" "s3://test-bucket/models/test_model.safetensors" "model_upload" 1 1 "https://example.com/download" 2>/dev/null
-    
-    # Check if compressed file was uploaded
-    if grep -q "\.tar\.zst" "$TEST_TEMP_DIR/s3_calls.log"; then
-        echo "✅ Compression enabled: compressed file was uploaded"
-    else
-        echo "❌ Compression enabled: but compressed file was not uploaded"
-        cat "$TEST_TEMP_DIR/s3_calls.log"
-        return 1
-    fi
-    
-    # Clear log
-    > "$TEST_TEMP_DIR/s3_calls.log"
-    
-    # Test with compression disabled
-    echo "Testing with compression disabled..."
-    export DISABLE_MODEL_COMPRESSION=true
     source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
     
     # Call upload function
@@ -154,6 +134,26 @@ test_compression_disable_flag() {
         return 1
     else
         echo "✅ Compression disabled: uncompressed file was uploaded"
+    fi
+    
+    # Clear log
+    > "$TEST_TEMP_DIR/s3_calls.log"
+    
+    # Test with compression enabled
+    echo "Testing with compression enabled..."
+    export DISABLE_MODEL_COMPRESSION=false
+    source "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
+    
+    # Call upload function
+    upload_file_with_progress "$test_file" "s3://test-bucket/models/test_model.safetensors" "model_upload" 1 1 "https://example.com/download" 2>/dev/null
+    
+    # Check if compressed file was uploaded
+    if grep -q "\.tar\.zst" "$TEST_TEMP_DIR/s3_calls.log"; then
+        echo "✅ Compression enabled: compressed file was uploaded"
+    else
+        echo "❌ Compression enabled: but compressed file was not uploaded"
+        cat "$TEST_TEMP_DIR/s3_calls.log"
+        return 1
     fi
     
     # Clean up
