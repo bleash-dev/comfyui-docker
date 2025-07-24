@@ -69,9 +69,14 @@ compress_model_file() {
     log_download "INFO" "Compressing model file: $file_name"
 
     # Create a tar archive and compress it with zstd in one step
-    # Use maximum compression level (22) for best compression ratio
+    # Use moderate compression level (6) for good ratio without excessive CPU usage
+    # Limit CPU threads to prevent system freeze
     # Redirect zstd progress output to stderr to avoid mixing with function return value
-    if tar -cf - -C "$(dirname "$source_file")" "$(basename "$source_file")" | zstd -22 -T0 -o "$compressed_file" 2>&2; then
+    local cpu_limit=$(($(nproc) / 2))  # Use half available CPUs
+    [ "$cpu_limit" -lt 1 ] && cpu_limit=1
+    [ "$cpu_limit" -gt 4 ] && cpu_limit=4  # Cap at 4 threads max
+    
+    if timeout 300 tar -cf - -C "$(dirname "$source_file")" "$(basename "$source_file")" | timeout 300 zstd -6 -T"$cpu_limit" -o "$compressed_file" 2>&2; then
         log_download "INFO" "Successfully compressed $file_name to $(basename "$compressed_file")"
 
         # Get compressed file size

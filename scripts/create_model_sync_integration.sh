@@ -52,9 +52,14 @@ compress_model_file() {
     log_model_sync "INFO" "Compressing model file: $file_name"
 
     # Create a tar archive and compress it with zstd in one step
-    # Use maximum compression level (22) for best compression ratio
-    # Redirect zstd progress output to avoid mixing with function return value
-    if tar -cf - -C "$(dirname "$source_file")" "$(basename "$source_file")" | zstd -22 -T0 -o "$compressed_file" 2>/dev/null; then
+    # Use moderate compression level (6) for good ratio without excessive CPU usage
+    # Limit CPU threads to prevent system freeze
+    # Redirect zstd progress output to stderr to avoid mixing with function return value
+    local cpu_limit=$(($(nproc) / 2))  # Use half available CPUs
+    [ "$cpu_limit" -lt 1 ] && cpu_limit=1
+    [ "$cpu_limit" -gt 4 ] && cpu_limit=4  # Cap at 4 threads max
+    
+    if timeout 300 tar -cf - -C "$(dirname "$source_file")" "$(basename "$source_file")" | timeout 300 zstd -6 -T"$cpu_limit" -o "$compressed_file" 2>/dev/null; then
         log_model_sync "INFO" "Successfully compressed $file_name to $(basename "$compressed_file")"
 
         # Get compressed file size
@@ -235,8 +240,14 @@ upload_file_with_progress() {
     local compressed_s3_destination="${s3_destination}.tar.zst"
     
     # Check if compression should be used (for files larger than 10MB)
-    if [ "$file_size" -gt 10485760 ]; then
-        log_model_sync "INFO" "File is larger than 10MB, applying compression: $file_name"
+    # Allow disabling compression via environment variable
+    if [ "${DISABLE_MODEL_COMPRESSION:-false}" = "true" ]; then
+        log_model_sync "INFO" "Model compression disabled via DISABLE_MODEL_COMPRESSION environment variable"
+        upload_file="$local_file"
+        s3_destination="${s3_destination%.tar.zst}"  # Remove .tar.zst suffix
+        metadata_args="--metadata downloadUrl=$download_url"
+    elif [ "$file_size" -gt 10485760 ]; then
+        log_model_sync "INFO" "File is suitable for compression: $file_name (${file_size} bytes)"
         
         local compressed_file_result
         compressed_file_result=$(compress_model_file "$local_file" "$temp_dir")
@@ -263,7 +274,7 @@ upload_file_with_progress() {
             metadata_args="--metadata downloadUrl=$download_url"
         fi
     else
-        log_model_sync "INFO" "File is smaller than 10MB, uploading uncompressed: $file_name"
+        log_model_sync "INFO" "File is too small (<10MB) for compression: $file_name"
         # Remove compressed-specific metadata for small files
         metadata_args="--metadata downloadUrl=$download_url"
     fi
