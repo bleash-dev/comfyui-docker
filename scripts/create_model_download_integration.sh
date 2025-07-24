@@ -912,6 +912,9 @@ start_download_worker() {
     fi
     
     # Acquire the main worker lock for the duration of the worker process
+    local current_time
+    current_time=$(date +%s)
+    
     if ! (
         set -C  # noclobber - fail if file exists
         echo "$$:$current_time" > "$lock_file"

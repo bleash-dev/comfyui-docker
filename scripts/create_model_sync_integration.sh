@@ -272,12 +272,13 @@ upload_file_with_progress() {
     log_model_sync "INFO" "Starting S3 upload: $file_name"
     
     # Try upload with standard method first (most reliable)
-    if s3_copy_to "$upload_file" "$s3_destination" $metadata_args; then
+    # Important: Quote metadata_args as a single parameter for s3_copy_to
+    if s3_copy_to "$upload_file" "$s3_destination" "$metadata_args"; then
         log_model_sync "INFO" "Successfully uploaded: $file_name"
         return 0
     else
         log_model_sync "ERROR" "Failed to upload: $file_name"
-        log_model_sync "DEBUG" "Upload command was: s3_copy_to '$upload_file' '$s3_destination' $metadata_args"
+        log_model_sync "DEBUG" "Upload command was: s3_copy_to '$upload_file' '$s3_destination' '$metadata_args'"
         return 1
     fi
             
