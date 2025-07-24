@@ -268,81 +268,19 @@ upload_file_with_progress() {
         metadata_args="--metadata downloadUrl=$download_url"
     fi
     
-    # Check if pv (pipe viewer) is available for better progress tracking
-    if command -v pv >/dev/null 2>&1 && [ "$file_size" -gt 10485760 ]; then
-        # Use pv for files larger than 10MB
-        log_model_sync "INFO" "Using pv for progress tracking: $file_name"
-        
-        # Use pv to show progress, then upload the file
-        log_model_sync "INFO" "Showing progress with pv: $file_name"
-        pv "$upload_file" > /dev/null &  # Show progress
-        local pv_pid=$!
-        
-        if s3_copy_to "$upload_file" "$s3_destination" $metadata_args; then
-            kill $pv_pid 2>/dev/null || true
-            log_model_sync "INFO" "Successfully uploaded with pv: $file_name"
-            return 0
-        else
-            kill $pv_pid 2>/dev/null || true
-            log_model_sync "ERROR" "Failed to upload with pv: $file_name"
-            return 1
-        fi
+    # Perform the actual upload with better error handling
+    log_model_sync "INFO" "Starting S3 upload: $file_name"
+    
+    # Try upload with standard method first (most reliable)
+    if s3_copy_to "$upload_file" "$s3_destination" $metadata_args; then
+        log_model_sync "INFO" "Successfully uploaded: $file_name"
+        return 0
     else
-        # For smaller files or when pv is not available, use regular upload with progress simulation
-        if [ "$file_size" -gt 104857600 ]; then
-            log_model_sync "INFO" "Using multipart upload for large file: $file_name"
-            
-            # Use S3 copy with custom progress tracking
-            local temp_progress_file
-            temp_progress_file=$(mktemp)
-            
-            # Start upload in background
-            s3_copy_to "$upload_file" "$s3_destination" $metadata_args &
-            
-            local upload_pid=$!
-            local start_time=$(date +%s)
-            
-            # Monitor upload progress by checking file presence on S3
-            while kill -0 "$upload_pid" 2>/dev/null; do
-                local current_time=$(date +%s)
-                local elapsed=$((current_time - start_time))
-                
-                # Simple progress estimation based on elapsed time
-                if [ "$elapsed" -gt 0 ]; then
-                    # Estimate progress (this is rough, but better than nothing)
-                    local estimated_progress=$((elapsed * 100 / (file_size / 1048576 + 10)))
-                    if [ "$estimated_progress" -gt 95 ]; then
-                        estimated_progress=95
-                    fi
-                    
-                    log_model_sync "INFO" "Upload progress estimate: ${estimated_progress}% for $file_name"
-                fi
-                
-                sleep 3
-            done
-            
-            wait "$upload_pid"
-            local upload_result=$?
-            rm -f "$temp_progress_file"
-            
-            if [ "$upload_result" -eq 0 ]; then
-                log_model_sync "INFO" "Successfully uploaded large file: $file_name"
-                return 0
-            else
-                log_model_sync "ERROR" "Failed to upload large file: $file_name"
-                return 1
-            fi
-        else
-            # For smaller files, use regular upload
-            if s3_copy_to "$upload_file" "$s3_destination" $metadata_args; then
-                log_model_sync "INFO" "Successfully uploaded: $file_name"
-                return 0
-            else
-                log_model_sync "ERROR" "Failed to upload: $file_name"
-                return 1
-            fi
-        fi
+        log_model_sync "ERROR" "Failed to upload: $file_name"
+        log_model_sync "DEBUG" "Upload command was: s3_copy_to '$upload_file' '$s3_destination' $metadata_args"
+        return 1
     fi
+            
 }
 
 # Function to sync directory to S3 with progress tracking
