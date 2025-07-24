@@ -70,7 +70,8 @@ compress_model_file() {
 
     # Create a tar archive and compress it with zstd in one step
     # Use maximum compression level (22) for best compression ratio
-    if tar -cf - -C "$(dirname "$source_file")" "$(basename "$source_file")" | zstd -22 -T0 -o "$compressed_file"; then
+    # Redirect zstd progress output to stderr to avoid mixing with function return value
+    if tar -cf - -C "$(dirname "$source_file")" "$(basename "$source_file")" | zstd -22 -T0 -o "$compressed_file" 2>&2; then
         log_download "INFO" "Successfully compressed $file_name to $(basename "$compressed_file")"
 
         # Get compressed file size
@@ -126,7 +127,8 @@ decompress_model_file() {
     mkdir -p "$output_dir"
 
     # Decompress and extract in one step
-    if zstd -d -c "$compressed_file" | tar -xf - -C "$output_dir"; then
+    # Redirect zstd output to stderr to avoid mixing with function return value
+    if zstd -d -c "$compressed_file" 2>&2 | tar -xf - -C "$output_dir" 2>&2; then
         # Find the extracted file (should be the only file in the output directory)
         local extracted_file
         extracted_file=$(find "$output_dir" -type f -maxdepth 1 | head -1)

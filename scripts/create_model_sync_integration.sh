@@ -53,7 +53,8 @@ compress_model_file() {
 
     # Create a tar archive and compress it with zstd in one step
     # Use maximum compression level (22) for best compression ratio
-    if tar -cf - -C "$(dirname "$source_file")" "$(basename "$source_file")" | zstd -22 -T0 -o "$compressed_file"; then
+    # Redirect zstd progress output to avoid mixing with function return value
+    if tar -cf - -C "$(dirname "$source_file")" "$(basename "$source_file")" | zstd -22 -T0 -o "$compressed_file" 2>/dev/null; then
         log_model_sync "INFO" "Successfully compressed $file_name to $(basename "$compressed_file")"
 
         # Get compressed file size
