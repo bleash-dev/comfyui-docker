@@ -146,8 +146,8 @@ execute_staging_aws_cli() {
 is_models_path() {
     local s3_path="$1"
     
-    # Check if path contains "models" or "model" (case insensitive)
-    if echo "$s3_path" | grep -qi "models"; then
+    # Check if path contains "models/" or "model" (case insensitive)
+    if echo "$s3_path" | grep -qi "models/"; then
         return 0
     fi
     return 1
