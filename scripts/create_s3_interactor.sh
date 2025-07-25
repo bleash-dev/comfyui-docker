@@ -25,6 +25,7 @@ S3_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID:-$AWS_ACCESS_KEY_ID}"
 S3_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY:-$AWS_SECRET_ACCESS_KEY}"
 
 # Models Staging Bucket Configuration (AWS S3 for fast uploads)
+# Note: When configured, ALL uploads go to staging bucket for speed
 MODELS_STAGING_BUCKET_NAME="${MODELS_STAGING_BUCKET_NAME:-}"
 MODELS_STAGING_REGION="${MODELS_STAGING_REGION:-us-east-1}"
 MODELS_STAGING_ACCESS_KEY_ID="${MODELS_STAGING_ACCESS_KEY_ID:-}"
@@ -127,7 +128,7 @@ execute_aws_cli() {
     fi
 }
 
-# Function to execute AWS CLI with staging bucket credentials (for models)
+# Function to execute AWS CLI with staging bucket credentials (for all uploads)
 execute_staging_aws_cli() {
     local aws_cmd
     aws_cmd=$(get_aws_cli_cmd)
@@ -198,9 +199,9 @@ s3_copy_to() {
         return 1
     fi
     
-    # Check if this is a models upload and staging is configured
-    if is_models_path "$s3_destination" && is_staging_configured; then
-        log_s3_activity "INFO" "Models upload detected - using staging bucket: $source_path -> $s3_destination"
+    # Check if staging is configured - if so, ALL uploads go to staging
+    if is_staging_configured; then
+        log_s3_activity "INFO" "Upload detected - using staging bucket for fast upload: $source_path -> $s3_destination"
         
         # Parse original destination to get the key
         local bucket key
@@ -220,8 +221,8 @@ s3_copy_to() {
             return 1
         fi
     else
-        # Regular upload to main bucket
-        log_s3_activity "INFO" "Copying to S3: $source_path -> $s3_destination"
+        # No staging configured - upload directly to main bucket
+        log_s3_activity "INFO" "Copying to S3 (no staging): $source_path -> $s3_destination"
         
         if [ -n "$options" ]; then
             execute_aws_cli s3 cp "$source_path" "$s3_destination" $options
@@ -260,12 +261,36 @@ s3_sync_to() {
         return 1
     fi
     
-    log_s3_activity "INFO" "Syncing to S3: $source_path -> $s3_destination"
-    
-    if [ -n "$options" ]; then
-        execute_aws_cli s3 sync "$source_path" "$s3_destination" $options
+    # Check if staging is configured - if so, ALL syncs go to staging
+    if is_staging_configured; then
+        log_s3_activity "INFO" "Directory sync detected - using staging bucket for fast upload: $source_path -> $s3_destination"
+        
+        # Parse original destination to get the key
+        local bucket key
+        if parse_s3_uri "$s3_destination" bucket key; then
+            # Create staging destination with staging bucket
+            local staging_destination="s3://$MODELS_STAGING_BUCKET_NAME/$key"
+            log_s3_activity "INFO" "Staging sync: $source_path -> $staging_destination"
+            
+            # Sync to staging bucket using staging credentials
+            if [ -n "$options" ]; then
+                execute_staging_aws_cli s3 sync "$source_path" "$staging_destination" $options
+            else
+                execute_staging_aws_cli s3 sync "$source_path" "$staging_destination"
+            fi
+        else
+            log_s3_activity "ERROR" "Failed to parse S3 destination: $s3_destination"
+            return 1
+        fi
     else
-        execute_aws_cli s3 sync "$source_path" "$s3_destination"
+        # No staging configured - sync directly to main bucket
+        log_s3_activity "INFO" "Syncing to S3 (no staging): $source_path -> $s3_destination"
+        
+        if [ -n "$options" ]; then
+            execute_aws_cli s3 sync "$source_path" "$s3_destination" $options
+        else
+            execute_aws_cli s3 sync "$source_path" "$s3_destination"
+        fi
     fi
 }
 
@@ -444,13 +469,17 @@ show_s3_usage() {
     echo "  export MODELS_STAGING_SECRET_ACCESS_KEY=staging-secret"
     echo ""
     echo "Basic Operations:"
-    echo "  s3_copy_to /local/file.txt s3://bucket/path/file.txt"
+    echo "  s3_copy_to /local/file.txt s3://bucket/path/file.txt        # Auto-staging if configured"
     echo "  s3_copy_to /local/model.safetensors s3://bucket/models/model.safetensors  # Auto-staging"
-    echo "  s3_copy_from s3://bucket/path/file.txt /local/file.txt"
-    echo "  s3_sync_to /local/dir s3://bucket/path/"
-    echo "  s3_sync_from s3://bucket/path/ /local/dir"
+    echo "  s3_copy_from s3://bucket/path/file.txt /local/file.txt      # Direct from R2"
+    echo "  s3_sync_to /local/dir s3://bucket/path/                     # Auto-staging if configured"
+    echo "  s3_sync_from s3://bucket/path/ /local/dir                   # Direct from R2"
     echo "  s3_list s3://bucket/path/"
     echo "  s3_remove s3://bucket/path/file.txt"
+    echo ""
+    echo "Staging Operations:"
+    echo "  s3_get_staging_status                    # Check staging bucket status"
+    echo "  # Note: ALL uploads go to staging when configured (backend syncs to R2)"
     echo ""
     echo "Advanced Operations:"
     echo "  s3_object_exists s3://bucket/path/file.txt"
@@ -500,9 +529,11 @@ echo "  S3_REGION=your-region"
 echo "  S3_ACCESS_KEY_ID=your-access-key"
 echo "  S3_SECRET_ACCESS_KEY=your-secret-key"
 echo ""
-echo "🚀 Models Staging Configuration (for fast uploads):"
+echo "🚀 Staging Configuration (for fast uploads):"
 echo "  MODELS_STAGING_BUCKET_NAME=your-staging-bucket"
 echo "  MODELS_STAGING_REGION=us-east-1"
 echo "  MODELS_STAGING_ACCESS_KEY_ID=your-staging-key"
 echo "  MODELS_STAGING_SECRET_ACCESS_KEY=your-staging-secret"
-echo "  # Models are automatically moved from staging to main bucket by backend"
+echo "  # When configured, ALL uploads go to staging bucket for speed"
+echo "  # Backend automatically moves everything from staging to R2"
+echo "  # Downloads come directly from R2 for speed"

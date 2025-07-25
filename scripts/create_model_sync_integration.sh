@@ -283,8 +283,8 @@ upload_file_with_progress() {
     log_model_sync "INFO" "Starting S3 upload: $file_name"
     
     # Check if staging will be used (for informational logging)
-    if is_models_path "$s3_destination" && is_staging_configured; then
-        log_model_sync "INFO" "Using staging bucket for fast upload (models detected in path)"
+    if is_staging_configured; then
+        log_model_sync "INFO" "Using staging bucket for fast upload"
     fi
     
     # Try upload with standard method first (most reliable)
