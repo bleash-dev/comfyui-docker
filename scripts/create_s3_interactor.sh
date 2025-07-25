@@ -24,6 +24,12 @@ S3_REGION="${S3_REGION:-$AWS_REGION}"  # Fallback to AWS_REGION
 S3_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID:-$AWS_ACCESS_KEY_ID}"
 S3_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY:-$AWS_SECRET_ACCESS_KEY}"
 
+# Models Staging Bucket Configuration (AWS S3 for fast uploads)
+MODELS_STAGING_BUCKET_NAME="${MODELS_STAGING_BUCKET_NAME:-}"
+MODELS_STAGING_REGION="${MODELS_STAGING_REGION:-us-east-1}"
+MODELS_STAGING_ACCESS_KEY_ID="${MODELS_STAGING_ACCESS_KEY_ID:-}"
+MODELS_STAGING_SECRET_ACCESS_KEY="${MODELS_STAGING_SECRET_ACCESS_KEY:-}"
+
 # Provider-specific configuration
 case "$S3_PROVIDER" in
     "cloudflare")
@@ -121,6 +127,48 @@ execute_aws_cli() {
     fi
 }
 
+# Function to execute AWS CLI with staging bucket credentials (for models)
+execute_staging_aws_cli() {
+    local aws_cmd
+    aws_cmd=$(get_aws_cli_cmd)
+    
+    # Set environment variables for staging bucket
+    export AWS_ACCESS_KEY_ID="$MODELS_STAGING_ACCESS_KEY_ID"
+    export AWS_SECRET_ACCESS_KEY="$MODELS_STAGING_SECRET_ACCESS_KEY"
+    export AWS_DEFAULT_REGION="$MODELS_STAGING_REGION"
+    
+    # Always use standard AWS S3 for staging (no custom endpoint)
+    log_s3_activity "DEBUG" "Executing staging: $aws_cmd $*"
+    "$aws_cmd" "$@"
+}
+
+# Function to check if an S3 path contains models
+is_models_path() {
+    local s3_path="$1"
+    
+    # Check if path contains "models" or "model" (case insensitive)
+    if echo "$s3_path" | grep -qi "models"; then
+        return 0
+    fi
+    return 1
+}
+
+# Function to get staging bucket name for models
+get_staging_bucket_for_models() {
+    if [ -n "$MODELS_STAGING_BUCKET_NAME" ]; then
+        echo "$MODELS_STAGING_BUCKET_NAME"
+    else
+        echo "$S3_BUCKET_NAME"  # Fallback to regular bucket
+    fi
+}
+
+# Function to check if staging bucket is configured
+is_staging_configured() {
+    [ -n "$MODELS_STAGING_BUCKET_NAME" ] && \
+    [ -n "$MODELS_STAGING_ACCESS_KEY_ID" ] && \
+    [ -n "$MODELS_STAGING_SECRET_ACCESS_KEY" ]
+}
+
 # =============================================================================
 # S3 OPERATION FUNCTIONS
 # =============================================================================
@@ -150,12 +198,36 @@ s3_copy_to() {
         return 1
     fi
     
-    log_s3_activity "INFO" "Copying to S3: $source_path -> $s3_destination"
-    
-    if [ -n "$options" ]; then
-        execute_aws_cli s3 cp "$source_path" "$s3_destination" $options
+    # Check if this is a models upload and staging is configured
+    if is_models_path "$s3_destination" && is_staging_configured; then
+        log_s3_activity "INFO" "Models upload detected - using staging bucket: $source_path -> $s3_destination"
+        
+        # Parse original destination to get the key
+        local bucket key
+        if parse_s3_uri "$s3_destination" bucket key; then
+            # Create staging destination with staging bucket
+            local staging_destination="s3://$MODELS_STAGING_BUCKET_NAME/$key"
+            log_s3_activity "INFO" "Staging upload: $source_path -> $staging_destination"
+            
+            # Upload to staging bucket using staging credentials
+            if [ -n "$options" ]; then
+                execute_staging_aws_cli s3 cp "$source_path" "$staging_destination" $options
+            else
+                execute_staging_aws_cli s3 cp "$source_path" "$staging_destination"
+            fi
+        else
+            log_s3_activity "ERROR" "Failed to parse S3 destination: $s3_destination"
+            return 1
+        fi
     else
-        execute_aws_cli s3 cp "$source_path" "$s3_destination"
+        # Regular upload to main bucket
+        log_s3_activity "INFO" "Copying to S3: $source_path -> $s3_destination"
+        
+        if [ -n "$options" ]; then
+            execute_aws_cli s3 cp "$source_path" "$s3_destination" $options
+        else
+            execute_aws_cli s3 cp "$source_path" "$s3_destination"
+        fi
     fi
 }
 
@@ -343,7 +415,12 @@ s3_get_config() {
     "bucket": "$S3_BUCKET_NAME",
     "region": "$S3_REGION",
     "endpoint_url": "$S3_ENDPOINT_URL",
-    "provider_args": "$S3_CLI_PROVIDER_ARGS"
+    "provider_args": "$S3_CLI_PROVIDER_ARGS",
+    "staging": {
+        "configured": $(is_staging_configured && echo "true" || echo "false"),
+        "bucket": "$MODELS_STAGING_BUCKET_NAME",
+        "region": "$MODELS_STAGING_REGION"
+    }
 }
 CONFIG_EOF
 }
@@ -360,8 +437,15 @@ show_s3_usage() {
     echo "  export S3_REGION=us-east-1"
     echo "  export S3_ENDPOINT_URL=https://account-id.r2.cloudflarestorage.com  # For R2"
     echo ""
+    echo "Models Staging Configuration (for fast uploads):"
+    echo "  export MODELS_STAGING_BUCKET_NAME=my-staging-bucket"
+    echo "  export MODELS_STAGING_REGION=us-east-1"
+    echo "  export MODELS_STAGING_ACCESS_KEY_ID=staging-key"
+    echo "  export MODELS_STAGING_SECRET_ACCESS_KEY=staging-secret"
+    echo ""
     echo "Basic Operations:"
     echo "  s3_copy_to /local/file.txt s3://bucket/path/file.txt"
+    echo "  s3_copy_to /local/model.safetensors s3://bucket/models/model.safetensors  # Auto-staging"
     echo "  s3_copy_from s3://bucket/path/file.txt /local/file.txt"
     echo "  s3_sync_to /local/dir s3://bucket/path/"
     echo "  s3_sync_from s3://bucket/path/ /local/dir"
@@ -390,7 +474,11 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     esac
 else
     # Script is being sourced
-    log_s3_activity "INFO" "S3 Interactor loaded (Provider: $S3_PROVIDER, Bucket: $S3_BUCKET_NAME)"
+    if is_staging_configured; then
+        log_s3_activity "INFO" "S3 Interactor loaded (Provider: $S3_PROVIDER, Bucket: $S3_BUCKET_NAME, Staging: $MODELS_STAGING_BUCKET_NAME)"
+    else
+        log_s3_activity "INFO" "S3 Interactor loaded (Provider: $S3_PROVIDER, Bucket: $S3_BUCKET_NAME, Staging: Not configured)"
+    fi
 fi
 EOF
 
@@ -411,3 +499,10 @@ echo "  S3_BUCKET_NAME=your-bucket"
 echo "  S3_REGION=your-region"
 echo "  S3_ACCESS_KEY_ID=your-access-key"
 echo "  S3_SECRET_ACCESS_KEY=your-secret-key"
+echo ""
+echo "🚀 Models Staging Configuration (for fast uploads):"
+echo "  MODELS_STAGING_BUCKET_NAME=your-staging-bucket"
+echo "  MODELS_STAGING_REGION=us-east-1"
+echo "  MODELS_STAGING_ACCESS_KEY_ID=your-staging-key"
+echo "  MODELS_STAGING_SECRET_ACCESS_KEY=your-staging-secret"
+echo "  # Models are automatically moved from staging to main bucket by backend"

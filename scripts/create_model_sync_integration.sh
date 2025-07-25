@@ -282,6 +282,11 @@ upload_file_with_progress() {
     # Perform the actual upload with better error handling
     log_model_sync "INFO" "Starting S3 upload: $file_name"
     
+    # Check if staging will be used (for informational logging)
+    if is_models_path "$s3_destination" && is_staging_configured; then
+        log_model_sync "INFO" "Using staging bucket for fast upload (models detected in path)"
+    fi
+    
     # Try upload with standard method first (most reliable)
     # Important: Quote metadata_args as a single parameter for s3_copy_to
     if s3_copy_to "$upload_file" "$s3_destination" "$metadata_args"; then
