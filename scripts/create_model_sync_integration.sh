@@ -526,7 +526,6 @@ process_model_for_sync() {
         # Check if model exists at exact same path
         if [ "$reason" = "Model already exists at this exact path" ]; then
             log_model_sync "INFO" "Model exists at exact path - no upload needed, config already correct"
-            return 1
         fi
         
         # Handle cases where existingModel is provided
