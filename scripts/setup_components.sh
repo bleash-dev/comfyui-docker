@@ -228,6 +228,11 @@ declare -A CUSTOM_NODES=(
     ["ComfyUI-Auth-Manager"]="https://github.com/bleash-dev/ComfyUI-Auth-Manager.git"
 )
 
+# Define custom node branch mappings
+declare -A CUSTOM_NODE_BRANCHES=(
+    ["Comfyui-FileSytem-Manager"]="${GIT_BRANCH:-main}"
+)
+
 # Add premium custom nodes if IS_PREMIUM is enabled
 if [ "${IS_PREMIUM,,}" = "true" ]; then
     echo "🌟 Premium features enabled - adding premium custom nodes..."
@@ -255,11 +260,36 @@ for node_name in "${!CUSTOM_NODES[@]}"; do
         echo "✅ $node_name already exists (from mounted storage)"
         cd "$node_dir"
         echo "🔄 Updating $node_name..."
+        
+        # Check if this node has a specific branch configured
+        if [ -n "${CUSTOM_NODE_BRANCHES[$node_name]:-}" ]; then
+            target_branch="${CUSTOM_NODE_BRANCHES[$node_name]}"
+            current_branch=$(git branch --show-current 2>/dev/null || echo "unknown")
+            echo "Current branch: $current_branch, Target branch: $target_branch"
+            
+            if [ "$current_branch" != "$target_branch" ]; then
+                echo "Switching to branch $target_branch..."
+                git fetch --all || echo "⚠️ Git fetch failed"
+                git checkout "$target_branch" || echo "⚠️ Branch switch failed, staying on current branch"
+            fi
+        fi
+        
         git pull || echo "⚠️ Git pull failed for $node_name, continuing with existing version"
         cd "$custom_nodes_dir"
     else
         echo "📥 Installing $node_name..."
-        git clone "$node_url" "$node_name" || echo "⚠️ Git clone failed for $node_name"
+        
+        # Check if this node has a specific branch configured
+        if [ -n "${CUSTOM_NODE_BRANCHES[$node_name]:-}" ]; then
+            target_branch="${CUSTOM_NODE_BRANCHES[$node_name]}"
+            echo "Installing $node_name on branch: $target_branch"
+            git clone -b "$target_branch" "$node_url" "$node_name" || {
+                echo "⚠️ Branch-specific clone failed, trying default clone for $node_name"
+                git clone "$node_url" "$node_name" || echo "⚠️ Git clone failed for $node_name"
+            }
+        else
+            git clone "$node_url" "$node_name" || echo "⚠️ Git clone failed for $node_name"
+        fi
     fi
     
 done

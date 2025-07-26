@@ -1,8 +1,3 @@
-#!/bin/bash
-# Create integrated model sync script
-
-echo "📝 Creating integrated model sync script..."
-
 # Create the model sync integration script
 cat > "$NETWORK_VOLUME/scripts/model_sync_integration.sh" << 'EOF'
 #!/bin/bash
@@ -12,6 +7,7 @@ cat > "$NETWORK_VOLUME/scripts/model_sync_integration.sh" << 'EOF'
 # Source required scripts
 source "$NETWORK_VOLUME/scripts/api_client.sh"
 source "$NETWORK_VOLUME/scripts/model_config_manager.sh"
+source "$NETWORK_VOLUME/scripts/s3_interactor.sh"
 
 # Configuration
 MODEL_SYNC_LOG="$NETWORK_VOLUME/.model_sync_integration.log"
@@ -27,6 +23,69 @@ log_model_sync() {
     local message="$*"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     echo "[$timestamp] [$level] Model Sync: $message" | tee -a "$MODEL_SYNC_LOG" >&2
+}
+
+# Function to compress model file to .tar.zst format
+compress_model_file() {
+    local source_file="$1"
+    local temp_dir="$2"
+
+    if [ -z "$source_file" ] || [ -z "$temp_dir" ]; then
+        log_model_sync "ERROR" "Missing parameters for compress_model_file"
+        return 1
+    fi
+
+    if [ ! -f "$source_file" ]; then
+        log_model_sync "ERROR" "Source file does not exist: $source_file"
+        return 1
+    fi
+
+    # Check if zstd is available
+    if ! command -v zstd >/dev/null 2>&1; then
+        log_model_sync "ERROR" "zstd command not found. Cannot compress model."
+        return 1
+    fi
+
+    local file_name=$(basename "$source_file")
+    local compressed_file="$temp_dir/${file_name}.tar.zst"
+
+    log_model_sync "INFO" "Compressing model file: $file_name"
+
+    # Create a tar archive and compress it with zstd in one step
+    # Use moderate compression level (6) for good ratio without excessive CPU usage
+    # Limit CPU threads to prevent system freeze
+    # Redirect zstd progress output to stderr to avoid mixing with function return value
+    local cpu_limit=$(($(nproc) / 2))  # Use half available CPUs
+    [ "$cpu_limit" -lt 1 ] && cpu_limit=1
+    [ "$cpu_limit" -gt 4 ] && cpu_limit=4  # Cap at 4 threads max
+    
+    if timeout 300 tar -cf - -C "$(dirname "$source_file")" "$(basename "$source_file")" | timeout 300 zstd -6 -T"$cpu_limit" -o "$compressed_file" 2>/dev/null; then
+        log_model_sync "INFO" "Successfully compressed $file_name to $(basename "$compressed_file")"
+
+        # Get compressed file size
+        local compressed_size
+        compressed_size=$(stat -f%z "$compressed_file" 2>/dev/null || stat -c%s "$compressed_file" 2>/dev/null || echo "0")
+
+        # Get original file size
+        local original_size
+        original_size=$(stat -f%z "$source_file" 2>/dev/null || stat -c%s "$source_file" 2>/dev/null || echo "0")
+
+        # Calculate compression ratio
+        local compression_ratio=0
+        if [ "$original_size" -gt 0 ]; then
+            compression_ratio=$(echo "scale=2; $compressed_size * 100 / $original_size" | bc 2>/dev/null || echo "0")
+        fi
+
+        log_model_sync "INFO" "Compression: $original_size bytes -> $compressed_size bytes (${compression_ratio}%)"
+
+        # Return the compressed file path via standard output
+        echo "$compressed_file"
+        return 0
+    else
+        log_model_sync "ERROR" "Failed to compress model file: $file_name"
+        rm -f "$compressed_file"
+        return 1
+    fi
 }
 
 # Function to sync files/directories to S3 with progress tracking (for non-model uploads)
@@ -72,7 +131,7 @@ sync_to_s3_with_progress() {
     case "$operation" in
         "cp")
             if [ -f "$source_path" ]; then
-                if aws s3 cp "$source_path" "$s3_destination" --only-show-errors; then
+                if s3_copy_to "$source_path" "$s3_destination"; then
                     success=true
                 fi
             else
@@ -82,7 +141,7 @@ sync_to_s3_with_progress() {
             ;;
         "sync")
             if [ -d "$source_path" ]; then
-                if aws s3 sync "$source_path" "$s3_destination" --only-show-errors; then
+                if s3_sync_to "$source_path" "$s3_destination"; then
                     success=true
                 fi
             else
@@ -92,7 +151,7 @@ sync_to_s3_with_progress() {
             ;;
         "sync-delete")
             if [ -d "$source_path" ]; then
-                if aws s3 sync "$source_path" "$s3_destination" --delete --only-show-errors; then
+                if s3_sync_to "$source_path" "$s3_destination" "--delete"; then
                     success=true
                 fi
             else
@@ -166,82 +225,79 @@ upload_file_with_progress() {
     
     log_model_sync "INFO" "Uploading $file_name to S3 (${file_size} bytes)"
     
-    # Prepare metadata with download URL (required) - escape URL for metadata
-    local metadata_args="--metadata downloadUrl=$download_url"
-    log_model_sync "INFO" "Including download URL in metadata: $download_url"
+    # Prepare metadata with download URL (required) and original file size
+    local metadata_args="--metadata downloadUrl=$download_url,uncompressed-size=$file_size"
+    log_model_sync "INFO" "Including download URL and uncompressed size in metadata: $download_url, size: $file_size"
     
-    # Check if pv (pipe viewer) is available for better progress tracking
-    if command -v pv >/dev/null 2>&1 && [ "$file_size" -gt 10485760 ]; then
-        # Use pv for files larger than 10MB
-        log_model_sync "INFO" "Using pv for progress tracking: $file_name"
+    # Create temporary directory for compression
+    local temp_dir
+    temp_dir=$(mktemp -d)
+    trap "rm -rf '$temp_dir'" EXIT INT TERM QUIT
+    
+    # Compress the model file
+    local compressed_file=""
+    local upload_file="$local_file"
+    local compressed_s3_destination="${s3_destination}.tar.zst"
+    
+    # Check if compression should be used (for files larger than 10MB)
+    # Allow disabling compression via environment variable
+    if [ "${DISABLE_MODEL_COMPRESSION:-false}" = "true" ]; then
+        log_model_sync "INFO" "Model compression disabled via DISABLE_MODEL_COMPRESSION environment variable"
+        upload_file="$local_file"
+        s3_destination="${s3_destination%.tar.zst}"  # Remove .tar.zst suffix
+        metadata_args="--metadata downloadUrl=$download_url"
+    elif [ "$file_size" -gt 10485760 ]; then
+        log_model_sync "INFO" "File is suitable for compression: $file_name (${file_size} bytes)"
         
-        if pv "$local_file" | aws s3 cp - "$s3_destination" $metadata_args --only-show-errors; then
-            log_model_sync "INFO" "Successfully uploaded with pv: $file_name"
-            return 0
+        local compressed_file_result
+        compressed_file_result=$(compress_model_file "$local_file" "$temp_dir")
+        
+        if [ $? -eq 0 ] && [ -n "$compressed_file_result" ]; then
+            upload_file="$compressed_file_result"
+            s3_destination="$compressed_s3_destination"
+            
+            # Verify the compressed file exists
+            if [ ! -f "$upload_file" ]; then
+                log_model_sync "ERROR" "Compressed file was not created properly: $upload_file"
+                log_model_sync "WARN" "Falling back to uncompressed file: $file_name"
+                upload_file="$local_file"
+                s3_destination="${s3_destination%.tar.zst}"  # Remove .tar.zst suffix
+                metadata_args="--metadata downloadUrl=$download_url"
+            else
+                # Get compressed file size for progress tracking
+                file_size=$(stat -f%z "$upload_file" 2>/dev/null || stat -c%s "$upload_file" 2>/dev/null || echo "0")
+                log_model_sync "INFO" "Using compressed file for upload: $(basename "$upload_file") (${file_size} bytes)"
+            fi
         else
-            log_model_sync "ERROR" "Failed to upload with pv: $file_name"
-            return 1
+            log_model_sync "WARN" "Compression failed, uploading uncompressed file: $file_name"
+            # Remove compressed-specific metadata if compression failed
+            metadata_args="--metadata downloadUrl=$download_url"
         fi
     else
-        # For smaller files or when pv is not available, use regular upload with progress simulation
-        if [ "$file_size" -gt 104857600 ]; then
-            log_model_sync "INFO" "Using multipart upload for large file: $file_name"
-            
-            # Use aws s3 cp with custom progress tracking
-            local temp_progress_file
-            temp_progress_file=$(mktemp)
-            
-            # Start upload in background
-            aws s3 cp "$local_file" "$s3_destination" \
-                $metadata_args \
-                --cli-read-timeout 0 \
-                --cli-write-timeout 0 \
-                --only-show-errors &
-            
-            local upload_pid=$!
-            local start_time=$(date +%s)
-            
-            # Monitor upload progress by checking file presence on S3
-            while kill -0 "$upload_pid" 2>/dev/null; do
-                local current_time=$(date +%s)
-                local elapsed=$((current_time - start_time))
-                
-                # Simple progress estimation based on elapsed time
-                if [ "$elapsed" -gt 0 ]; then
-                    # Estimate progress (this is rough, but better than nothing)
-                    local estimated_progress=$((elapsed * 100 / (file_size / 1048576 + 10)))
-                    if [ "$estimated_progress" -gt 95 ]; then
-                        estimated_progress=95
-                    fi
-                    
-                    log_model_sync "INFO" "Upload progress estimate: ${estimated_progress}% for $file_name"
-                fi
-                
-                sleep 3
-            done
-            
-            wait "$upload_pid"
-            local upload_result=$?
-            rm -f "$temp_progress_file"
-            
-            if [ "$upload_result" -eq 0 ]; then
-                log_model_sync "INFO" "Successfully uploaded large file: $file_name"
-                return 0
-            else
-                log_model_sync "ERROR" "Failed to upload large file: $file_name"
-                return 1
-            fi
-        else
-            # For smaller files, use regular upload
-            if aws s3 cp "$local_file" "$s3_destination" $metadata_args --only-show-errors; then
-                log_model_sync "INFO" "Successfully uploaded: $file_name"
-                return 0
-            else
-                log_model_sync "ERROR" "Failed to upload: $file_name"
-                return 1
-            fi
-        fi
+        log_model_sync "INFO" "File is too small (<10MB) for compression: $file_name"
+        # Remove compressed-specific metadata for small files
+        metadata_args="--metadata downloadUrl=$download_url"
     fi
+    
+    # Perform the actual upload with better error handling
+    log_model_sync "INFO" "Starting S3 upload: $file_name"
+    
+    # Check if staging will be used (for informational logging)
+    if is_staging_configured; then
+        log_model_sync "INFO" "Using staging bucket for fast upload"
+    fi
+    
+    # Try upload with standard method first (most reliable)
+    # Important: Quote metadata_args as a single parameter for s3_copy_to
+    if s3_copy_to "$upload_file" "$s3_destination" "$metadata_args"; then
+        log_model_sync "INFO" "Successfully uploaded: $file_name"
+        return 0
+    else
+        log_model_sync "ERROR" "Failed to upload: $file_name"
+        log_model_sync "DEBUG" "Upload command was: s3_copy_to '$upload_file' '$s3_destination' '$metadata_args'"
+        return 1
+    fi
+            
 }
 
 # Function to sync directory to S3 with progress tracking
@@ -275,15 +331,12 @@ sync_directory_with_progress() {
     
     log_model_sync "INFO" "Found $total_files files to sync"
     
-    # Use aws s3 sync with --cli-write-timeout for better progress tracking
+    # Use S3 sync with progress tracking
     local sync_output
     sync_output=$(mktemp)
     
-    # Run aws s3 sync in background and track its progress
-    aws s3 sync "$local_dir" "$s3_destination" \
-        --only-show-errors \
-        --cli-read-timeout 0 \
-        --cli-write-timeout 0 > "$sync_output" 2>&1 &
+    # Run s3 sync in background and track its progress
+    s3_sync_to "$local_dir" "$s3_destination" > "$sync_output" 2>&1 &
     
     local sync_pid=$!
     local files_synced=0
@@ -292,7 +345,7 @@ sync_directory_with_progress() {
     while kill -0 "$sync_pid" 2>/dev/null; do
         # Check how many files have been processed by looking at S3
         local current_s3_count
-        current_s3_count=$(aws s3 ls "$s3_destination" --recursive 2>/dev/null | wc -l || echo "0")
+        current_s3_count=$(s3_list "$s3_destination" --recursive 2>/dev/null | wc -l || echo "0")
         
         if [ "$current_s3_count" -gt "$files_synced" ]; then
             files_synced="$current_s3_count"
@@ -473,7 +526,6 @@ process_model_for_sync() {
         # Check if model exists at exact same path
         if [ "$reason" = "Model already exists at this exact path" ]; then
             log_model_sync "INFO" "Model exists at exact path - no upload needed, config already correct"
-            return 1
         fi
         
         # Handle cases where existingModel is provided
@@ -938,7 +990,6 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     echo "  notify_model_sync_progress <sync_type> <status> <percentage>"
     echo "  batch_process_models <models_dir> <s3_base_path> <sync_type>"
     echo "  sanitize_model_config"
-    echo "  sanitize_model_config"
     echo ""
     echo "Example usage:"
     echo "  source \"\$NETWORK_VOLUME/scripts/model_sync_integration.sh\""
@@ -958,7 +1009,3 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     echo "  Model Config: $MODEL_CONFIG_LOG"
 fi
 EOF
-
-chmod +x "$NETWORK_VOLUME/scripts/model_sync_integration.sh"
-
-echo "✅ Model sync integration script created at $NETWORK_VOLUME/scripts/model_sync_integration.sh"

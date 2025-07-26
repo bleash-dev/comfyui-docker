@@ -11,8 +11,9 @@ cat > "$NETWORK_VOLUME/scripts/sync_logs.sh" << 'EOF'
 #!/bin/bash
 # Sync logs to S3
 
-# Source the sync lock manager
+# Source the sync lock manager and S3 interactor
 source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
+source "$NETWORK_VOLUME/scripts/s3_interactor.sh"
 
 sync_logs_internal() {
 
@@ -57,6 +58,9 @@ fi
 [ -f "$NETWORK_VOLUME/.download_progress_calls.log" ] && cp "$NETWORK_VOLUME/.download_progress_calls.log" "$LOCAL_LOG_DIR/"
 [ -f "$NETWORK_VOLUME/.model_download_integration.log" ] && cp "$NETWORK_VOLUME/.model_download_integration.log" "$LOCAL_LOG_DIR/"
 
+# Collect S3 interactor logs
+[ -f "$NETWORK_VOLUME/.s3_interactor.log" ] && cp "$NETWORK_VOLUME/.s3_interactor.log" "$LOCAL_LOG_DIR/"
+
 # Environment info
 cat > "$LOCAL_LOG_DIR/environment.log" << ENVEOF
 Timestamp: $(date)
@@ -71,7 +75,7 @@ ComfyUI Output: $([ -d "$NETWORK_VOLUME/ComfyUI/output" ] && echo "$(find "$NETW
 ENVEOF
 
 TIMESTAMP=$(date +%H-%M-%S)
-aws s3 sync "$LOCAL_LOG_DIR" "$S3_LOG_BASE/$TIMESTAMP" --delete
+s3_sync_to "$LOCAL_LOG_DIR" "$S3_LOG_BASE/$TIMESTAMP" "--delete"
 rm -rf "$LOCAL_LOG_DIR"
 
 echo "✅ Logs synced to S3"

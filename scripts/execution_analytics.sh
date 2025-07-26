@@ -34,6 +34,11 @@ fi
 # Get current POD_ID if available from environment
 CURRENT_POD_ID="${POD_ID:-}" # Use POD_ID from env if set, otherwise empty
 
+# Source S3 interactor for cloud storage operations
+if [ -f "$NETWORK_VOLUME/scripts/s3_interactor.sh" ]; then
+    source "$NETWORK_VOLUME/scripts/s3_interactor.sh"
+fi
+
 # Define paths
 TRACKING_DIR="$NETWORK_VOLUME/.pod_tracking" # For current_session.json
 TEMP_DIR=$(mktemp -d -p "${TMPDIR:-/tmp}" "pod_analytics.XXXXXX") # Secure temp directory
@@ -79,7 +84,7 @@ show_current_pod_summary() {
     
     local summary_file="$TEMP_DIR/current_pod_execution_summary.json"
     echo "ℹ️ Attempting to download summary from: $S3_CURRENT_POD_SUMMARY"
-    if aws s3 cp "$S3_CURRENT_POD_SUMMARY" "$summary_file" --only-show-errors 2>/dev/null; then
+    if s3_copy_from "$S3_CURRENT_POD_SUMMARY" "$summary_file" "--only-show-errors" 2>/dev/null; then
         echo "Pod ID: $(jq -r '.pod_id // "N/A"' "$summary_file")"
         echo "Total Sessions Recorded: $(jq -r '.total_sessions // 0' "$summary_file")"
         echo "Total Runtime for this Pod ID: $(jq -r '.total_duration_human // "00:00:00"' "$summary_file")"
@@ -111,11 +116,10 @@ show_user_summary() {
     mkdir -p "$user_pods_dl_dir"
     
     echo "ℹ️ Downloading all execution_summary.json files from: $S3_USER_SESSIONS_BASE/"
-    # Use aws s3 sync to download all _pod_tracking/execution_summary.json files
-    aws s3 sync "$S3_USER_SESSIONS_BASE/" "$user_pods_dl_dir/" \
-        --exclude "*" \
-        --include "*/_pod_tracking/execution_summary.json" \
-        --only-show-errors 2>/dev/null || echo "⚠️ Some files may have failed to download"
+    # Use S3 interactor sync to download all _pod_tracking/execution_summary.json files
+    s3_sync_from "$S3_USER_SESSIONS_BASE/" "$user_pods_dl_dir/" \
+        "--exclude '*' --include '*/_pod_tracking/execution_summary.json' --only-show-errors" 2>/dev/null || \
+        echo "⚠️ Some files may have failed to download"
 
     local total_sessions_all_pods=0
     local total_duration_all_pods=0
@@ -162,9 +166,9 @@ show_recent_sessions() {
     mkdir -p "$user_pods_dl_dir"
 
     echo "ℹ️ Downloading all execution_summary.json files for recent session analysis..."
-    aws s3 sync "$S3_USER_SESSIONS_BASE/" "$user_pods_dl_dir/" \
-        --exclude "*" \
-        --include "*/_pod_tracking/execution_summary.json" \
+    s3_sync_from "$S3_USER_SESSIONS_BASE/" "$user_pods_dl_dir/" \
+        "--exclude '*' --include '*/_pod_tracking/execution_summary.json' --only-show-errors" 2>/dev/null || \
+        echo "⚠️ Some files may have failed to download"
         --only-show-errors 2>/dev/null || echo "⚠️ Some files may have failed to download"
         
     local all_sessions_file="$TEMP_DIR/all_sessions_collected.json"
@@ -239,13 +243,13 @@ show_s3_status() {
     echo "------------------------------------------"
     
     echo "ℹ️ Checking S3 connectivity to base path: $S3_USER_SESSIONS_BASE/"
-    if aws s3 ls "$S3_USER_SESSIONS_BASE/" >/dev/null 2>&1; then
+    if s3_list "$S3_USER_SESSIONS_BASE/" >/dev/null 2>&1; then
         echo "✅ S3 connectivity: Working"
-        echo "📊 Sync-only mode: All operations use AWS CLI sync (no mounting)"
+        echo "📊 Sync-only mode: All operations use S3 interactor (no mounting)"
         
         echo "📁 Your tracked Pod ID directories in S3:"
         local found_pods=false
-        aws s3 ls "$S3_USER_SESSIONS_BASE/" | grep "PRE" | awk '{print $2}' | sed 's/\///g' | while IFS= read -r pod_dir; do
+        s3_list "$S3_USER_SESSIONS_BASE/" | grep "PRE" | awk '{print $2}' | sed 's/\///g' | while IFS= read -r pod_dir; do
             echo "  - $pod_dir"
             found_pods=true
         done
@@ -256,8 +260,8 @@ show_s3_status() {
         # Example for shared resources - adapt path as needed
         local s3_shared_base="s3://$AWS_BUCKET_NAME/pod_sessions/global_shared/"
         echo "🔗 Checking for global shared resources (example path: $s3_shared_base):"
-        if aws s3 ls "$s3_shared_base" >/dev/null 2>&1; then
-             aws s3 ls "$s3_shared_base" | grep "PRE" | awk '{print $2}' | sed 's/\///g' | while IFS= read -r shared_item; do
+        if s3_list "$s3_shared_base" >/dev/null 2>&1; then
+             s3_list "$s3_shared_base" | grep "PRE" | awk '{print $2}' | sed 's/\///g' | while IFS= read -r shared_item; do
                 echo "  - Global: $shared_item"
             done
         else

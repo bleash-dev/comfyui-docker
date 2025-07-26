@@ -2,9 +2,7 @@ name: Build and Deploy ComfyUI Docker Image
 
 on:
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    branches: [ main, dev]
   workflow_dispatch:
 
 env:
@@ -13,7 +11,7 @@ env:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    environment: ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+    environment: "prod"
 
     steps:
     - name: Checkout repository
@@ -54,10 +52,11 @@ jobs:
       uses: docker/metadata-action@v5
       with:
         images: |
-          ${{ secrets.DOCKER_HUB_USER_NAME }}/${{ env.IMAGE_NAME }}
+          ${{ secrets.DOCKER_HUB_USER_NAME }}/${{ env.IMAGE_NAME }}${{github.ref == 'refs/heads/dev' && '-dev' || ''}}
         tags: |
-          type=sha,prefix=main-
+          type=sha,prefix=${{ github.ref_name }}-
           type=raw,value=latest,enable={{is_default_branch}}
+          type=raw,value=dev-latest,enable=${{ github.ref == 'refs/heads/dev' }}
 
     - name: Build and push Docker image to Docker Hub
       uses: docker/build-push-action@v5

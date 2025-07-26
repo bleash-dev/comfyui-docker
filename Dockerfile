@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     nano \
     curl \
+    zstd \
     openssh-server \
     xxd \
     libgl1-mesa-glx \

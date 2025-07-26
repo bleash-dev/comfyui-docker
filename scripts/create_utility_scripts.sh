@@ -77,6 +77,11 @@ set -e -u -o pipefail
 # These variables are expected to be set in the environment:
 # NETWORK_VOLUME, AWS_BUCKET_NAME, MODEL_DISCOVERY_INTERVAL (optional)
 
+# Source S3 interactor for cloud storage operations
+if [ -f "$NETWORK_VOLUME/scripts/s3_interactor.sh" ]; then
+    source "$NETWORK_VOLUME/scripts/s3_interactor.sh"
+fi
+
 LOCAL_MODELS_CACHE="$NETWORK_VOLUME/.cache/local-models.json"
 S3_GLOBAL_MODELS_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/global_shared/models"
 MODELS_BASE_DIR="$NETWORK_VOLUME/ComfyUI/models"
@@ -230,21 +235,21 @@ sync_from_manifest() {
             echo "     to:   $full_local_path"
             
             # Check if the object exists in S3 before trying to download
-            if ! aws s3api head-object --bucket "$(echo "$s3_locator" | cut -d/ -f3)" --key "$(echo "$s3_locator" | cut -d/ -f4-)" &> /dev/null; then
-                 echo "  ❌ S3 object not found: $s3_locator"
-                 ((not_found_count++))
-                 continue
+            if ! s3_head_object "$s3_locator" &> /dev/null; then
+                echo "  ❌ S3 object not found: $s3_locator"
+                ((not_found_count++))
+                continue
             fi
             
             # Create the destination directory
             mkdir -p "$(dirname "$full_local_path")"
             
             # Download the file from S3
-            if aws s3 cp "$s3_locator" "$full_local_path" --only-show-errors; then
+            if s3_copy_from "$s3_locator" "$full_local_path" "--only-show-errors"; then
                 echo "  ✅ Successfully synced: $model_name"
                 ((synced_count++))
             else
-                echo "  ❌ Failed to sync: $model_name (AWS CLI exit code: $?)"
+                echo "  ❌ Failed to sync: $model_name (S3 interactor exit code: $?)"
                 ((failed_count++))
             fi
         fi
@@ -273,10 +278,11 @@ sync_all_from_s3() {
     echo "   Source: $s3_global_models_base/"
     echo "   Destination: $models_base_dir/"
     
-    if aws s3 sync "$s3_global_models_base/" "$models_base_dir/" --only-show-errors; then
+    if s3_sync_from "$s3_global_models_base/" "$models_base_dir/" "--only-show-errors"; then
         echo "✅ Full model sync completed."
     else
-        echo "❌ Full model sync failed. Check AWS CLI errors above."
+        echo "❌ Full model sync failed (S3 interactor)."
+        return 1
     fi
 }
 
@@ -375,8 +381,9 @@ list_remote_models() {
     remote_list_tmp=$(mktemp)
     trap 'rm -f "$remote_list_tmp"' RETURN # Clean up on function exit
 
-    aws s3api list-objects-v2 --bucket "$AWS_BUCKET_NAME" --prefix "$s3_prefix_in_bucket" \
-        --query 'Contents[?Size > `0`].[Key]' --output text | \
+    # Use s3_list to get the file listing and process it
+    s3_list "s3://$AWS_BUCKET_NAME/$s3_prefix_in_bucket" "--recursive" | \
+        awk '{if($3 > 0) print $4}' | \
         sed "s|^$s3_prefix_in_bucket||" > "$remote_list_tmp"
 
     if [ ! -s "$remote_list_tmp" ]; then # Check if file is not empty
@@ -526,17 +533,16 @@ show_status() {
         s3_prefix_in_bucket+="/"
     fi
     
-    # Get count of actual file objects
-    remote_count=$(aws s3api list-objects-v2 --bucket "$AWS_BUCKET_NAME" --prefix "$s3_prefix_in_bucket" \
-                    --query "length(Contents[?Size > \`0\`])" --output text 2>/dev/null) || remote_count="Error fetching"
+    # Get count of actual file objects using s3_list
+    local remote_list_tmp_count
+    remote_list_tmp_count=$(mktemp)
+    trap 'rm -f "$remote_list_tmp_count"' RETURN
     
-    if [[ "$remote_count" == "None" || -z "$remote_count" || "$remote_count" == "Error fetching" ]]; then
-        # If error or None, try to list to see if bucket/prefix is accessible at all
-        if ! aws s3 ls "${S3_GLOBAL_MODELS_BASE%/}/" >/dev/null 2>&1; then # Check if prefix exists
-             remote_count="Error accessing S3 path"
-        else
-             remote_count=0 # Path exists but no files, or query failed but path is valid
-        fi
+    if s3_list "s3://$AWS_BUCKET_NAME/$s3_prefix_in_bucket" "--recursive" 2>/dev/null | \
+        awk '{if($3 > 0) print $4}' > "$remote_list_tmp_count"; then
+        remote_count=$(wc -l < "$remote_list_tmp_count")
+    else
+        remote_count="Error accessing S3 path"
     fi
     echo "Remote models available in S3: $remote_count"
     

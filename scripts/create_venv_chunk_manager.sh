@@ -44,6 +44,11 @@ if [ -f "$NETWORK_VOLUME/scripts/api_client.sh" ] && ! command -v notify_sync_pr
     source "$NETWORK_VOLUME/scripts/api_client.sh" 2>/dev/null || true
 fi
 
+# Source S3 interactor for cloud storage operations
+if [ -f "$NETWORK_VOLUME/scripts/s3_interactor.sh" ]; then
+    source "$NETWORK_VOLUME/scripts/s3_interactor.sh" 2>/dev/null || true
+fi
+
 # Fallback notification function if API client is not available
 if ! command -v notify_sync_progress >/dev/null 2>&1; then
     notify_sync_progress() {
@@ -806,7 +811,7 @@ upload_chunks() {
         (
             local filename
             filename=$(basename "$chunk_file")
-            if aws s3 cp "$chunk_file" "$s3_path/$filename" --only-show-errors; then
+            if s3_copy_to "$chunk_file" "$s3_path/$filename" "--only-show-errors"; then
                 log_info "Uploaded: $filename"
             else
                 log_error "Failed to upload: $filename"
@@ -842,7 +847,7 @@ upload_chunks() {
         
         # Start upload in background
         (
-            if aws s3 cp "$chunk_dir/$VENV_OTHER_ZIP" "$s3_path/$VENV_OTHER_ZIP" --only-show-errors; then
+            if s3_copy_to "$chunk_dir/$VENV_OTHER_ZIP" "$s3_path/$VENV_OTHER_ZIP" "--only-show-errors"; then
                 log_info "Uploaded: $VENV_OTHER_ZIP"
             else
                 log_error "Failed to upload: $VENV_OTHER_ZIP"
@@ -874,7 +879,7 @@ upload_chunks() {
     
     # Upload checksum file
     if [ -f "$chunk_dir/$CHECKSUM_FILE" ]; then
-        if aws s3 cp "$chunk_dir/$CHECKSUM_FILE" "$s3_path/$CHECKSUM_FILE" --only-show-errors; then
+        if s3_copy_to "$chunk_dir/$CHECKSUM_FILE" "$s3_path/$CHECKSUM_FILE" "--only-show-errors"; then
             log_info "Uploaded checksum file"
         else
             log_error "Failed to upload checksum file"
@@ -884,7 +889,7 @@ upload_chunks() {
     
     # Upload source checksum
     if [ -f "$chunk_dir/source.checksum" ]; then
-        if aws s3 cp "$chunk_dir/source.checksum" "$s3_path/source.checksum" --only-show-errors; then
+        if s3_copy_to "$chunk_dir/source.checksum" "$s3_path/source.checksum" "--only-show-errors"; then
             log_info "Uploaded source checksum"
         else
             log_error "Failed to upload source checksum"
@@ -911,7 +916,7 @@ download_chunks() {
     
     # List and download chunk files
     local chunk_files
-    chunk_files=$(aws s3 ls "$s3_path/" | grep "${CHUNK_PREFIX}.*\.tar\.gz$" | awk '{print $4}' || true)
+    chunk_files=$(s3_list "$s3_path/" | grep "${CHUNK_PREFIX}.*\.tar\.gz$" | awk '{print $4}' || true)
     
     if [ -z "$chunk_files" ]; then
         log_error "No chunk files found at: $s3_path"
@@ -952,7 +957,7 @@ download_chunks() {
         # Start download in background
         (
             local target_file="$chunk_dir/$filename"
-            if aws s3 cp "$s3_path/$filename" "$target_file" --only-show-errors; then
+            if s3_copy_from "$s3_path/$filename" "$target_file" "--only-show-errors"; then
                 # Verify downloaded file is not empty and is valid
                 if [ ! -s "$target_file" ]; then
                     log_error "Downloaded chunk is empty: $filename"
@@ -991,7 +996,7 @@ download_chunks() {
         done
         
         local target_zip="$chunk_dir/$VENV_OTHER_ZIP"
-        if aws s3 cp "$s3_path/$VENV_OTHER_ZIP" "$target_zip" --only-show-errors 2>/dev/null; then
+        if s3_copy_from "$s3_path/$VENV_OTHER_ZIP" "$target_zip" "--only-show-errors" 2>/dev/null; then
             log_info "Downloaded: $VENV_OTHER_ZIP"
         else
             log_info "No other folders zip found (optional)"
@@ -1019,14 +1024,14 @@ download_chunks() {
     fi
     
     # Download checksum file
-    if aws s3 cp "$s3_path/$CHECKSUM_FILE" "$chunk_dir/$CHECKSUM_FILE" --only-show-errors 2>/dev/null; then
+    if s3_copy_from "$s3_path/$CHECKSUM_FILE" "$chunk_dir/$CHECKSUM_FILE" "--only-show-errors" 2>/dev/null; then
         log_info "Downloaded checksum file"
     else
         log_info "No checksum file found (optional)"
     fi
     
     # Download source checksum
-    if aws s3 cp "$s3_path/source.checksum" "$chunk_dir/source.checksum" --only-show-errors 2>/dev/null; then
+    if s3_copy_from "$s3_path/source.checksum" "$chunk_dir/source.checksum" "--only-show-errors" 2>/dev/null; then
         log_info "Downloaded source checksum"
     else
         log_info "No source checksum found (optional)"
