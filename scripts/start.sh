@@ -89,6 +89,20 @@ else
     echo "📁 Using pre-configured NETWORK_VOLUME: $NETWORK_VOLUME"
 fi
 
+# Check for additional network volume optimization (_NETWORK_VOLUME)
+# This is a separate volume mount for shared data optimization
+if [ -n "${_NETWORK_VOLUME:-}" ]; then
+    if [ -d "$_NETWORK_VOLUME" ] && [ -w "$_NETWORK_VOLUME" ]; then
+        echo "🔗 Additional network volume detected at $_NETWORK_VOLUME for shared data optimization"
+        export _NETWORK_VOLUME
+    else
+        echo "⚠️ WARNING: _NETWORK_VOLUME set to $_NETWORK_VOLUME but path is not accessible, disabling optimization"
+        unset _NETWORK_VOLUME
+    fi
+else
+    echo "📁 No additional network volume configured for shared data optimization"
+fi
+
 # Export NETWORK_VOLUME for all child processes
 export NETWORK_VOLUME
 

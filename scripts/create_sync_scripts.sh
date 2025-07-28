@@ -187,8 +187,71 @@ sync_user_shared_data_internal() {
     # Send initial progress notification and ensure tools are available
     notify_sync_progress "user_data" "PROGRESS" 0
 
+    # --- Network Volume Optimization ---
+    # Check if _NETWORK_VOLUME is available for shared data optimization
+    NETWORK_VOLUME_AVAILABLE=false
+    if [ -n "${_NETWORK_VOLUME:-}" ] && [ -d "$_NETWORK_VOLUME" ] && [ -w "$_NETWORK_VOLUME" ]; then
+        NETWORK_VOLUME_AVAILABLE=true
+        echo "🔗 Network volume detected at $_NETWORK_VOLUME - enabling shared data optimization"
+        mkdir -p "$_NETWORK_VOLUME"
+        mkdir -p "$_NETWORK_VOLUME/ComfyUI"
+    else
+        echo "📁 No network volume available - using standard sync method"
+    fi
+
     S3_USER_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/shared"
     S3_USER_COMFYUI_SHARED_BASE="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/ComfyUI/shared"
+
+    # Helper function to copy data to network volume and then sync from there
+    copy_to_network_volume_and_sync() {
+        local pod_local_path="$1"      # Source path in pod
+        local network_vol_rel_path="$2" # Relative path in network volume
+        local description="$3"         # Description for logging
+        
+        if [ "$NETWORK_VOLUME_AVAILABLE" != "true" ]; then
+            return 1  # Network volume not available, use pod local path
+        fi
+        
+        local network_vol_full_path="$_NETWORK_VOLUME/$network_vol_rel_path"
+        
+        # If pod local path is a symlink pointing to network volume, sync from network volume directly
+        if [ -L "$pod_local_path" ] && [ "$(readlink -f "$pod_local_path")" = "$network_vol_full_path" ]; then
+            echo "  🔗 $description is symlinked to network volume, syncing from network volume directly"
+            return 0  # Use network volume path for syncing
+        fi
+        
+        # If pod has data and network volume doesn't, copy from pod to network volume
+        if [ -d "$pod_local_path" ] && [ -n "$(find "$pod_local_path" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+            if [ ! -d "$network_vol_full_path" ] || [ -z "$(find "$network_vol_full_path" -mindepth 1 -print -quit 2>/dev/null)" ]; then
+                echo "  📋 Copying $description from pod to network volume..."
+                mkdir -p "$(dirname "$network_vol_full_path")"
+                if cp -r "$pod_local_path" "$(dirname "$network_vol_full_path")/"; then
+                    echo "    ✅ Successfully copied $description to network volume"
+                    return 0  # Use network volume path for syncing
+                else
+                    echo "    ❌ Failed to copy $description to network volume, using pod local path"
+                    return 1  # Failed, use pod local path
+                fi
+            else
+                echo "  🔗 $description already exists in network volume, using network volume data"
+                return 0  # Use network volume path for syncing
+            fi
+        fi
+        
+        return 1  # No data or copy failed, use pod local path
+    }
+
+    # Get the actual path to use for syncing (either network volume or pod local)
+    get_sync_source_path() {
+        local pod_local_path="$1"
+        local network_vol_rel_path="$2"
+        
+        if copy_to_network_volume_and_sync "$pod_local_path" "$network_vol_rel_path" "$3"; then
+            echo "$_NETWORK_VOLUME/$network_vol_rel_path"
+        else
+            echo "$pod_local_path"
+        fi
+    }
 
     # Separate venv handling from other folders for optimization
     OTHER_SHARED_FOLDERS=(".comfyui" ".cache")
@@ -202,7 +265,9 @@ sync_user_shared_data_internal() {
     # New structure: S3 path becomes /venv_chunks/{venv_name}/ for each venv
     # This allows multiple venvs to coexist and be synced independently
     # Legacy single venv structure at /venv_chunks/ is still supported for backwards compatibility
-    local venv_base_dir="$NETWORK_VOLUME/venv"
+    local venv_base_dir
+    venv_base_dir=$(get_sync_source_path "$NETWORK_VOLUME/venv" "venv" "virtual environments")
+    
     if [[ -d "$venv_base_dir" ]]; then
         echo "📦 Processing venvs with chunked optimization..."
         notify_sync_progress "user_data" "PROGRESS" 10
@@ -249,7 +314,10 @@ sync_user_shared_data_internal() {
             local archive_name="venv.tar.gz"
             local temp_archive_path="/tmp/user_shared_${archive_name}"
             echo "    🗜️ Compressing venv with traditional method..."
-            if tar -czf "$temp_archive_path" -C "$NETWORK_VOLUME" "venv"; then
+            # Use the source path determined earlier (could be network volume or pod local)
+            local venv_parent_dir=$(dirname "$venv_base_dir")
+            local venv_folder_name=$(basename "$venv_base_dir")
+            if tar -czf "$temp_archive_path" -C "$venv_parent_dir" "$venv_folder_name"; then
                 echo "$temp_archive_path|$S3_USER_SHARED_BASE/$archive_name" >> "$ARCHIVES_LIST_FILE"
                 echo "    📝 Added venv to upload queue (fallback method)"
             else
@@ -268,15 +336,21 @@ sync_user_shared_data_internal() {
 
     echo "🗜️ Archiving other user-shared folders..."
     for folder_name in "${OTHER_SHARED_FOLDERS[@]}"; do
-        local_folder_path="$NETWORK_VOLUME/$folder_name"
+        # Get the actual source path (network volume or pod local)
+        local source_folder_path
+        source_folder_path=$(get_sync_source_path "$NETWORK_VOLUME/$folder_name" "$folder_name" "$folder_name data")
+        
         safe_folder_name="${folder_name#.}"
         [[ "$folder_name" == .* ]] && safe_folder_name="_${safe_folder_name}"
         archive_name="${safe_folder_name//\//_}.tar.gz"
         temp_archive_path="/tmp/user_shared_${archive_name}"
 
-        if [[ -d "$local_folder_path" ]] && [[ -n "$(find "$local_folder_path" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+        if [[ -d "$source_folder_path" ]] && [[ -n "$(find "$source_folder_path" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
             echo "  🗜️ Compressing $folder_name..."
-            if tar -czf "$temp_archive_path" -C "$NETWORK_VOLUME" "$folder_name"; then
+            # Compress from the correct parent directory
+            local source_parent_dir=$(dirname "$source_folder_path")
+            local source_folder_name=$(basename "$source_folder_path")
+            if tar -czf "$temp_archive_path" -C "$source_parent_dir" "$source_folder_name"; then
                 echo "$temp_archive_path|$S3_USER_SHARED_BASE/$archive_name" >> "$ARCHIVES_LIST_FILE"
             else
                 echo "  ❌ Failed to compress $folder_name"
@@ -289,13 +363,19 @@ sync_user_shared_data_internal() {
 
     echo "🗜️ Archiving ComfyUI-shared folders..."
     for folder_name in "${COMFYUI_USER_SHARED_FOLDERS_TO_ARCHIVE[@]}"; do
-        local_folder_path="$NETWORK_VOLUME/ComfyUI/$folder_name"
+        # Get the actual source path (network volume or pod local)
+        local source_folder_path
+        source_folder_path=$(get_sync_source_path "$NETWORK_VOLUME/ComfyUI/$folder_name" "ComfyUI/$folder_name" "ComfyUI $folder_name data")
+        
         archive_name="${folder_name//\//_}.tar.gz"
         temp_archive_path="/tmp/comfyui_shared_${archive_name}"
 
-        if [[ -d "$local_folder_path" ]] && [[ -n "$(find "$local_folder_path" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+        if [[ -d "$source_folder_path" ]] && [[ -n "$(find "$source_folder_path" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
             echo "  🗜️ Compressing ComfyUI/$folder_name..."
-            if tar -czf "$temp_archive_path" -C "$NETWORK_VOLUME/ComfyUI" "$folder_name"; then
+            # Compress from the correct parent directory
+            local source_parent_dir=$(dirname "$source_folder_path")
+            local source_folder_name=$(basename "$source_folder_path")
+            if tar -czf "$temp_archive_path" -C "$source_parent_dir" "$source_folder_name"; then
                 echo "$temp_archive_path|$S3_USER_COMFYUI_SHARED_BASE/$archive_name" >> "$ARCHIVES_LIST_FILE"
             else
                 echo "  ❌ Failed to compress ComfyUI/$folder_name"
@@ -345,7 +425,7 @@ sync_user_shared_data_internal() {
     # Summary of sync operation
     echo "📊 Sync Summary:"
     if [[ "$venv_processed" == true ]]; then
-        local venv_count=$(find "$NETWORK_VOLUME/venv" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+        local venv_count=$(find "$venv_base_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
         echo "  📦 Virtual environments: $venv_count venv(s) synced using chunked optimization"
     fi
     if [[ ${#venv_failures[@]} -gt 0 ]]; then
@@ -353,6 +433,13 @@ sync_user_shared_data_internal() {
     fi
     if [ "$total_archives" -gt 0 ]; then
         echo "  📁 Traditional archives: $total_archives archive(s) uploaded"
+    fi
+    
+    # Report network volume optimizations
+    if [ "$NETWORK_VOLUME_AVAILABLE" = "true" ]; then
+        echo "  🔗 Network volume optimization: Shared data copied to $_NETWORK_VOLUME for persistence"
+    else
+        echo "  📁 Network volume: Not available - using pod local storage only"
     fi
     
     notify_sync_progress "user_data" "DONE" 100

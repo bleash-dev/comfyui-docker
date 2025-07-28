@@ -18,6 +18,17 @@ done
 mkdir -p "$NETWORK_VOLUME"
 mkdir -p "$NETWORK_VOLUME/ComfyUI"
 
+# --- Network Volume Optimization Check ---
+# Check if _NETWORK_VOLUME is available for shared data optimization
+NETWORK_VOLUME_AVAILABLE=false
+if [ -n "${_NETWORK_VOLUME:-}" ] && [ -d "$_NETWORK_VOLUME" ] && [ -w "$_NETWORK_VOLUME" ]; then
+    NETWORK_VOLUME_AVAILABLE=true
+    echo "🔗 Network volume detected at $_NETWORK_VOLUME - enabling shared data optimization"
+    mkdir -p "$_NETWORK_VOLUME"
+else
+    echo "📁 No network volume available - using standard download method"
+fi
+
 # Source venv chunk manager if available
 if [ -f "$NETWORK_VOLUME/scripts/venv_chunk_manager.sh" ]; then
     source "$NETWORK_VOLUME/scripts/venv_chunk_manager.sh"
@@ -33,6 +44,52 @@ if [ -f "$NETWORK_VOLUME/scripts/s3_interactor.sh" ]; then
 else
     echo "⚠️ S3 interactor not found, falling back to direct AWS CLI commands"
 fi
+
+# --- Network Volume Helper Functions ---
+# Check if a directory is usable (exists, is a directory, and is accessible)
+is_directory_usable() {
+    local dir_path="$1"
+    [ -d "$dir_path" ] && [ -r "$dir_path" ] && [ -w "$dir_path" ]
+}
+
+# Create symlink from network volume to pod local path if network volume data is available
+# Returns 0 if symlink created successfully, 1 if fallback to download needed
+try_symlink_from_network_volume() {
+    local network_vol_path="$1"    # Path in _NETWORK_VOLUME
+    local pod_local_path="$2"      # Path in NETWORK_VOLUME (pod local)
+    local description="$3"         # Description for logging
+    
+    if [ "$NETWORK_VOLUME_AVAILABLE" != "true" ]; then
+        return 1  # Network volume not available, fallback to download
+    fi
+    
+    local full_network_path="$_NETWORK_VOLUME/$network_vol_path"
+    
+    # Check if network volume has the data and it's usable
+    if is_directory_usable "$full_network_path"; then
+        echo "  🔗 Found usable $description in network volume, creating symlink..."
+        
+        # Remove existing directory/symlink if it exists
+        if [ -e "$pod_local_path" ] || [ -L "$pod_local_path" ]; then
+            rm -rf "$pod_local_path"
+        fi
+        
+        # Create parent directory if needed
+        mkdir -p "$(dirname "$pod_local_path")"
+        
+        # Create symlink
+        if ln -s "$full_network_path" "$pod_local_path"; then
+            echo "    ✅ Symlink created: $pod_local_path -> $full_network_path"
+            return 0  # Success, no download needed
+        else
+            echo "    ❌ Failed to create symlink, will fallback to download"
+            return 1  # Failed, fallback to download
+        fi
+    else
+        echo "  📁 $description not found or unusable in network volume, will download"
+        return 1  # Not available or unusable, fallback to download
+    fi
+}
 
 # --- Helper Function: Download and Extract ---
 download_and_extract() {
@@ -167,20 +224,29 @@ OTHER_USER_SHARED_ARCHIVE_FILES=("_comfyui.tar.gz" "_cache.tar.gz")
 
 # --- Restore Order ---
 echo "--- Restoring Virtual Environments (Optimized) ---"
-# New multi-venv structure: S3 path is /venv_chunks/{venv_name}/ for each venv
-# This allows multiple venvs to coexist and be restored independently
-# Legacy single venv structure at /venv_chunks/ is still supported for backwards compatibility
-# Try chunked venvs first, fall back to traditional archive
+# Network volume optimization: Try symlinks first, fallback to download
 venv_restored=false
 
-# Try new multi-venv structure first
-if download_and_restore_chunked_venvs \
-    "$S3_USER_SHARED_BASE/venv_chunks" \
-    "$NETWORK_VOLUME/venv" \
-    "user venvs (chunked)"; then
+# Try network volume symlink first for venv
+if try_symlink_from_network_volume "venv" "$NETWORK_VOLUME/venv" "virtual environments"; then
     venv_restored=true
-    echo "  ✅ Chunked venvs restoration successful"
+    echo "  ✅ Virtual environments symlinked from network volume"
 else
+    echo "  🔄 Network volume symlink failed, proceeding with download..."
+    
+    # New multi-venv structure: S3 path is /venv_chunks/{venv_name}/ for each venv
+    # This allows multiple venvs to coexist and be restored independently
+    # Legacy single venv structure at /venv_chunks/ is still supported for backwards compatibility
+    # Try chunked venvs first, fall back to traditional archive
+    
+    # Try new multi-venv structure first
+    if download_and_restore_chunked_venvs \
+        "$S3_USER_SHARED_BASE/venv_chunks" \
+        "$NETWORK_VOLUME/venv" \
+        "user venvs (chunked)"; then
+        venv_restored=true
+        echo "  ✅ Chunked venvs restoration successful"
+    else
     echo "  🔄 New multi-venv structure not found, trying legacy single venv structure..."
     
     # Try legacy single venv structure (backwards compatibility)
@@ -243,25 +309,47 @@ if [ "$venv_restored" = "true" ] && [ -d "$NETWORK_VOLUME/venv" ]; then
 fi
 
 echo "--- Restoring Other User-Shared Data ---"
-for archive_filename in "${OTHER_USER_SHARED_ARCHIVE_FILES[@]}"; do
-    folder_description="${archive_filename%.tar.gz}" 
-    # For _comfyui.tar.gz, folder_description becomes "_comfyui". 
-    # If you want it to log ".comfyui", you'd need a small mapping or string replacement here.
-    # E.g., if [[ "$folder_description" == "_comfyui" ]]; then display_name=".comfyui"; else display_name="$folder_description"; fi
-    # For now, keeping it simple:
-    download_and_extract \
-        "$S3_USER_SHARED_BASE/$archive_filename" \
-        "$NETWORK_VOLUME" \
-        "User-shared '$folder_description' data"
+# Define the shared folders and their corresponding archive names
+declare -A SHARED_FOLDERS_MAP=(
+    [".comfyui"]="_comfyui.tar.gz"
+    [".cache"]="_cache.tar.gz"
+)
+
+for folder_name in "${!SHARED_FOLDERS_MAP[@]}"; do
+    archive_filename="${SHARED_FOLDERS_MAP[$folder_name]}"
+    pod_local_path="$NETWORK_VOLUME/$folder_name"
+    
+    # Try network volume symlink first
+    if try_symlink_from_network_volume "$folder_name" "$pod_local_path" "$folder_name data"; then
+        echo "  ✅ $folder_name symlinked from network volume"
+    else
+        echo "  🔄 Network volume symlink failed for $folder_name, downloading from S3..."
+        folder_description="${archive_filename%.tar.gz}"
+        download_and_extract \
+            "$S3_USER_SHARED_BASE/$archive_filename" \
+            "$NETWORK_VOLUME" \
+            "User-shared '$folder_description' data"
+    fi
 done
 
 echo "--- Restoring ComfyUI User-Shared Data ---"
-for archive_filename in "${COMFYUI_USER_SHARED_ARCHIVE_FILES[@]}"; do
-    folder_description="${archive_filename%.tar.gz}" 
-    download_and_extract \
-        "$S3_USER_COMFYUI_SHARED_BASE/$archive_filename" \
-        "$NETWORK_VOLUME/ComfyUI" \
-        "ComfyUI user-shared '$folder_description' data"
+# Define ComfyUI shared folders that can be symlinked
+COMFYUI_SHARED_FOLDERS=("custom_nodes")
+
+for folder_name in "${COMFYUI_SHARED_FOLDERS[@]}"; do
+    archive_filename="${folder_name}.tar.gz"
+    pod_local_path="$NETWORK_VOLUME/ComfyUI/$folder_name"
+    
+    # Try network volume symlink first
+    if try_symlink_from_network_volume "ComfyUI/$folder_name" "$pod_local_path" "ComfyUI $folder_name"; then
+        echo "  ✅ ComfyUI $folder_name symlinked from network volume"
+    else
+        echo "  🔄 Network volume symlink failed for ComfyUI $folder_name, downloading from S3..."
+        download_and_extract \
+            "$S3_USER_COMFYUI_SHARED_BASE/$archive_filename" \
+            "$NETWORK_VOLUME/ComfyUI" \
+            "ComfyUI user-shared '$folder_name' data"
+    fi
 done
 
 echo "--- Restoring ComfyUI Pod-Specific Data ---"
@@ -280,11 +368,36 @@ echo "📊 Restore Summary:"
 if [ "$venv_restored" = "true" ]; then
     if [ -d "$NETWORK_VOLUME/venv" ]; then
         venv_count=$(find "$NETWORK_VOLUME/venv" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
-        echo "  📦 Virtual environments: $venv_count venv(s) restored"
+        if [ -L "$NETWORK_VOLUME/venv" ]; then
+            echo "  📦 Virtual environments: $venv_count venv(s) symlinked from network volume"
+        else
+            echo "  📦 Virtual environments: $venv_count venv(s) restored from S3"
+        fi
     fi
 else
     echo "  📦 Virtual environments: No venvs restored - will be created fresh"
 fi
-echo "  📁 Other data: User-shared and pod-specific data restored from archives"
+
+# Report network volume optimizations
+if [ "$NETWORK_VOLUME_AVAILABLE" = "true" ]; then
+    symlinked_count=0
+    downloaded_count=0
+    
+    # Check which folders are symlinked vs downloaded
+    for folder in "venv" ".comfyui" ".cache" "ComfyUI/custom_nodes"; do
+        local_path="$NETWORK_VOLUME/$folder"
+        if [ -L "$local_path" ]; then
+            symlinked_count=$((symlinked_count + 1))
+        elif [ -d "$local_path" ]; then
+            downloaded_count=$((downloaded_count + 1))
+        fi
+    done
+    
+    echo "  🔗 Network volume optimization: $symlinked_count folder(s) symlinked, $downloaded_count downloaded"
+else
+    echo "  📁 Network volume: Not available - all data downloaded from S3"
+fi
+
+echo "  📁 Other data: User-shared and pod-specific data restored"
 
 echo "✅ User data sync from S3 (optimized) completed."

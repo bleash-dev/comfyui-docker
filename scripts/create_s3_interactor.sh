@@ -241,6 +241,32 @@ s3_copy_from() {
     # Create destination directory if it doesn't exist
     mkdir -p "$(dirname "$destination_path")"
     
+    # For chunked downloads and cache files, try staging bucket first if configured
+    if is_staging_configured && (echo "$s3_source" | grep -q "/venv_chunks/" || echo "$s3_source" | grep -q "_cache\.tar\.gz"); then
+        local bucket key
+        if parse_s3_uri "$s3_source" bucket key; then
+            local staging_source="s3://$MODELS_STAGING_BUCKET_NAME/$key"
+            
+            log_s3_activity "INFO" "Attempting download from staging (venv chunks or cache): $staging_source -> $destination_path"
+            
+            # Try downloading from staging first
+            if [ -n "$options" ]; then
+                if execute_staging_aws_cli s3 cp "$staging_source" "$destination_path" $options 2>/dev/null; then
+                    log_s3_activity "INFO" "Successfully downloaded from staging bucket"
+                    return 0
+                fi
+            else
+                if execute_staging_aws_cli s3 cp "$staging_source" "$destination_path" 2>/dev/null; then
+                    log_s3_activity "INFO" "Successfully downloaded from staging bucket"
+                    return 0
+                fi
+            fi
+            
+            log_s3_activity "INFO" "Staging download failed, falling back to main bucket"
+        fi
+    fi
+    
+    # Standard download from main bucket
     log_s3_activity "INFO" "Copying from S3: $s3_source -> $destination_path"
     
     if [ -n "$options" ]; then
@@ -400,23 +426,6 @@ s3_object_exists() {
     execute_aws_cli s3api head-object --bucket "$bucket" --key "$key" >/dev/null 2>&1
 }
 
-# Function to download S3 object with range (for chunked downloads)
-s3_download_range() {
-    local s3_uri="$1"
-    local output_file="$2"
-    local range="$3"  # Format: "bytes=start-end"
-    local bucket key
-    
-    if ! parse_s3_uri "$s3_uri" bucket key; then
-        return 1
-    fi
-    
-    # Create directory for output file
-    mkdir -p "$(dirname "$output_file")"
-    
-    log_s3_activity "DEBUG" "Downloading range $range from: $s3_uri"
-    execute_aws_cli s3api get-object --bucket "$bucket" --key "$key" --range "$range" "$output_file"
-}
 
 # Function to test S3 connectivity
 s3_test_connectivity() {
@@ -484,8 +493,6 @@ show_s3_usage() {
     echo "Advanced Operations:"
     echo "  s3_object_exists s3://bucket/path/file.txt"
     echo "  s3_get_object_size s3://bucket/path/file.txt"
-    echo "  s3_download_range s3://bucket/file.txt /local/chunk.bin 'bytes=0-1048575'"
-}
 
 # Allow script to be sourced or called directly
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
