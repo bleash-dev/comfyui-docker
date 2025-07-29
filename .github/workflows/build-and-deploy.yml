@@ -274,6 +274,12 @@ jobs:
           --policy-arn "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore" \
           --region ${{ env.AWS_REGION }}
         
+        # Attach CloudWatch logs policy for debugging
+        aws iam attach-role-policy \
+          --role-name "$ROLE_NAME" \
+          --policy-arn "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess" \
+          --region ${{ env.AWS_REGION }}
+        
         # Create instance profile
         aws iam create-instance-profile \
           --instance-profile-name "$ROLE_NAME" \
@@ -415,12 +421,24 @@ jobs:
         DOCKER_CHECK_ID=$(aws ssm send-command \
           --instance-ids $INSTANCE_ID \
           --document-name "AWS-RunShellScript" \
-          --parameters 'commands=["systemctl is-active docker && echo DOCKER_OK || echo DOCKER_FAIL"]' \
+          --parameters 'commands=[
+            "echo === Docker Service Status ===",
+            "systemctl is-active docker && echo DOCKER_SERVICE_ACTIVE || echo DOCKER_SERVICE_INACTIVE",
+            "systemctl status docker --no-pager -l",
+            "echo === Docker Version Check ===",
+            "docker version || echo DOCKER_VERSION_FAILED",
+            "echo === Docker Info ===",
+            "docker info || echo DOCKER_INFO_FAILED",
+            "echo === Docker Images ===",
+            "docker images || echo DOCKER_IMAGES_FAILED",
+            "echo === Final Status ===",
+            "if systemctl is-active docker >/dev/null 2>&1 && docker version >/dev/null 2>&1; then echo DOCKER_OK; else echo DOCKER_FAIL; fi"
+          ]' \
           --region ${{ env.AWS_REGION }} \
           --query 'Command.CommandId' \
           --output text)
         
-        sleep 10
+        sleep 15
         DOCKER_STATUS=$(aws ssm get-command-invocation \
           --command-id $DOCKER_CHECK_ID \
           --instance-id $INSTANCE_ID \
@@ -428,8 +446,44 @@ jobs:
           --query 'StandardOutputContent' \
           --output text)
         
+        echo "Docker Status Details:"
+        echo "$DOCKER_STATUS"
+        
         if [[ "$DOCKER_STATUS" != *"DOCKER_OK"* ]]; then
           echo "❌ Docker is not running properly"
+          
+          # Get additional debugging info
+          echo "🔍 Getting additional debugging information..."
+          DEBUG_ID=$(aws ssm send-command \
+            --instance-ids $INSTANCE_ID \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "echo === AMI Preparation Log ===",
+              "tail -50 /var/log/ami-preparation.log 2>/dev/null || echo No AMI preparation log found",
+              "echo === User Data Log ===", 
+              "tail -50 /var/log/user-data.log 2>/dev/null || echo No user data log found",
+              "echo === Docker Service Logs ===",
+              "journalctl -u docker --no-pager -n 20 || echo No Docker logs found",
+              "echo === System Status ===",
+              "df -h",
+              "free -m",
+              "ps aux | grep docker"
+            ]' \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Command.CommandId' \
+            --output text)
+          
+          sleep 10
+          DEBUG_INFO=$(aws ssm get-command-invocation \
+            --command-id $DEBUG_ID \
+            --instance-id $INSTANCE_ID \
+            --region ${{ env.AWS_REGION }} \
+            --query 'StandardOutputContent' \
+            --output text)
+          
+          echo "Debug Information:"
+          echo "$DEBUG_INFO"
+          
           exit 1
         fi
         echo "✅ Docker is running"
@@ -703,6 +757,11 @@ jobs:
             --policy-arn "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore" \
             --region ${{ env.AWS_REGION }} || echo "⚠️ SSM policy may already be detached"
           
+          aws iam detach-role-policy \
+            --role-name "$IAM_ROLE" \
+            --policy-arn "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess" \
+            --region ${{ env.AWS_REGION }} || echo "⚠️ CloudWatch policy may already be detached"
+          
           # Delete role
           aws iam delete-role \
             --role-name "$IAM_ROLE" \
@@ -712,6 +771,57 @@ jobs:
         else
           echo "⚠️ No IAM role found to cleanup"
         fi
+
+    - name: Monitor CloudWatch logs for debugging
+      timeout-minutes: 5
+      run: |
+        INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
+        echo "📊 Checking CloudWatch logs for real-time debugging..."
+        
+        # Give CloudWatch agent time to start and send logs
+        sleep 30
+        
+        # Check if AMI preparation logs are available in CloudWatch
+        echo "🔍 Checking AMI preparation logs..."
+        LOG_GROUPS=("/aws/ec2/comfyui/ami-preparation" "/aws/ec2/comfyui/user-data" "/aws/ec2/comfyui/docker")
+        
+        for LOG_GROUP in "${LOG_GROUPS[@]}"; do
+          echo "📋 Checking log group: $LOG_GROUP"
+          
+          # List log streams for this instance
+          STREAMS=$(aws logs describe-log-streams \
+            --log-group-name "$LOG_GROUP" \
+            --order-by LastEventTime \
+            --descending \
+            --max-items 5 \
+            --region ${{ env.AWS_REGION }} \
+            --query "logStreams[?contains(logStreamName, '$INSTANCE_ID')].logStreamName" \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -n "$STREAMS" ]; then
+            echo "✅ Found log streams in $LOG_GROUP: $STREAMS"
+            
+            # Get recent log events
+            for STREAM in $STREAMS; do
+              echo "📄 Recent logs from $LOG_GROUP/$STREAM:"
+              aws logs get-log-events \
+                --log-group-name "$LOG_GROUP" \
+                --log-stream-name "$STREAM" \
+                --start-time $(($(date +%s) * 1000 - 300000)) \
+                --region ${{ env.AWS_REGION }} \
+                --query 'events[*].message' \
+                --output text 2>/dev/null | tail -10 || echo "No recent events"
+              echo "---"
+            done
+          else
+            echo "⚠️ No log streams found for instance $INSTANCE_ID in $LOG_GROUP"
+          fi
+        done
+        
+        echo "💡 You can monitor real-time logs in AWS CloudWatch Console:"
+        echo "   - AMI Preparation: https://console.aws.amazon.com/cloudwatch/home?region=${{ env.AWS_REGION }}#logsV2:log-groups/log-group/%2Faws%2Fec2%2Fcomfyui%2Fami-preparation"
+        echo "   - User Data: https://console.aws.amazon.com/cloudwatch/home?region=${{ env.AWS_REGION }}#logsV2:log-groups/log-group/%2Faws%2Fec2%2Fcomfyui%2Fuser-data"
+        echo "   - Docker: https://console.aws.amazon.com/cloudwatch/home?region=${{ env.AWS_REGION }}#logsV2:log-groups/log-group/%2Faws%2Fec2%2Fcomfyui%2Fdocker"
 
     - name: Deployment Summary
       if: github.event_name != 'pull_request'

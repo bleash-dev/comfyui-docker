@@ -30,9 +30,27 @@ cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'EOF'
             "files": {
                 "collect_list": [
                     {
+                        "file_path": "/var/log/ami-preparation.log",
+                        "log_group_name": "/aws/ec2/comfyui/ami-preparation",
+                        "log_stream_name": "{instance_id}-ami-prep",
+                        "timestamp_format": "%Y-%m-%d %H:%M:%S"
+                    },
+                    {
+                        "file_path": "/var/log/user-data.log",
+                        "log_group_name": "/aws/ec2/comfyui/user-data",
+                        "log_stream_name": "{instance_id}-user-data",
+                        "timestamp_format": "%Y-%m-%d %H:%M:%S"
+                    },
+                    {
                         "file_path": "/var/log/tenant_manager.log",
                         "log_group_name": "/aws/ec2/comfyui/tenant-manager",
                         "log_stream_name": "{instance_id}-tenant-manager",
+                        "timestamp_format": "%Y-%m-%d %H:%M:%S"
+                    },
+                    {
+                        "file_path": "/var/log/docker.log",
+                        "log_group_name": "/aws/ec2/comfyui/docker",
+                        "log_stream_name": "{instance_id}-docker",
                         "timestamp_format": "%Y-%m-%d %H:%M:%S"
                     }
                 ]
@@ -122,6 +140,49 @@ EOF
 systemctl daemon-reload
 systemctl enable amazon-cloudwatch-agent
 echo "✅ CloudWatch agent service configured"
+
+# Create CloudWatch log groups
+echo "🔧 Creating CloudWatch log groups..."
+REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "us-east-1")
+
+# List of log groups to create
+LOG_GROUPS=(
+    "/aws/ec2/comfyui/ami-preparation"
+    "/aws/ec2/comfyui/user-data"
+    "/aws/ec2/comfyui/tenant-manager"
+    "/aws/ec2/comfyui/docker"
+)
+
+for LOG_GROUP in "${LOG_GROUPS[@]}"; do
+    echo "📝 Creating log group: $LOG_GROUP"
+    aws logs create-log-group \
+        --log-group-name "$LOG_GROUP" \
+        --region "$REGION" 2>/dev/null || {
+        echo "⚠️ Log group $LOG_GROUP may already exist"
+    }
+    
+    # Set retention policy (30 days for AMI prep, 7 days for others)
+    if [[ "$LOG_GROUP" == *"ami-preparation"* ]]; then
+        RETENTION_DAYS=30
+    else
+        RETENTION_DAYS=7
+    fi
+    
+    aws logs put-retention-policy \
+        --log-group-name "$LOG_GROUP" \
+        --retention-in-days "$RETENTION_DAYS" \
+        --region "$REGION" 2>/dev/null || {
+        echo "⚠️ Could not set retention policy for $LOG_GROUP"
+    }
+done
+
+echo "✅ CloudWatch log groups created"
+
+# Start the CloudWatch agent immediately
+echo "🚀 Starting CloudWatch agent..."
+systemctl start amazon-cloudwatch-agent || {
+    echo "⚠️ CloudWatch agent failed to start, will retry later"
+}
 
 # Create log groups creation script
 echo "📝 Creating log groups setup script..."

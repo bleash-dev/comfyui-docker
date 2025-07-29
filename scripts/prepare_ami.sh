@@ -9,6 +9,15 @@ exec 2> >(tee -a /var/log/ami-preparation.log >&2)
 
 echo "=== AMI Preparation Started - $(date) ==="
 
+# Setup CloudWatch logging early for real-time monitoring
+echo "🔧 Setting up CloudWatch logging early for debugging..."
+if [ -f "/scripts/setup_cloudwatch.sh" ]; then
+    bash /scripts/setup_cloudwatch.sh
+    echo "✅ CloudWatch logging configured - logs should be visible in AWS Console"
+else
+    echo "⚠️ CloudWatch setup script not found, will retry later..."
+fi
+
 # Update system packages
 echo "📦 Updating system packages..."
 apt-get update -y
@@ -30,10 +39,88 @@ if ! command -v docker &> /dev/null; then
     systemctl enable docker
     systemctl start docker
     
-    echo "✅ Docker installed and configured"
+    # Configure Docker logging to file for CloudWatch
+    echo "📝 Configuring Docker logging..."
+    mkdir -p /etc/docker
+    cat > /etc/docker/daemon.json << 'DOCKER_EOF'
+{
+    "log-driver": "json-file",
+    "log-opts": {
+        "max-size": "100m",
+        "max-file": "3"
+    }
+}
+DOCKER_EOF
+    
+    # Restart Docker to apply logging configuration
+    systemctl restart docker
+    
+    # Wait for Docker to be fully ready
+    echo "⏳ Waiting for Docker to be ready..."
+    for i in {1..30}; do
+        if systemctl is-active --quiet docker && docker version >/dev/null 2>&1; then
+            echo "✅ Docker is ready (attempt $i)"
+            break
+        fi
+        echo "⏳ Docker not ready yet, waiting... (attempt $i/30)"
+        sleep 2
+    done
+    
+    # Final verification
+    if ! systemctl is-active --quiet docker; then
+        echo "❌ Docker service failed to start properly"
+        systemctl status docker
+        exit 1
+    fi
+    
+    if ! docker version >/dev/null 2>&1; then
+        echo "❌ Docker daemon is not responding"
+        docker version
+        exit 1
+    fi
+    
+    echo "✅ Docker installed and configured successfully"
 else
     echo "✅ Docker already installed"
+    
+    # Ensure Docker is running even if already installed
+    if ! systemctl is-active --quiet docker; then
+        echo "🔄 Starting existing Docker service..."
+        systemctl start docker
+        
+        # Wait for Docker to be ready
+        for i in {1..15}; do
+            if systemctl is-active --quiet docker && docker version >/dev/null 2>&1; then
+                echo "✅ Docker service started (attempt $i)"
+                break
+            fi
+            echo "⏳ Waiting for Docker service... (attempt $i/15)"
+            sleep 2
+        done
+    fi
 fi
+
+# Final Docker verification before proceeding
+echo "🔍 Final Docker verification..."
+if ! systemctl is-active --quiet docker; then
+    echo "❌ CRITICAL: Docker service is not active"
+    systemctl status docker
+    exit 1
+fi
+
+if ! docker version >/dev/null 2>&1; then
+    echo "❌ CRITICAL: Docker daemon is not responding"
+    docker version
+    exit 1
+fi
+
+echo "✅ Docker verification passed - service is active and responding"
+
+# Set up Docker logging to file for CloudWatch monitoring
+echo "📝 Setting up Docker service logging..."
+journalctl -u docker -f > /var/log/docker.log &
+DOCKER_LOG_PID=$!
+echo "🔍 Docker logs being captured to /var/log/docker.log (PID: $DOCKER_LOG_PID)"
 
 # Install additional system dependencies
 echo "📦 Installing system dependencies..."
@@ -48,12 +135,14 @@ apt-get install -y \
     vim \
     git
 
-# Setup CloudWatch logging
-echo "🔧 Setting up CloudWatch logging..."
-if [ -f "/scripts/setup_cloudwatch.sh" ]; then
-    bash /scripts/setup_cloudwatch.sh
-else
-    echo "⚠️ CloudWatch setup script not found, skipping..."
+# Setup CloudWatch logging (if not already done)
+echo "🔧 Ensuring CloudWatch logging is configured..."
+if ! systemctl is-active --quiet amazon-cloudwatch-agent; then
+    if [ -f "/scripts/setup_cloudwatch.sh" ]; then
+        bash /scripts/setup_cloudwatch.sh
+    else
+        echo "⚠️ CloudWatch setup script not found, skipping..."
+    fi
 fi
 
 # Create directories for multi-tenant operation
@@ -84,6 +173,13 @@ fi
 
 echo "📝 Using Docker image: $DOCKER_IMAGE"
 
+# Verify Docker is still working before image operations
+if ! docker version >/dev/null 2>&1; then
+    echo "❌ CRITICAL: Docker stopped working before image pull"
+    systemctl status docker
+    exit 1
+fi
+
 # Login to ECR if needed (for private repositories)
 if [[ "$DOCKER_IMAGE" == *"ecr"* ]]; then
     echo "🔐 Logging into ECR..."
@@ -92,6 +188,7 @@ if [[ "$DOCKER_IMAGE" == *"ecr"* ]]; then
     }
 fi
 
+echo "⬇️ Pulling Docker image: $DOCKER_IMAGE"
 if docker pull "$DOCKER_IMAGE"; then
     echo "✅ Docker image pulled successfully"
     
@@ -102,10 +199,28 @@ if docker pull "$DOCKER_IMAGE"; then
     docker tag "$DOCKER_IMAGE" comfyui-multitenant:source
     
     echo "🏷️ Image tagged as: comfyui-multitenant:latest"
+    
+    # Verify the image was tagged correctly
+    echo "🔍 Verifying tagged images..."
+    docker images | grep comfyui-multitenant || {
+        echo "❌ Failed to verify tagged images"
+        exit 1
+    }
+    
 else
     echo "❌ Failed to pull Docker image: $DOCKER_IMAGE"
     echo "💡 Please ensure the image exists and you have proper permissions"
+    echo "🔍 Docker daemon status:"
+    systemctl status docker
+    echo "🔍 Available Docker images:"
+    docker images
     exit 1
+fi
+
+# Stop Docker logging background process before AMI creation
+if [ -n "$DOCKER_LOG_PID" ]; then
+    echo "🛑 Stopping Docker logging background process..."
+    kill $DOCKER_LOG_PID 2>/dev/null || true
 fi
 
 # Create startup script for EC2 instance
