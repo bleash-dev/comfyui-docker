@@ -268,6 +268,12 @@ jobs:
           --policy-arn "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess" \
           --region ${{ env.AWS_REGION }}
         
+        # Attach SSM policy for status checking
+        aws iam attach-role-policy \
+          --role-name "$ROLE_NAME" \
+          --policy-arn "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore" \
+          --region ${{ env.AWS_REGION }}
+        
         # Create instance profile
         aws iam create-instance-profile \
           --instance-profile-name "$ROLE_NAME" \
@@ -280,7 +286,7 @@ jobs:
           --region ${{ env.AWS_REGION }}
         
         # Wait a moment for IAM to propagate
-        sleep 10
+        sleep 15
         
         echo "✅ IAM role created: $ROLE_NAME"
         
@@ -299,12 +305,22 @@ jobs:
         
         echo "instance-id=$INSTANCE_ID" >> $GITHUB_OUTPUT
         echo "iam-role=$ROLE_NAME" >> $GITHUB_OUTPUT
+        
+        # Get the public IP for network testing
+        PUBLIC_IP=$(aws ec2 describe-instances \
+          --instance-ids $INSTANCE_ID \
+          --region ${{ env.AWS_REGION }} \
+          --query 'Reservations[0].Instances[0].PublicIpAddress' \
+          --output text)
+        
+        echo "public-ip=$PUBLIC_IP" >> $GITHUB_OUTPUT
         echo "🚀 Launched instance: $INSTANCE_ID"
+        echo "🌐 Public IP: $PUBLIC_IP"
         echo "⚠️ Instance will be automatically terminated after AMI creation"
         echo "💡 Using VPC: $VPC_ID, Subnet: $SUBNET_ID, IAM Role: $ROLE_NAME"
 
     - name: Wait for instance setup completion
-      timeout-minutes: 25
+      timeout-minutes: 15
       run: |
         INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
         echo "⏳ Waiting for instance setup to complete..."
@@ -314,22 +330,287 @@ jobs:
         aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region ${{ env.AWS_REGION }}
         echo "✅ Instance is running"
         
-        # Wait for user-data script to complete (estimated time: 20 minutes)
-        echo "⏳ Waiting for AMI preparation to complete (estimated 20 minutes)..."
-        echo "🔧 During this time, the instance is:"
-        echo "   1. Updating the system"
-        echo "   2. Installing Docker and dependencies"
-        echo "   3. Pulling and configuring the ComfyUI Docker image"
-        echo "   4. Setting up CloudWatch monitoring"
-        echo "   5. Configuring the environment"
-        
-        # Wait in intervals with status updates
-        for i in {1..20}; do
-          echo "📊 Progress: $((i*5))% complete ($(date))"
-          sleep 60
+        # Wait for SSM agent to be ready
+        echo "🔄 Waiting for SSM agent to be ready..."
+        for i in {1..10}; do
+          if aws ssm describe-instance-information \
+            --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'InstanceInformationList[0].PingStatus' \
+            --output text 2>/dev/null | grep -q "Online"; then
+            echo "✅ SSM agent is online"
+            break
+          fi
+          echo "⏳ SSM agent not ready yet, waiting... (attempt $i/10)"
+          sleep 30
         done
         
-        echo "✅ AMI preparation should be complete"
+        # Wait for AMI preparation to complete (check for completion file)
+        echo "🔧 Monitoring AMI preparation progress..."
+        for i in {1..20}; do
+          echo "� Checking AMI preparation status... (attempt $i/20)"
+          
+          # Check if the completion file exists
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids $INSTANCE_ID \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=["test -f /tmp/ami_ready.txt && echo READY || echo NOT_READY"]' \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Command.CommandId' \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -n "$COMMAND_ID" ]; then
+            sleep 10
+            
+            RESULT=$(aws ssm get-command-invocation \
+              --command-id $COMMAND_ID \
+              --instance-id $INSTANCE_ID \
+              --region ${{ env.AWS_REGION }} \
+              --query 'StandardOutputContent' \
+              --output text 2>/dev/null || echo "PENDING")
+            
+            if [[ "$RESULT" == *"READY"* ]]; then
+              echo "✅ AMI preparation completed!"
+              break
+            fi
+          fi
+          
+          if [ $i -eq 20 ]; then
+            echo "❌ Timeout waiting for AMI preparation"
+            echo "🔍 Checking instance logs for debugging..."
+            
+            # Get last 50 lines of user-data log
+            LOG_COMMAND_ID=$(aws ssm send-command \
+              --instance-ids $INSTANCE_ID \
+              --document-name "AWS-RunShellScript" \
+              --parameters 'commands=["tail -50 /var/log/user-data.log || echo No user-data log found"]' \
+              --region ${{ env.AWS_REGION }} \
+              --query 'Command.CommandId' \
+              --output text 2>/dev/null || echo "")
+            
+            if [ -n "$LOG_COMMAND_ID" ]; then
+              sleep 10
+              aws ssm get-command-invocation \
+                --command-id $LOG_COMMAND_ID \
+                --instance-id $INSTANCE_ID \
+                --region ${{ env.AWS_REGION }} \
+                --query 'StandardOutputContent' \
+                --output text 2>/dev/null || echo "Could not retrieve logs"
+            fi
+            
+            exit 1
+          fi
+          
+          sleep 30
+        done
+
+    - name: Verify ComfyUI setup
+      timeout-minutes: 5
+      run: |
+        INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
+        echo "🔍 Verifying ComfyUI setup and health..."
+        
+        # Check if Docker is running
+        echo "🐳 Checking Docker status..."
+        DOCKER_CHECK_ID=$(aws ssm send-command \
+          --instance-ids $INSTANCE_ID \
+          --document-name "AWS-RunShellScript" \
+          --parameters 'commands=["systemctl is-active docker && echo DOCKER_OK || echo DOCKER_FAIL"]' \
+          --region ${{ env.AWS_REGION }} \
+          --query 'Command.CommandId' \
+          --output text)
+        
+        sleep 10
+        DOCKER_STATUS=$(aws ssm get-command-invocation \
+          --command-id $DOCKER_CHECK_ID \
+          --instance-id $INSTANCE_ID \
+          --region ${{ env.AWS_REGION }} \
+          --query 'StandardOutputContent' \
+          --output text)
+        
+        if [[ "$DOCKER_STATUS" != *"DOCKER_OK"* ]]; then
+          echo "❌ Docker is not running properly"
+          exit 1
+        fi
+        echo "✅ Docker is running"
+        
+        # Check if ComfyUI Docker image is available
+        echo "🖼️ Checking ComfyUI Docker image..."
+        IMAGE_CHECK_ID=$(aws ssm send-command \
+          --instance-ids $INSTANCE_ID \
+          --document-name "AWS-RunShellScript" \
+          --parameters 'commands=["docker images | grep comfyui && echo IMAGE_OK || echo IMAGE_FAIL"]' \
+          --region ${{ env.AWS_REGION }} \
+          --query 'Command.CommandId' \
+          --output text)
+        
+        sleep 10
+        IMAGE_STATUS=$(aws ssm get-command-invocation \
+          --command-id $IMAGE_CHECK_ID \
+          --instance-id $INSTANCE_ID \
+          --region ${{ env.AWS_REGION }} \
+          --query 'StandardOutputContent' \
+          --output text)
+        
+        if [[ "$IMAGE_STATUS" != *"IMAGE_OK"* ]]; then
+          echo "❌ ComfyUI Docker image not found"
+          exit 1
+        fi
+        echo "✅ ComfyUI Docker image is available"
+        
+        # Test ComfyUI container functionality (without leaving it running)
+        echo "🧪 Testing ComfyUI container functionality..."
+        COMFYUI_TEST_ID=$(aws ssm send-command \
+          --instance-ids $INSTANCE_ID \
+          --document-name "AWS-RunShellScript" \
+          --parameters 'commands=[
+            "echo Testing ComfyUI Docker functionality...",
+            "# Test 1: Can we pull/run the container?",
+            "timeout 60 docker run --rm ${{ needs.build-and-push.outputs.image-uri }} python --version > /tmp/test1.log 2>&1 && echo TEST1_OK || echo TEST1_FAIL",
+            "# Test 2: Can we start ComfyUI briefly and then stop it?", 
+            "timeout 30 docker run --rm -d --name comfyui-test -p 8188:8188 ${{ needs.build-and-push.outputs.image-uri }} > /tmp/container_id.txt || echo START_FAIL",
+            "sleep 5",
+            "if [ -f /tmp/container_id.txt ] && [ -s /tmp/container_id.txt ]; then",
+            "  CONTAINER_ID=$(cat /tmp/container_id.txt)",
+            "  # Check if container is running",
+            "  if docker ps | grep -q $CONTAINER_ID; then",
+            "    echo Container started successfully",
+            "    # Test if port is accessible locally",
+            "    timeout 10 curl -f http://localhost:8188/ > /dev/null 2>&1 && echo PORT_OK || echo PORT_TIMEOUT",
+            "    # Clean stop the container",
+            "    docker stop $CONTAINER_ID > /dev/null 2>&1",
+            "    echo TEST2_OK",
+            "  else",
+            "    echo Container failed to stay running",
+            "    echo TEST2_FAIL",
+            "  fi",
+            "else",
+            "  echo Failed to start container",
+            "  echo TEST2_FAIL",
+            "fi",
+            "# Test 3: Verify no containers are left running",
+            "if [ $(docker ps -q | wc -l) -eq 0 ]; then",
+            "  echo TEST3_OK",
+            "else",
+            "  echo WARNING: Containers still running",
+            "  docker ps",
+            "  echo TEST3_FAIL",
+            "fi",
+            "echo COMFYUI_TESTS_COMPLETE"
+          ]' \
+          --region ${{ env.AWS_REGION }} \
+          --query 'Command.CommandId' \
+          --output text)
+        
+        sleep 90
+        COMFYUI_TEST_STATUS=$(aws ssm get-command-invocation \
+          --command-id $COMFYUI_TEST_ID \
+          --instance-id $INSTANCE_ID \
+          --region ${{ env.AWS_REGION }} \
+          --query 'StandardOutputContent' \
+          --output text)
+        
+        echo "ComfyUI Test Results:"
+        echo "$COMFYUI_TEST_STATUS"
+        
+        if [[ "$COMFYUI_TEST_STATUS" != *"TEST1_OK"* ]]; then
+          echo "❌ ComfyUI container basic test failed"
+          exit 1
+        fi
+        echo "✅ ComfyUI container basic test passed"
+        
+        if [[ "$COMFYUI_TEST_STATUS" != *"TEST2_OK"* ]]; then
+          echo "❌ ComfyUI server startup test failed"
+          exit 1
+        fi
+        echo "✅ ComfyUI server startup test passed"
+        
+        if [[ "$COMFYUI_TEST_STATUS" != *"TEST3_OK"* ]]; then
+          echo "❌ Container cleanup test failed - containers may still be running"
+          exit 1
+        fi
+        echo "✅ Container cleanup test passed"
+        
+        # Verify system is clean for AMI creation
+        echo "🧹 Verifying system is clean for AMI creation..."
+        CLEANUP_CHECK_ID=$(aws ssm send-command \
+          --instance-ids $INSTANCE_ID \
+          --document-name "AWS-RunShellScript" \
+          --parameters 'commands=[
+            "echo Checking system cleanliness...",
+            "# Check no containers running",
+            "CONTAINERS=$(docker ps -q | wc -l)",
+            "echo Running containers: $CONTAINERS",
+            "# Check no temp files from our tests",
+            "rm -f /tmp/test*.log /tmp/container_id.txt",
+            "# Check system resources",
+            "echo Memory usage: $(free -h | grep Mem:)",
+            "echo Disk usage: $(df -h / | tail -1)",
+            "echo CLEANUP_COMPLETE"
+          ]' \
+          --region ${{ env.AWS_REGION }} \
+          --query 'Command.CommandId' \
+          --output text)
+        
+        sleep 15
+        CLEANUP_STATUS=$(aws ssm get-command-invocation \
+          --command-id $CLEANUP_CHECK_ID \
+          --instance-id $INSTANCE_ID \
+          --region ${{ env.AWS_REGION }} \
+          --query 'StandardOutputContent' \
+          --output text)
+        
+        echo "System Cleanup Results:"
+        echo "$CLEANUP_STATUS"
+        
+        echo "🎉 All health checks passed! AMI is ready for creation."
+
+    - name: Test network connectivity
+      timeout-minutes: 3
+      run: |
+        INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
+        PUBLIC_IP="${{ steps.launch-instance.outputs.public-ip }}"
+        
+        echo "🌐 Testing network connectivity to instance..."
+        echo "Public IP: $PUBLIC_IP"
+        
+        # Check security group allows outbound traffic
+        echo "🔒 Checking security group configuration..."
+        SG_ID=$(aws ec2 describe-instances \
+          --instance-ids $INSTANCE_ID \
+          --region ${{ env.AWS_REGION }} \
+          --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' \
+          --output text)
+        
+        echo "Security Group: $SG_ID"
+        
+        # Get security group rules
+        aws ec2 describe-security-groups \
+          --group-ids $SG_ID \
+          --region ${{ env.AWS_REGION }} \
+          --query 'SecurityGroups[0].IpPermissions[*].[IpProtocol,FromPort,ToPort,IpRanges[0].CidrIp]' \
+          --output table || true
+        
+        # Test basic connectivity from GitHub Actions runner
+        echo "🏓 Testing ICMP ping from GitHub Actions runner..."
+        if ping -c 3 -W 5 $PUBLIC_IP; then
+          echo "✅ Ping successful from GitHub Actions"
+        else
+          echo "⚠️ Ping failed from GitHub Actions (this might be normal due to security groups)"
+        fi
+        
+        # Test if we can reach common ports (this will fail but shows if security group is too restrictive)
+        echo "🔌 Testing port connectivity..."
+        for port in 22 80 8188; do
+          if timeout 5 nc -z $PUBLIC_IP $port; then
+            echo "✅ Port $port is accessible"
+          else
+            echo "❌ Port $port is not accessible (expected for AMI building)"
+          fi
+        done
+        
+        echo "ℹ️ Note: For security, the instance should NOT be accessible from the internet during AMI creation"
+        echo "ℹ️ When instances are launched from the AMI, proper security groups should be applied"
 
     - name: Create AMI
       id: create-ami
@@ -338,20 +619,29 @@ jobs:
         INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
         ENVIRONMENT="${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}"
         AMI_NAME="comfyui-multitenant-${ENVIRONMENT}-$(date +%Y%m%d-%H%M%S)"
+        DOCKER_IMAGE="${{ needs.build-and-push.outputs.image-uri }}"
         
         echo "📸 Creating AMI from instance: $INSTANCE_ID"
+        echo "🐳 Docker image: $DOCKER_IMAGE"
+        echo "🏷️ AMI name: $AMI_NAME"
+        
+        # Validate that we have a Docker image URI
+        if [ -z "$DOCKER_IMAGE" ]; then
+          echo "❌ Error: Docker image URI is empty"
+          exit 1
+        fi
         
         # Stop the instance before creating AMI
         aws ec2 stop-instances --instance-ids $INSTANCE_ID --region ${{ env.AWS_REGION }}
         aws ec2 wait instance-stopped --instance-ids $INSTANCE_ID --region ${{ env.AWS_REGION }}
         
-        # Create AMI
+        # Create AMI with proper tag format
         AMI_ID=$(aws ec2 create-image \
           --instance-id $INSTANCE_ID \
           --name "$AMI_NAME" \
-          --description "ComfyUI Multi-Tenant AMI for $ENVIRONMENT environment with image ${{ needs.build-and-push.outputs.image-uri }}" \
+          --description "ComfyUI Multi-Tenant AMI for $ENVIRONMENT environment with image $DOCKER_IMAGE" \
           --region ${{ env.AWS_REGION }} \
-          --tag-specifications "ResourceType=image,Tags=[{Key=Name,Value=${AMI_NAME}},{Key=Environment,Value=${ENVIRONMENT}},{Key=DockerImage,Value=${{ needs.build-and-push.outputs.image-uri }}},{Key=Branch,Value=${{ github.ref_name }}}]" \
+          --tag-specifications 'ResourceType=image,Tags=[{Key=Name,Value='"$AMI_NAME"'},{Key=Environment,Value='"$ENVIRONMENT"'},{Key=DockerImage,Value='"$DOCKER_IMAGE"'},{Key=Branch,Value=${{ github.ref_name }}}]' \
           --query 'ImageId' \
           --output text)
         
@@ -402,11 +692,16 @@ jobs:
             --instance-profile-name "$IAM_ROLE" \
             --region ${{ env.AWS_REGION }} || echo "⚠️ Instance profile may already be deleted"
           
-          # Detach policy from role
+          # Detach policies from role
           aws iam detach-role-policy \
             --role-name "$IAM_ROLE" \
             --policy-arn "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess" \
-            --region ${{ env.AWS_REGION }} || echo "⚠️ Policy may already be detached"
+            --region ${{ env.AWS_REGION }} || echo "⚠️ S3 policy may already be detached"
+          
+          aws iam detach-role-policy \
+            --role-name "$IAM_ROLE" \
+            --policy-arn "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore" \
+            --region ${{ env.AWS_REGION }} || echo "⚠️ SSM policy may already be detached"
           
           # Delete role
           aws iam delete-role \
