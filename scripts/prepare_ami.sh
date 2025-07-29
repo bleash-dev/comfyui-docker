@@ -34,11 +34,42 @@ echo "📦 Updating system packages..."
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
+# Kill any existing apt processes that might be locking
+echo "🔧 Checking for existing apt processes..."
+pkill -f apt-get || true
+pkill -f dpkg || true
+pkill -f unattended-upgrade || true
+sleep 3
+
+# Wait for dpkg lock to be available with timeout
+echo "⏳ Waiting for dpkg lock..."
+LOCK_TIMEOUT=30
+for i in $(seq 1 $LOCK_TIMEOUT); do
+    if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && \
+       ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1 && \
+       ! fuser /var/cache/apt/archives/lock >/dev/null 2>&1; then
+        echo "✅ Package management locks are available"
+        break
+    fi
+    if [ $i -eq $LOCK_TIMEOUT ]; then
+        echo "❌ Timeout waiting for package management locks"
+        echo "🔍 Processes holding locks:"
+        fuser /var/lib/dpkg/lock-frontend 2>/dev/null || echo "No processes holding dpkg lock"
+        fuser /var/lib/apt/lists/lock 2>/dev/null || echo "No processes holding apt lists lock"
+        fuser /var/cache/apt/archives/lock 2>/dev/null || echo "No processes holding apt cache lock"
+        ps aux | grep -E "(apt|dpkg|unattended)" | grep -v grep || echo "No apt/dpkg processes running"
+        exit 1
+    fi
+    echo "⏳ Waiting for package management locks... (attempt $i/$LOCK_TIMEOUT)"
+    sleep 2
+done
+
 # Configure apt to be non-interactive
 echo 'APT::Get::Assume-Yes "true";' > /etc/apt/apt.conf.d/90-noninteractive
-echo 'APT::Get::force-yes "true";' >> /etc/apt/apt.conf.d/90-noninteractive
+echo 'APT::Get::AllowUnauthenticated "true";' >> /etc/apt/apt.conf.d/90-noninteractive
 echo 'DPkg::Options "--force-confdef";' >> /etc/apt/apt.conf.d/90-noninteractive
 echo 'DPkg::Options "--force-confold";' >> /etc/apt/apt.conf.d/90-noninteractive
+echo 'DPkg::Use-Pty "0";' >> /etc/apt/apt.conf.d/90-noninteractive
 
 # Update package lists
 echo "🔄 Updating package lists..."
@@ -78,39 +109,48 @@ checkpoint "ESSENTIAL_PACKAGES_INSTALLED"
 echo "🐳 Starting Docker installation process..."
 checkpoint "DOCKER_INSTALL_STARTED"
 
+# System diagnostics before Docker installation
+echo "🔍 System diagnostics before Docker installation:"
+echo "  - OS: $(lsb_release -d 2>/dev/null | cut -f2 || echo 'Unknown')"
+echo "  - Kernel: $(uname -r)"
+echo "  - Architecture: $(dpkg --print-architecture)"
+echo "  - Available space: $(df -h / | tail -1 | awk '{print $4}')"
+echo "  - Available memory: $(free -h | grep 'Mem:' | awk '{print $7}')"
+echo "  - Network connectivity: $(curl -s --max-time 5 http://google.com >/dev/null && echo 'OK' || echo 'FAILED')"
+
 if ! command -v docker &> /dev/null; then
-    echo "🐳 Docker not found, installing Docker..."
+    echo "🐳 Docker not found, installing Docker using APT..."
     
-    # Download Docker installation script
-    echo "⬇️ Downloading Docker installation script..."
-    curl -fsSL https://get.docker.com -o get-docker.sh || {
-        echo "❌ Failed to download Docker installation script"
-        echo "🔍 Network connectivity test:"
-        curl -I https://get.docker.com || echo "Cannot reach get.docker.com"
-        exit 1
+    # Install Docker from Ubuntu repository (more reliable than script)
+    echo "📦 Installing Docker from Ubuntu repository..."
+    
+    # Update package lists first
+    apt-get update -y
+    
+    # Install Docker.io from Ubuntu repository (simpler and more reliable)
+    echo "📦 Installing docker.io package..."
+    apt-get install -y --no-install-recommends docker.io docker-compose-plugin || {
+        echo "❌ Failed to install docker.io package"
+        echo "🔍 Trying alternative installation method..."
+        
+        # Fallback: Try installing docker-ce manually
+        echo "📦 Adding Docker GPG key..."
+        mkdir -p /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+        chmod a+r /etc/apt/keyrings/docker.asc
+        
+        echo "📦 Adding Docker repository..."
+        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
+        
+        echo "� Updating package lists..."
+        apt-get update -y
+        
+        echo "� Installing Docker CE..."
+        apt-get install -y docker-ce docker-ce-cli containerd.io || {
+            echo "❌ Failed to install Docker via both methods"
+            exit 1
+        }
     }
-    
-    # Verify script was downloaded
-    if [ ! -f "get-docker.sh" ]; then
-        echo "❌ Failed to download Docker installation script"
-        exit 1
-    fi
-    echo "✅ Docker installation script downloaded"
-    
-    echo "🔧 Running Docker installation script..."
-    timeout 600 sh get-docker.sh || {
-        echo "❌ Docker installation script timed out or failed"
-        echo "🔍 System status:"
-        df -h
-        free -m
-        ps aux | head -20
-        echo "🔍 Installation script output:"
-        tail -50 get-docker.sh 2>/dev/null || echo "Cannot read script"
-        exit 1
-    }
-    
-    echo "🧹 Cleaning up installation script..."
-    rm get-docker.sh
     
     echo "🔍 Verifying Docker was installed..."
     if ! command -v docker &> /dev/null; then
@@ -123,52 +163,62 @@ if ! command -v docker &> /dev/null; then
     echo "✅ Docker command found"
     checkpoint "DOCKER_COMMAND_INSTALLED"
     
+    echo "🔍 Checking Docker version..."
+    docker --version || {
+        echo "❌ Docker version check failed"
+        exit 1
+    }
+    echo "✅ Docker version check passed"
+    
     # Add ubuntu user to docker group if exists
     if id "ubuntu" &>/dev/null; then
         usermod -aG docker ubuntu
+        echo "✅ Added ubuntu user to docker group"
     fi
     
     # Enable Docker service
-    systemctl enable docker
-    systemctl start docker
-    
-    # Configure Docker logging to file for CloudWatch
-    echo "📝 Configuring Docker logging..."
-    mkdir -p /etc/docker
-    cat > /etc/docker/daemon.json << 'DOCKER_EOF'
-{
-    "log-driver": "json-file",
-    "log-opts": {
-        "max-size": "100m",
-        "max-file": "3"
+    echo "🔧 Enabling Docker service..."
+    systemctl enable docker || {
+        echo "❌ Failed to enable Docker service"
+        exit 1
     }
-}
-DOCKER_EOF
     
-    # Restart Docker to apply logging configuration
-    systemctl restart docker
+    # Start Docker service
+    echo "🚀 Starting Docker service..."
+    systemctl start docker || {
+        echo "❌ Failed to start Docker service"
+        systemctl status docker --no-pager -l
+        exit 1
+    }
     
-    # Wait for Docker to be fully ready
+    echo "🔍 Checking Docker service status..."
+    systemctl status docker --no-pager -l || echo "Docker service status check completed"
+    
+    # Wait for Docker to be fully ready with better error handling
     echo "⏳ Waiting for Docker to be ready..."
+    DOCKER_READY=false
     for i in {1..30}; do
-        if systemctl is-active --quiet docker && docker version >/dev/null 2>&1; then
-            echo "✅ Docker is ready (attempt $i)"
-            break
+        if systemctl is-active --quiet docker; then
+            echo "✅ Docker service is active"
+            if docker version >/dev/null 2>&1; then
+                echo "✅ Docker daemon is responding"
+                DOCKER_READY=true
+                break
+            else
+                echo "⏳ Docker service active but daemon not responding yet... (attempt $i/30)"
+            fi
+        else
+            echo "⏳ Docker service not active yet... (attempt $i/30)"
         fi
-        echo "⏳ Docker not ready yet, waiting... (attempt $i/30)"
-        sleep 2
+        sleep 3
     done
     
-    # Final verification
-    if ! systemctl is-active --quiet docker; then
-        echo "❌ Docker service failed to start properly"
-        systemctl status docker
-        exit 1
-    fi
-    
-    if ! docker version >/dev/null 2>&1; then
-        echo "❌ Docker daemon is not responding"
-        docker version
+    if [ "$DOCKER_READY" != "true" ]; then
+        echo "❌ Docker failed to become ready within timeout"
+        echo "🔍 Docker service status:"
+        systemctl status docker --no-pager -l
+        echo "🔍 Docker daemon logs:"
+        journalctl -u docker.service --no-pager -l --since "5 minutes ago" || echo "No recent Docker logs"
         exit 1
     fi
     

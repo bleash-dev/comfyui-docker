@@ -334,7 +334,7 @@ jobs:
         echo "💡 Using VPC: $VPC_ID, Subnet: $SUBNET_ID, IAM Role: $ROLE_NAME"
 
     - name: Wait for instance setup completion
-      timeout-minutes: 15
+      timeout-minutes: 10
       run: |
         INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
         echo "⏳ Waiting for instance setup to complete..."
@@ -358,6 +358,11 @@ jobs:
           echo "⏳ SSM agent not ready yet, waiting... (attempt $i/10)"
           sleep 30
         done
+
+    - name: Wait for AMI preparation completion
+      timeout-minutes: 25
+      run: |
+        INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
         
         # Wait for AMI preparation to complete (check for completion file)
         echo "🔧 Monitoring AMI preparation progress..."
