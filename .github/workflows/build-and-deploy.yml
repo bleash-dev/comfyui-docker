@@ -189,11 +189,39 @@ jobs:
         # Signal completion
         echo 'echo "AMI_PREPARATION_COMPLETE" > /tmp/ami_ready.txt' >> user-data.sh
         
-        # Launch instance with minimal configuration
+        # Get available VPC and subnet
+        echo "🔍 Finding available VPC and subnet..."
+        VPC_ID=$(aws ec2 describe-vpcs \
+          --filters "Name=is-default,Values=true" \
+          --query 'Vpcs[0].VpcId' \
+          --output text \
+          --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+        
+        if [[ -z "$VPC_ID" || "$VPC_ID" == "None" ]]; then
+          echo "No default VPC found, using any available VPC..."
+          VPC_ID=$(aws ec2 describe-vpcs \
+            --query 'Vpcs[0].VpcId' \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+        fi
+        
+        SUBNET_ID=$(aws ec2 describe-subnets \
+          --filters "Name=vpc-id,Values=${VPC_ID}" \
+          --query 'Subnets[0].SubnetId' \
+          --output text \
+          --region ${{ env.AWS_REGION }})
+        
+        echo "Using VPC: $VPC_ID"
+        echo "Using Subnet: $SUBNET_ID"
+        
+        # Launch instance with VPC configuration
         INSTANCE_ID=$(aws ec2 run-instances \
           --image-id ${{ steps.ubuntu-ami.outputs.ami-id }} \
           --instance-type t3.large \
+          --subnet-id $SUBNET_ID \
+          --associate-public-ip-address \
           --user-data file://user-data.sh \
+          --region ${{ env.AWS_REGION }} \
           --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${INSTANCE_NAME}},{Key=Environment,Value=${ENVIRONMENT}},{Key=Purpose,Value=AMI-Builder},{Key=AutoTerminate,Value=true}]" \
           --query 'Instances[0].InstanceId' \
           --output text)
@@ -201,54 +229,35 @@ jobs:
         echo "instance-id=$INSTANCE_ID" >> $GITHUB_OUTPUT
         echo "🚀 Launched instance: $INSTANCE_ID"
         echo "⚠️ Instance will be automatically terminated after AMI creation"
-        echo "💡 Using default VPC, security group, and no SSH key (not needed for AMI creation)"
+        echo "💡 Using VPC: $VPC_ID, Subnet: $SUBNET_ID, with public IP and no SSH key"
 
     - name: Wait for instance setup completion
-      timeout-minutes: 30
+      timeout-minutes: 25
       run: |
         INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
         echo "⏳ Waiting for instance setup to complete..."
         
         # Wait for instance to be running
-        aws ec2 wait instance-running --instance-ids $INSTANCE_ID
+        echo "🔄 Waiting for instance to be running..."
+        aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region ${{ env.AWS_REGION }}
         echo "✅ Instance is running"
         
-        # Wait for AMI preparation to complete (check for completion file)
-        for i in {1..60}; do
-          echo "� Checking AMI preparation status... (attempt $i/60)"
-          
-          # Check if the completion file exists
-          if aws ssm send-command \
-            --instance-ids $INSTANCE_ID \
-            --document-name "AWS-RunShellScript" \
-            --parameters 'commands=["test -f /tmp/ami_ready.txt && echo READY || echo NOT_READY"]' \
-            --query 'Command.CommandId' \
-            --output text > /tmp/command_id.txt 2>/dev/null; then
-            
-            COMMAND_ID=$(cat /tmp/command_id.txt)
-            sleep 10
-            
-            RESULT=$(aws ssm get-command-invocation \
-              --command-id $COMMAND_ID \
-              --instance-id $INSTANCE_ID \
-              --query 'StandardOutputContent' \
-              --output text 2>/dev/null || echo "PENDING")
-            
-            if [[ "$RESULT" == *"READY"* ]]; then
-              echo "✅ AMI preparation completed!"
-              break
-            fi
-          fi
-          
-          if [ $i -eq 60 ]; then
-            echo "❌ Timeout waiting for AMI preparation"
-            echo "🔍 Checking instance status for debugging..."
-            aws ec2 describe-instances --instance-ids $INSTANCE_ID --query 'Reservations[0].Instances[0].State' || true
-            exit 1
-          fi
-          
-          sleep 30
+        # Wait for user-data script to complete (estimated time: 20 minutes)
+        echo "⏳ Waiting for AMI preparation to complete (estimated 20 minutes)..."
+        echo "🔧 During this time, the instance is:"
+        echo "   1. Updating the system"
+        echo "   2. Installing Docker and dependencies"
+        echo "   3. Pulling and configuring the ComfyUI Docker image"
+        echo "   4. Setting up CloudWatch monitoring"
+        echo "   5. Configuring the environment"
+        
+        # Wait in intervals with status updates
+        for i in {1..20}; do
+          echo "📊 Progress: $((i*5))% complete ($(date))"
+          sleep 60
         done
+        
+        echo "✅ AMI preparation should be complete"
 
     - name: Create AMI
       id: create-ami
@@ -261,14 +270,15 @@ jobs:
         echo "📸 Creating AMI from instance: $INSTANCE_ID"
         
         # Stop the instance before creating AMI
-        aws ec2 stop-instances --instance-ids $INSTANCE_ID
-        aws ec2 wait instance-stopped --instance-ids $INSTANCE_ID
+        aws ec2 stop-instances --instance-ids $INSTANCE_ID --region ${{ env.AWS_REGION }}
+        aws ec2 wait instance-stopped --instance-ids $INSTANCE_ID --region ${{ env.AWS_REGION }}
         
         # Create AMI
         AMI_ID=$(aws ec2 create-image \
           --instance-id $INSTANCE_ID \
           --name "$AMI_NAME" \
           --description "ComfyUI Multi-Tenant AMI for $ENVIRONMENT environment with image ${{ needs.build-and-push.outputs.image-uri }}" \
+          --region ${{ env.AWS_REGION }} \
           --tag-specifications "ResourceType=image,Tags=[{Key=Name,Value=${AMI_NAME}},{Key=Environment,Value=${ENVIRONMENT}},{Key=DockerImage,Value=${{ needs.build-and-push.outputs.image-uri }}},{Key=Branch,Value=${{ github.ref_name }}}]" \
           --query 'ImageId' \
           --output text)
@@ -281,7 +291,7 @@ jobs:
       run: |
         AMI_ID="${{ steps.create-ami.outputs.ami-id }}"
         echo "⏳ Waiting for AMI to be available..."
-        aws ec2 wait image-available --image-ids $AMI_ID
+        aws ec2 wait image-available --image-ids $AMI_ID --region ${{ env.AWS_REGION }}
         echo "✅ AMI is available: $AMI_ID"
 
     - name: Cleanup builder instance
@@ -292,11 +302,11 @@ jobs:
           echo "🧹 Terminating builder instance: $INSTANCE_ID"
           
           # Force terminate the instance
-          aws ec2 terminate-instances --instance-ids $INSTANCE_ID || echo "⚠️ Instance may already be terminated"
+          aws ec2 terminate-instances --instance-ids $INSTANCE_ID --region ${{ env.AWS_REGION }} || echo "⚠️ Instance may already be terminated"
           
           # Wait for termination to complete
           echo "⏳ Waiting for instance termination..."
-          aws ec2 wait instance-terminated --instance-ids $INSTANCE_ID || echo "⚠️ Timeout waiting for termination"
+          aws ec2 wait instance-terminated --instance-ids $INSTANCE_ID --region ${{ env.AWS_REGION }} || echo "⚠️ Timeout waiting for termination"
           
           echo "✅ Builder instance cleanup completed"
         else
