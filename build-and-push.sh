@@ -73,7 +73,7 @@ if [ $? -eq 0 ]; then
         echo ""
         echo "3️⃣ When deploying a pod:"
         echo "   - ✅ Enable 'Network Volume'"
-        echo "   - Set Volume Mount Path: /workspace"
+        echo "   - Set Volume Mount Path: $WORKSPACE"
         echo "   - This enables full persistence!"
         echo ""
         echo "🧪 Test the image locally (requires auth):"

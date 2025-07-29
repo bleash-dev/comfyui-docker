@@ -60,6 +60,12 @@ RUN apt-get update && apt-get install -y \
     bc \
     && rm -rf /var/lib/apt/lists/*
 
+# Install Python packages for multi-tenant management
+RUN python3 -m pip install --no-cache-dir \
+    psutil \
+    boto3 \
+    requests
+
 # Create symbolic links for python commands
 RUN ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python3 && \
     ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python
@@ -70,23 +76,34 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2
     ./aws/install && \
     rm -rf awscliv2.zip aws/
 
+# Setup CloudWatch logging (will be configured at runtime)
+RUN mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+
 # Set up workspace
 WORKDIR /workspace
 
 # Copy scripts directory
 COPY scripts/ /scripts/
 RUN chmod +x /scripts/*.sh
+RUN chmod +x /scripts/*.py
+
+# Create multi-tenant management directories
+RUN mkdir -p /var/log /tmp/tenants
 
 # Copy the main start script
 COPY scripts/start.sh /start.sh
 RUN chmod +x /start.sh
 
-# Expose ports
-EXPOSE 8080
+# Copy the tenant manager
+COPY scripts/tenant_manager.py /tenant_manager.py
+RUN chmod +x /tenant_manager.py
+
+# Expose ports (80 for management, 8000+ for tenants)
+EXPOSE 80 8000-9000
 
 # Add healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080 || exit 1
+    CMD curl -f http://localhost:80/health || exit 1
 
 # Set default command
-CMD ["/bin/bash", "/start.sh"]
+CMD ["/usr/bin/python3", "/tenant_manager.py"]
