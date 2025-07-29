@@ -9,26 +9,90 @@ exec 2> >(tee -a /var/log/ami-preparation.log >&2)
 
 echo "=== AMI Preparation Started - $(date) ==="
 
+# Create checkpoint function for progress tracking
+checkpoint() {
+    local step="$1"
+    echo "✅ CHECKPOINT: $step completed at $(date)"
+    echo "$step" > /tmp/ami_progress.txt
+}
+
+checkpoint "AMI_PREP_STARTED"
+
 # Setup CloudWatch logging early for real-time monitoring
 echo "🔧 Setting up CloudWatch logging early for debugging..."
 if [ -f "/scripts/setup_cloudwatch.sh" ]; then
     bash /scripts/setup_cloudwatch.sh
     echo "✅ CloudWatch logging configured - logs should be visible in AWS Console"
+    checkpoint "CLOUDWATCH_CONFIGURED"
 else
     echo "⚠️ CloudWatch setup script not found, will retry later..."
+    checkpoint "CLOUDWATCH_SKIPPED"
 fi
 
 # Update system packages
 echo "📦 Updating system packages..."
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+
+# Configure apt to be non-interactive
+echo 'APT::Get::Assume-Yes "true";' > /etc/apt/apt.conf.d/90-noninteractive
+echo 'APT::Get::force-yes "true";' >> /etc/apt/apt.conf.d/90-noninteractive
+echo 'DPkg::Options "--force-confdef";' >> /etc/apt/apt.conf.d/90-noninteractive
+echo 'DPkg::Options "--force-confold";' >> /etc/apt/apt.conf.d/90-noninteractive
+
+# Update package lists
+echo "🔄 Updating package lists..."
 apt-get update -y
-apt-get upgrade -y
+
+# Skip upgrade for faster AMI preparation (we'll do essential packages only)
+echo "⚡ Skipping full system upgrade for faster AMI preparation..."
+echo "💡 Installing only essential packages..."
+
+# Install essential packages first
+apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    wget \
+    gnupg \
+    lsb-release
+
+echo "✅ Essential packages installed"
+checkpoint "ESSENTIAL_PACKAGES_INSTALLED"
 
 # Install Docker if not already installed
+echo "🐳 Starting Docker installation process..."
 if ! command -v docker &> /dev/null; then
-    echo "🐳 Installing Docker..."
+    echo "🐳 Docker not found, installing Docker..."
+    
+    # Download Docker installation script
+    echo "⬇️ Downloading Docker installation script..."
     curl -fsSL https://get.docker.com -o get-docker.sh
-    sh get-docker.sh
+    
+    # Verify script was downloaded
+    if [ ! -f "get-docker.sh" ]; then
+        echo "❌ Failed to download Docker installation script"
+        exit 1
+    fi
+    
+    echo "🔧 Running Docker installation script..."
+    timeout 300 sh get-docker.sh || {
+        echo "❌ Docker installation script timed out or failed"
+        echo "🔍 System status:"
+        df -h
+        free -m
+        ps aux | head -20
+        exit 1
+    }
+    
+    echo "🧹 Cleaning up installation script..."
     rm get-docker.sh
+    
+    echo "🔍 Verifying Docker was installed..."
+    if ! command -v docker &> /dev/null; then
+        echo "❌ Docker command not found after installation"
+        exit 1
+    fi
+    echo "✅ Docker command found"
     
     # Add ubuntu user to docker group if exists
     if id "ubuntu" &>/dev/null; then
@@ -80,8 +144,10 @@ DOCKER_EOF
     fi
     
     echo "✅ Docker installed and configured successfully"
+    checkpoint "DOCKER_INSTALLED"
 else
     echo "✅ Docker already installed"
+    checkpoint "DOCKER_ALREADY_PRESENT"
     
     # Ensure Docker is running even if already installed
     if ! systemctl is-active --quiet docker; then
@@ -115,6 +181,7 @@ if ! docker version >/dev/null 2>&1; then
 fi
 
 echo "✅ Docker verification passed - service is active and responding"
+checkpoint "DOCKER_VERIFIED"
 
 # Set up Docker logging to file for CloudWatch monitoring
 echo "📝 Setting up Docker service logging..."
@@ -123,17 +190,19 @@ DOCKER_LOG_PID=$!
 echo "🔍 Docker logs being captured to /var/log/docker.log (PID: $DOCKER_LOG_PID)"
 
 # Install additional system dependencies
-echo "📦 Installing system dependencies..."
-apt-get install -y \
-    curl \
-    wget \
+echo "📦 Installing additional system dependencies..."
+apt-get install -y --no-install-recommends \
     jq \
     unzip \
     awscli \
     htop \
     tree \
     vim \
-    git
+    git \
+    systemd \
+    systemctl
+
+echo "✅ Additional system dependencies installed"
 
 # Setup CloudWatch logging (if not already done)
 echo "🔧 Ensuring CloudWatch logging is configured..."
