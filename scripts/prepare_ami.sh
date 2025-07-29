@@ -42,45 +42,70 @@ echo 'DPkg::Options "--force-confold";' >> /etc/apt/apt.conf.d/90-noninteractive
 
 # Update package lists
 echo "🔄 Updating package lists..."
-apt-get update -y
+apt-get update -y || {
+    echo "❌ Failed to update package lists"
+    exit 1
+}
+echo "✅ Package lists updated successfully"
 
 # Skip upgrade for faster AMI preparation (we'll do essential packages only)
 echo "⚡ Skipping full system upgrade for faster AMI preparation..."
 echo "💡 Installing only essential packages..."
 
-# Install essential packages first
-apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    wget \
-    gnupg \
-    lsb-release
+# Install essential packages first (one by one for better error tracking)
+echo "📦 Installing essential packages individually..."
 
-echo "✅ Essential packages installed"
+ESSENTIAL_PACKAGES=("ca-certificates" "curl" "wget" "gnupg" "lsb-release")
+
+for package in "${ESSENTIAL_PACKAGES[@]}"; do
+    echo "📦 Installing $package..."
+    apt-get install -y --no-install-recommends "$package" || {
+        echo "❌ Failed to install $package"
+        echo "🔍 Package info:"
+        apt-cache show "$package" 2>/dev/null || echo "Package not found in cache"
+        echo "🔍 System status:"
+        df -h
+        free -m
+        exit 1
+    }
+    echo "✅ $package installed successfully"
+done
+
+echo "✅ All essential packages installed"
 checkpoint "ESSENTIAL_PACKAGES_INSTALLED"
 
 # Install Docker if not already installed
 echo "🐳 Starting Docker installation process..."
+checkpoint "DOCKER_INSTALL_STARTED"
+
 if ! command -v docker &> /dev/null; then
     echo "🐳 Docker not found, installing Docker..."
     
     # Download Docker installation script
     echo "⬇️ Downloading Docker installation script..."
-    curl -fsSL https://get.docker.com -o get-docker.sh
+    curl -fsSL https://get.docker.com -o get-docker.sh || {
+        echo "❌ Failed to download Docker installation script"
+        echo "🔍 Network connectivity test:"
+        curl -I https://get.docker.com || echo "Cannot reach get.docker.com"
+        exit 1
+    }
     
     # Verify script was downloaded
     if [ ! -f "get-docker.sh" ]; then
         echo "❌ Failed to download Docker installation script"
         exit 1
     fi
+    echo "✅ Docker installation script downloaded"
     
     echo "🔧 Running Docker installation script..."
-    timeout 300 sh get-docker.sh || {
+    timeout 600 sh get-docker.sh || {
         echo "❌ Docker installation script timed out or failed"
         echo "🔍 System status:"
         df -h
         free -m
         ps aux | head -20
+        echo "🔍 Installation script output:"
+        tail -50 get-docker.sh 2>/dev/null || echo "Cannot read script"
         exit 1
     }
     
@@ -90,9 +115,13 @@ if ! command -v docker &> /dev/null; then
     echo "🔍 Verifying Docker was installed..."
     if ! command -v docker &> /dev/null; then
         echo "❌ Docker command not found after installation"
+        echo "🔍 Checking /usr/bin and /usr/local/bin:"
+        ls -la /usr/bin/docker* 2>/dev/null || echo "No docker in /usr/bin"
+        ls -la /usr/local/bin/docker* 2>/dev/null || echo "No docker in /usr/local/bin"
         exit 1
     fi
     echo "✅ Docker command found"
+    checkpoint "DOCKER_COMMAND_INSTALLED"
     
     # Add ubuntu user to docker group if exists
     if id "ubuntu" &>/dev/null; then
@@ -189,20 +218,29 @@ journalctl -u docker -f > /var/log/docker.log &
 DOCKER_LOG_PID=$!
 echo "🔍 Docker logs being captured to /var/log/docker.log (PID: $DOCKER_LOG_PID)"
 
-# Install additional system dependencies
+# Install additional system dependencies (one by one for better tracking)
 echo "📦 Installing additional system dependencies..."
-apt-get install -y --no-install-recommends \
-    jq \
-    unzip \
-    awscli \
-    htop \
-    tree \
-    vim \
-    git \
-    systemd \
-    systemctl
+checkpoint "ADDITIONAL_PACKAGES_STARTED"
+
+ADDITIONAL_PACKAGES=("jq" "unzip" "htop" "tree" "vim" "git")
+
+for package in "${ADDITIONAL_PACKAGES[@]}"; do
+    echo "📦 Installing $package..."
+    apt-get install -y --no-install-recommends "$package" || {
+        echo "❌ Failed to install $package"
+        echo "🔍 Available alternatives:"
+        apt-cache search "^$package" 2>/dev/null || echo "No alternatives found"
+        echo "⚠️ Continuing without $package..."
+        continue
+    }
+    echo "✅ $package installed successfully"
+done
+
+# Note: awscli should already be available on Ubuntu AMI
+# Note: systemd and systemctl are core packages and should already be present
 
 echo "✅ Additional system dependencies installed"
+checkpoint "ADDITIONAL_PACKAGES_INSTALLED"
 
 # Setup CloudWatch logging (if not already done)
 echo "🔧 Ensuring CloudWatch logging is configured..."
@@ -230,6 +268,7 @@ echo "  - /tmp/tenants (temporary tenant data)"
 
 # Pull the ComfyUI Docker image
 echo "🐳 Pulling ComfyUI Docker image..."
+checkpoint "DOCKER_IMAGE_PULL_STARTED"
 
 # Get Docker image from environment variables
 DOCKER_IMAGE="${COMFYUI_DOCKER_IMAGE:-}"
@@ -494,6 +533,11 @@ history -c
 > ~/.bash_history
 
 echo "✅ AMI preparation completed successfully!"
+checkpoint "AMI_PREPARATION_COMPLETE"
+
+# Signal completion for the workflow
+echo "AMI_PREPARATION_COMPLETE" > /tmp/ami_ready.txt
+
 echo ""
 echo "📋 Summary:"
 echo "  - Docker installed and configured"

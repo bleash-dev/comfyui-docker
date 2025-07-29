@@ -204,7 +204,15 @@ jobs:
         # Run the AMI preparation
         echo "Starting AMI preparation script..."
         export COMFYUI_DOCKER_IMAGE="${{ needs.build-and-push.outputs.image-uri }}"
-        /scripts/prepare_ami.sh
+        
+        # Run with timeout to prevent infinite hangs
+        timeout 1800 /scripts/prepare_ami.sh || {
+            echo "❌ AMI preparation script timed out or failed"
+            echo "Exit code: $?"
+            echo "Last checkpoint:"
+            cat /tmp/ami_progress.txt 2>/dev/null || echo "No progress file found"
+            exit 1
+        }
         
         # Signal completion
         echo "AMI_PREPARATION_COMPLETE" > /tmp/ami_ready.txt
@@ -353,8 +361,8 @@ jobs:
         
         # Wait for AMI preparation to complete (check for completion file)
         echo "🔧 Monitoring AMI preparation progress..."
-        for i in {1..20}; do
-          echo "🔍 Checking AMI preparation status... (attempt $i/20)"
+        for i in {1..30}; do
+          echo "🔍 Checking AMI preparation status... (attempt $i/30)"
           
           # Check current progress
           PROGRESS_CHECK_ID=$(aws ssm send-command \
@@ -368,14 +376,16 @@ jobs:
               "  echo CURRENT_PROGRESS: UNKNOWN",
               "fi",
               "echo === Completion Check ===",
-              "test -f /tmp/ami_ready.txt && echo READY || echo NOT_READY"
+              "test -f /tmp/ami_ready.txt && echo READY || echo NOT_READY",
+              "echo === Process Check ===",
+              "ps aux | grep prepare_ami.sh | grep -v grep || echo NO_PROCESS_RUNNING"
             ]' \
             --region ${{ env.AWS_REGION }} \
             --query 'Command.CommandId' \
             --output text 2>/dev/null || echo "")
           
           if [ -n "$PROGRESS_CHECK_ID" ]; then
-            sleep 10
+            sleep 5
             
             RESULT=$(aws ssm get-command-invocation \
               --command-id $PROGRESS_CHECK_ID \
@@ -397,9 +407,14 @@ jobs:
               CURRENT_STEP=$(echo "$RESULT" | grep "CURRENT_PROGRESS:" | cut -d: -f2 | xargs)
               echo "📍 Current step: $CURRENT_STEP"
             fi
+            
+            # Check if process is still running
+            if [[ "$RESULT" == *"NO_PROCESS_RUNNING"* ]]; then
+              echo "⚠️ AMI preparation process is not running - may have failed"
+            fi
           fi
           
-          if [ $i -eq 20 ]; then
+          if [ $i -eq 30 ]; then
             echo "❌ Timeout waiting for AMI preparation"
             echo "🔍 Checking instance logs for debugging..."
             
@@ -425,7 +440,7 @@ jobs:
             exit 1
           fi
           
-          sleep 30
+          sleep 15
         done
 
     - name: Verify ComfyUI setup
