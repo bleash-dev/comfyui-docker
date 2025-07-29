@@ -132,11 +132,12 @@ jobs:
       id: ubuntu-ami
       run: |
         AMI_ID=$(aws ec2 describe-images \
-          --owners 099720109477 \
-          --filters "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-22.04-amd64-server-*" \
-                    "Name=state,Values=available" \
-          --query 'Images|sort_by(@, &CreationDate)[-1].ImageId' \
-          --output text)
+        --owners 099720109477 \
+        --filters "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*" \
+            "Name=state,Values=available" \
+        --query "Images | sort_by(@, &CreationDate) | [-1].ImageId" \
+        --output text \
+        --region us-east-1)
         echo "ami-id=$AMI_ID" >> $GITHUB_OUTPUT
         echo "🖥️ Base Ubuntu AMI: $AMI_ID"
 
