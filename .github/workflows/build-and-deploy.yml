@@ -141,6 +141,20 @@ jobs:
         echo "ami-id=$AMI_ID" >> $GITHUB_OUTPUT
         echo "🖥️ Base Ubuntu AMI: $AMI_ID"
 
+    - name: Upload scripts to S3
+      run: |
+        ENVIRONMENT="${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}"
+        S3_PREFIX="s3://viral-comm-api-ec2-deployments-dev/comfy-docker/${ENVIRONMENT}"
+        
+        echo "📤 Uploading scripts to S3..."
+        echo "S3 path: ${S3_PREFIX}"
+        
+        # Upload preparation scripts
+        aws s3 cp scripts/prepare_ami.sh "${S3_PREFIX}/prepare_ami.sh" --region ${{ env.AWS_REGION }}
+        aws s3 cp scripts/setup_cloudwatch.sh "${S3_PREFIX}/setup_cloudwatch.sh" --region ${{ env.AWS_REGION }}
+        
+        echo "✅ Scripts uploaded to S3"
+
     - name: Launch EC2 instance for AMI creation
       id: launch-instance
       timeout-minutes: 5
@@ -153,12 +167,20 @@ jobs:
         echo "Instance name: $INSTANCE_NAME"
         
         # Create user data script
-        cat > user-data.sh << 'EOF'
+        ENVIRONMENT="${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}"
+        S3_PREFIX="s3://viral-comm-api-ec2-deployments-dev/comfy-docker/${ENVIRONMENT}"
+        
+        cat > user-data.sh << EOF
         #!/bin/bash
+        set -e
         
         # Set environment variables
         export COMFYUI_DOCKER_IMAGE="${{ needs.build-and-push.outputs.image-uri }}"
         export DEBIAN_FRONTEND=noninteractive
+        
+        # Log everything
+        exec > >(tee /var/log/user-data.log) 2>&1
+        echo "Starting AMI preparation at \$(date)"
         
         # Update system
         apt-get update -y
@@ -166,28 +188,28 @@ jobs:
         # Install required packages
         apt-get install -y awscli curl wget jq
         
-        # Copy scripts to the instance
+        # Download scripts from S3
+        echo "Downloading scripts from S3..."
         mkdir -p /scripts
-        EOF
+        cd /scripts
         
-        # Add the prepare_ami.sh script content to user data
-        echo 'cat > /scripts/prepare_ami.sh << '\''SCRIPT_EOF'\''' >> user-data.sh
-        cat scripts/prepare_ami.sh >> user-data.sh
-        echo 'SCRIPT_EOF' >> user-data.sh
-        echo 'chmod +x /scripts/prepare_ami.sh' >> user-data.sh
+        # Download prepare_ami.sh
+        aws s3 cp "${S3_PREFIX}/prepare_ami.sh" prepare_ami.sh --region ${{ env.AWS_REGION }}
+        chmod +x prepare_ami.sh
         
-        # Add the setup_cloudwatch.sh script
-        echo 'cat > /scripts/setup_cloudwatch.sh << '\''SCRIPT_EOF'\''' >> user-data.sh
-        cat scripts/setup_cloudwatch.sh >> user-data.sh
-        echo 'SCRIPT_EOF' >> user-data.sh
-        echo 'chmod +x /scripts/setup_cloudwatch.sh' >> user-data.sh
+        # Download setup_cloudwatch.sh  
+        aws s3 cp "${S3_PREFIX}/setup_cloudwatch.sh" setup_cloudwatch.sh --region ${{ env.AWS_REGION }}
+        chmod +x setup_cloudwatch.sh
         
         # Run the AMI preparation
-        echo 'export COMFYUI_DOCKER_IMAGE="${{ needs.build-and-push.outputs.image-uri }}"' >> user-data.sh
-        echo '/scripts/prepare_ami.sh' >> user-data.sh
+        echo "Starting AMI preparation script..."
+        export COMFYUI_DOCKER_IMAGE="${{ needs.build-and-push.outputs.image-uri }}"
+        /scripts/prepare_ami.sh
         
         # Signal completion
-        echo 'echo "AMI_PREPARATION_COMPLETE" > /tmp/ami_ready.txt' >> user-data.sh
+        echo "AMI_PREPARATION_COMPLETE" > /tmp/ami_ready.txt
+        echo "AMI preparation completed at \$(date)"
+        EOF
         
         # Get available VPC and subnet
         echo "🔍 Finding available VPC and subnet..."
@@ -214,22 +236,72 @@ jobs:
         echo "Using VPC: $VPC_ID"
         echo "Using Subnet: $SUBNET_ID"
         
-        # Launch instance with VPC configuration
+        # Create IAM role for EC2 instance to access S3
+        echo "🔐 Creating IAM role for EC2 instance..."
+        ROLE_NAME="comfyui-ami-builder-role-$(date +%s)"
+        
+        # Create trust policy
+        cat > trust-policy.json << 'TRUST_EOF'
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ec2.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        }
+        TRUST_EOF
+        
+        # Create IAM role
+        aws iam create-role \
+          --role-name "$ROLE_NAME" \
+          --assume-role-policy-document file://trust-policy.json \
+          --region ${{ env.AWS_REGION }}
+        
+        # Attach S3 read-only policy
+        aws iam attach-role-policy \
+          --role-name "$ROLE_NAME" \
+          --policy-arn "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess" \
+          --region ${{ env.AWS_REGION }}
+        
+        # Create instance profile
+        aws iam create-instance-profile \
+          --instance-profile-name "$ROLE_NAME" \
+          --region ${{ env.AWS_REGION }}
+        
+        # Add role to instance profile
+        aws iam add-role-to-instance-profile \
+          --instance-profile-name "$ROLE_NAME" \
+          --role-name "$ROLE_NAME" \
+          --region ${{ env.AWS_REGION }}
+        
+        # Wait a moment for IAM to propagate
+        sleep 10
+        
+        echo "✅ IAM role created: $ROLE_NAME"
+        
+        # Launch instance with VPC configuration and IAM role
         INSTANCE_ID=$(aws ec2 run-instances \
           --image-id ${{ steps.ubuntu-ami.outputs.ami-id }} \
           --instance-type t3.large \
           --subnet-id $SUBNET_ID \
           --associate-public-ip-address \
+          --iam-instance-profile Name="$ROLE_NAME" \
           --user-data file://user-data.sh \
           --region ${{ env.AWS_REGION }} \
-          --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${INSTANCE_NAME}},{Key=Environment,Value=${ENVIRONMENT}},{Key=Purpose,Value=AMI-Builder},{Key=AutoTerminate,Value=true}]" \
+          --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${INSTANCE_NAME}},{Key=Environment,Value=${ENVIRONMENT}},{Key=Purpose,Value=AMI-Builder},{Key=AutoTerminate,Value=true},{Key=IAMRole,Value=${ROLE_NAME}}]" \
           --query 'Instances[0].InstanceId' \
           --output text)
         
         echo "instance-id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+        echo "iam-role=$ROLE_NAME" >> $GITHUB_OUTPUT
         echo "🚀 Launched instance: $INSTANCE_ID"
         echo "⚠️ Instance will be automatically terminated after AMI creation"
-        echo "💡 Using VPC: $VPC_ID, Subnet: $SUBNET_ID, with public IP and no SSH key"
+        echo "💡 Using VPC: $VPC_ID, Subnet: $SUBNET_ID, IAM Role: $ROLE_NAME"
 
     - name: Wait for instance setup completion
       timeout-minutes: 25
@@ -298,6 +370,8 @@ jobs:
       if: always()
       run: |
         INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
+        IAM_ROLE="${{ steps.launch-instance.outputs.iam-role }}"
+        
         if [ -n "$INSTANCE_ID" ]; then
           echo "🧹 Terminating builder instance: $INSTANCE_ID"
           
@@ -311,6 +385,37 @@ jobs:
           echo "✅ Builder instance cleanup completed"
         else
           echo "⚠️ No instance ID found to cleanup"
+        fi
+        
+        # Clean up IAM role and instance profile
+        if [ -n "$IAM_ROLE" ]; then
+          echo "🧹 Cleaning up IAM role: $IAM_ROLE"
+          
+          # Remove role from instance profile
+          aws iam remove-role-from-instance-profile \
+            --instance-profile-name "$IAM_ROLE" \
+            --role-name "$IAM_ROLE" \
+            --region ${{ env.AWS_REGION }} || echo "⚠️ Role may already be removed"
+          
+          # Delete instance profile
+          aws iam delete-instance-profile \
+            --instance-profile-name "$IAM_ROLE" \
+            --region ${{ env.AWS_REGION }} || echo "⚠️ Instance profile may already be deleted"
+          
+          # Detach policy from role
+          aws iam detach-role-policy \
+            --role-name "$IAM_ROLE" \
+            --policy-arn "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess" \
+            --region ${{ env.AWS_REGION }} || echo "⚠️ Policy may already be detached"
+          
+          # Delete role
+          aws iam delete-role \
+            --role-name "$IAM_ROLE" \
+            --region ${{ env.AWS_REGION }} || echo "⚠️ Role may already be deleted"
+          
+          echo "✅ IAM role cleanup completed"
+        else
+          echo "⚠️ No IAM role found to cleanup"
         fi
 
     - name: Deployment Summary
