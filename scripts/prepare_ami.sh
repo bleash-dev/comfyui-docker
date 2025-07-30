@@ -84,22 +84,6 @@ echo 'DPkg::Options "--force-confdef";' >> "$APT_CONFIG_FILE"
 echo 'DPkg::Options "--force-confold";' >> "$APT_CONFIG_FILE"
 echo 'DPkg::Use-Pty "0";' >> "$APT_CONFIG_FILE"
 
-# Update package lists with timeout
-echo "🔄 Updating package lists..."
-timeout 300 apt-get update || {
-    echo "⚠️ Package update timed out or failed, trying once more..."
-    timeout 300 apt-get update || echo "❌ Package update failed but continuing..."
-}
-checkpoint "PACKAGE_MANAGEMENT_READY"
-
-
-# --- 3. INSTALL ALL DEPENDENCIES ---
-echo "🧩 Installing all required packages with timeouts..."
-
-# First, try to update package cache one more time
-echo "🔄 Final package cache update..."
-timeout 120 apt-get update || echo "⚠️ Final update failed, proceeding with installation..."
-
 PACKAGES=(
     "ca-certificates"
     "curl"
