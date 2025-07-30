@@ -99,7 +99,7 @@ COPY scripts/tenant_manager.py /tenant_manager.py
 RUN chmod +x /tenant_manager.py
 
 # Expose ports (80 for management, 8000+ for tenants)
-EXPOSE 80 8000-9000
+EXPOSE 80 8000-8100
 
 # Add healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

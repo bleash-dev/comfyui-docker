@@ -230,19 +230,21 @@ jobs:
           
           echo "✅ Docker service is running"
           
-          # Stop any running ComfyUI containers gracefully
-          echo "🛑 Stopping existing ComfyUI containers..."
-          RUNNING_CONTAINERS=\$(docker ps --filter "ancestor=comfyui" --filter "ancestor=\$DOCKER_IMAGE_URI" -q)
+          # Stop ALL running containers before updating (for clean AMI state)
+          echo "🛑 Stopping all running containers for clean AMI state..."
+          RUNNING_CONTAINERS=\$(docker ps -q)
           if [ -n "\$RUNNING_CONTAINERS" ]; then
             echo "Found running containers: \$RUNNING_CONTAINERS"
+            echo "Stopping containers gracefully..."
             docker stop \$RUNNING_CONTAINERS || true
+            echo "Removing stopped containers..."
             docker rm \$RUNNING_CONTAINERS || true
           else
-            echo "No running ComfyUI containers found"
+            echo "No running containers found"
           fi
           
-          # Remove any stopped containers to free up space
-          echo "🧹 Cleaning up stopped containers..."
+          # Clean up any remaining stopped containers
+          echo "🧹 Cleaning up any remaining stopped containers..."
           docker container prune -f || true
           
           # Pull the new Docker image
@@ -660,17 +662,35 @@ jobs:
           --instance-ids $INSTANCE_ID \
           --document-name "AWS-RunShellScript" \
           --parameters 'commands=[
-            "echo === Docker Service Status ===",
-            "systemctl is-active docker 2>/dev/null && echo DOCKER_SERVICE_ACTIVE || echo DOCKER_SERVICE_INACTIVE",
-            "systemctl status docker --no-pager -l",
-            "echo === Docker Version Check ===",
-            "docker version || echo DOCKER_VERSION_FAILED",
-            "echo === Docker Images ===",
-            "docker images || echo DOCKER_IMAGES_FAILED",
-            "echo === Check for ComfyUI Images ===",
-            "docker images | grep -E \"comfyui|${{ needs.build-and-push.outputs.image-uri }}\" || echo NO_COMFYUI_IMAGES",
-            "echo === Final Status ===",
-            "if systemctl is-active docker >/dev/null 2>&1 && docker version >/dev/null 2>&1; then echo DOCKER_OK; else echo DOCKER_FAIL; fi"
+            "echo === Comprehensive Docker Health Check ===",
+            "# Check if Docker service is active",
+            "DOCKER_SERVICE_STATUS=$(systemctl is-active docker 2>/dev/null || echo inactive)",
+            "echo DOCKER_SERVICE: $DOCKER_SERVICE_STATUS",
+            "# Test Docker daemon responsiveness",
+            "if timeout 10 docker info >/dev/null 2>&1; then",
+            "  echo DOCKER_DAEMON: responsive",
+            "else",
+            "  echo DOCKER_DAEMON: unresponsive",
+            "fi",
+            "# Check Docker version",
+            "if timeout 5 docker version >/dev/null 2>&1; then",
+            "  echo DOCKER_VERSION: available",
+            "  docker version --format \"{{.Server.Version}}\" 2>/dev/null || echo unknown",
+            "else",
+            "  echo DOCKER_VERSION: failed",
+            "fi",
+            "# List available images",
+            "echo === Available Images ===",
+            "docker images --format \"table {{.Repository}}:{{.Tag}}\t{{.Size}}\" 2>/dev/null | head -5 || echo No images found",
+            "# Check for ComfyUI images specifically",
+            "COMFYUI_IMAGES=$(docker images | grep -E \"comfyui|multitenant\" | wc -l)",
+            "echo COMFYUI_IMAGES_COUNT: $COMFYUI_IMAGES",
+            "# Overall health assessment",
+            "if [ \"$DOCKER_SERVICE_STATUS\" = \"active\" ] && timeout 5 docker info >/dev/null 2>&1; then",
+            "  echo DOCKER_HEALTH: HEALTHY",
+            "else",
+            "  echo DOCKER_HEALTH: UNHEALTHY",
+            "fi"
           ]' \
           --region ${{ env.AWS_REGION }} \
           --query 'Command.CommandId' \
@@ -687,7 +707,36 @@ jobs:
         echo "Docker Status Details:"
         echo "$DOCKER_STATUS"
         
-        if [[ "$DOCKER_STATUS" != *"DOCKER_OK"* ]]; then
+        # Check for multiple reliable indicators
+        DOCKER_SERVICE_OK=false
+        DOCKER_DAEMON_OK=false
+        DOCKER_HEALTH_OK=false
+        
+        if [[ "$DOCKER_STATUS" == *"DOCKER_SERVICE: active"* ]]; then
+          DOCKER_SERVICE_OK=true
+          echo "✅ Docker service is active"
+        else
+          echo "❌ Docker service is not active"
+        fi
+        
+        if [[ "$DOCKER_STATUS" == *"DOCKER_DAEMON: responsive"* ]]; then
+          DOCKER_DAEMON_OK=true
+          echo "✅ Docker daemon is responsive"
+        else
+          echo "❌ Docker daemon is not responsive"
+        fi
+        
+        if [[ "$DOCKER_STATUS" == *"DOCKER_HEALTH: HEALTHY"* ]]; then
+          DOCKER_HEALTH_OK=true
+          echo "✅ Overall Docker health check passed"
+        else
+          echo "❌ Overall Docker health check failed"
+        fi
+        
+        # Docker is considered working if service is active AND daemon is responsive
+        if [ "$DOCKER_SERVICE_OK" = true ] && [ "$DOCKER_DAEMON_OK" = true ]; then
+          echo "🎉 Docker is running properly!"
+        else
           echo "❌ Docker is not running properly"
           
           # Get additional debugging info
@@ -724,12 +773,16 @@ jobs:
         fi
         echo "✅ Docker is running"
         
-        # Verify ComfyUI image is available
-        if [[ "$DOCKER_STATUS" == *"NO_COMFYUI_IMAGES"* ]]; then
+        # Verify ComfyUI image is available (more reliable check)
+        COMFYUI_IMAGE_COUNT=$(echo "$DOCKER_STATUS" | grep "COMFYUI_IMAGES_COUNT:" | cut -d: -f2 | xargs)
+        if [ -n "$COMFYUI_IMAGE_COUNT" ] && [ "$COMFYUI_IMAGE_COUNT" -gt 0 ]; then
+          echo "✅ ComfyUI Docker image is available (found $COMFYUI_IMAGE_COUNT images)"
+        else
           echo "❌ ComfyUI Docker image not found"
+          echo "Available images from status:"
+          echo "$DOCKER_STATUS" | grep -A 10 "=== Available Images ===" || echo "No image list in output"
           exit 1
         fi
-        echo "✅ ComfyUI Docker image is available"
         
         # For existing AMI, we can skip the container functionality test since we know it works
         # and we just need to verify the image was updated
@@ -749,6 +802,9 @@ jobs:
           --document-name "AWS-RunShellScript" \
           --parameters 'commands=[
             "echo Checking system cleanliness...",
+            "# Stop the ComfyUI service if running",
+            "systemctl stop comfyui-multitenant.service || true",
+            "sleep 5",
             "# Ensure no containers are running",
             "RUNNING_CONTAINERS=$(docker ps -q | wc -l)",
             "echo Running containers: $RUNNING_CONTAINERS",
@@ -756,6 +812,7 @@ jobs:
             "  echo Stopping running containers for AMI creation...",
             "  docker stop $(docker ps -q) || true",
             "  docker rm $(docker ps -aq) || true",
+            "  sleep 3",
             "fi",
             "# Verify Docker images are available",
             "echo === Available Docker Images ===",
@@ -764,6 +821,8 @@ jobs:
             "echo === System Resources ===",
             "echo Memory usage: $(free -h | grep Mem:)",
             "echo Disk usage: $(df -h / | tail -1)",
+            "echo === Final Container Check ===",
+            "echo Active containers: $(docker ps -q | wc -l)",
             "echo CLEANUP_COMPLETE"
           ]' \
           --region ${{ env.AWS_REGION }} \

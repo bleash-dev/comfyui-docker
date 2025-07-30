@@ -232,7 +232,7 @@ ExecStartPre=-/usr/bin/docker rm comfyui-manager
 ExecStart=/usr/bin/docker run --rm \
     --name comfyui-manager \
     -p 80:80 \
-    -p 8000-9000:8000-9000 \
+    -p 8000-8100:8000-8100 \
     -v /var/log/comfyui:/var/log \
     -v /workspace:/workspace \
     --privileged \
