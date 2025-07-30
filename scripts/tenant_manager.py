@@ -315,6 +315,7 @@ class MetricsHandler(http.server.BaseHTTPRequestHandler):
         metrics_data = {
             "timestamp": time.time(),
             "system": self.get_system_metrics(),
+            "disk_space": self.get_disk_space_metrics(),
             "gpu": self.get_gpu_metrics(),
             "performance": self.get_performance_metrics(),
             "tenants": self.get_tenant_info()
@@ -467,7 +468,9 @@ class MetricsHandler(http.server.BaseHTTPRequestHandler):
             # Try to get NVIDIA GPU metrics
             result = subprocess.run([
                 'nvidia-smi', 
-                '--query-gpu=index,name,utilization.gpu,utilization.memory,temperature.gpu,memory.total,memory.used,memory.free,power.draw,power.limit',
+                '--query-gpu=index,name,utilization.gpu,utilization.memory,' +
+                'temperature.gpu,memory.total,memory.used,memory.free,' +
+                'power.draw,power.limit',
                 '--format=csv,noheader,nounits'
             ], capture_output=True, text=True)
             
@@ -479,36 +482,128 @@ class MetricsHandler(http.server.BaseHTTPRequestHandler):
                     if line.strip():
                         values = [v.strip() for v in line.split(',')]
                         if len(values) >= 10:
+                            # Helper function to safely convert values
+                            def safe_float(val):
+                                return float(val) if val != 'N/A' else 0
+                            
+                            def safe_int(val):
+                                return int(val) if val != 'N/A' else 0
+                            
                             gpus.append({
-                                "index": int(values[0]) if values[0] != 'N/A' else 0,
+                                "index": safe_int(values[0]),
                                 "name": values[1],
-                                "utilization_percent": float(values[2]) if values[2] != 'N/A' else 0,
-                                "memory_utilization_percent": float(values[3]) if values[3] != 'N/A' else 0,
-                                "temperature": float(values[4]) if values[4] != 'N/A' else 0,
-                                "memory_total_mb": float(values[5]) if values[5] != 'N/A' else 0,
-                                "memory_used_mb": float(values[6]) if values[6] != 'N/A' else 0,
-                                "memory_free_mb": float(values[7]) if values[7] != 'N/A' else 0,
-                                "power_draw_w": float(values[8]) if values[8] != 'N/A' else 0,
-                                "power_limit_w": float(values[9]) if values[9] != 'N/A' else 0,
+                                "utilization_percent": safe_float(values[2]),
+                                "memory_utilization_percent": safe_float(
+                                    values[3]),
+                                "temperature": safe_float(values[4]),
+                                "memory_total_mb": safe_float(values[5]),
+                                "memory_used_mb": safe_float(values[6]),
+                                "memory_free_mb": safe_float(values[7]),
+                                "power_draw_w": safe_float(values[8]),
+                                "power_limit_w": safe_float(values[9]),
                             })
                 
                 # Return aggregated metrics for all GPUs
                 if gpus:
+                    total_mem = sum(gpu["memory_total_mb"] for gpu in gpus)
+                    used_mem = sum(gpu["memory_used_mb"] for gpu in gpus)
+                    free_mem = sum(gpu["memory_free_mb"] for gpu in gpus)
+                    avg_util = sum(gpu["utilization_percent"] for gpu in gpus)
+                    avg_mem_util = sum(
+                        gpu["memory_utilization_percent"] for gpu in gpus)
+                    avg_temp = sum(gpu["temperature"] for gpu in gpus)
+                    total_power = sum(gpu["power_draw_w"] for gpu in gpus)
+                    
                     return {
                         "gpu_count": len(gpus),
-                        "total_memory_gb": sum(gpu["memory_total_mb"] for gpu in gpus) / 1024,
-                        "used_memory_gb": sum(gpu["memory_used_mb"] for gpu in gpus) / 1024,
-                        "free_memory_gb": sum(gpu["memory_free_mb"] for gpu in gpus) / 1024,
-                        "avg_utilization_percent": sum(gpu["utilization_percent"] for gpu in gpus) / len(gpus),
-                        "avg_memory_utilization_percent": sum(gpu["memory_utilization_percent"] for gpu in gpus) / len(gpus),
-                        "avg_temperature": sum(gpu["temperature"] for gpu in gpus) / len(gpus),
-                        "total_power_draw_w": sum(gpu["power_draw_w"] for gpu in gpus),
+                        "total_memory_gb": round(total_mem / 1024, 2),
+                        "used_memory_gb": round(used_mem / 1024, 2),
+                        "free_memory_gb": round(free_mem / 1024, 2),
+                        "avg_utilization_percent": round(
+                            avg_util / len(gpus), 1),
+                        "avg_memory_utilization_percent": round(
+                            avg_mem_util / len(gpus), 1),
+                        "avg_temperature": round(avg_temp / len(gpus), 1),
+                        "total_power_draw_w": round(total_power, 1),
                         "individual_gpus": gpus
                     }
             
             return {"error": "No GPU metrics available"}
         except Exception as e:
             return {"error": str(e)}
+    
+    def get_disk_space_metrics(self):
+        """Get disk space metrics focused on /workspace/ tenant data."""
+        try:
+            disk_metrics = {}
+            
+            # Overall disk usage for the main filesystem
+            try:
+                root_usage = psutil.disk_usage('/')
+                disk_metrics["total_gb"] = round(
+                    root_usage.total / (1024**3), 2)
+                disk_metrics["used_gb"] = round(
+                    root_usage.used / (1024**3), 2)
+                disk_metrics["free_gb"] = round(
+                    root_usage.free / (1024**3), 2)
+                used_pct = (root_usage.used / root_usage.total) * 100
+                disk_metrics["used_percent"] = round(used_pct, 1)
+            except Exception as e:
+                disk_metrics["error"] = (
+                    f"Failed to get root disk usage: {str(e)}")
+            
+            # Workspace directory usage (where all tenant data is stored)
+            workspace_path = "/workspace"
+            try:
+                if os.path.exists(workspace_path):
+                    # Get workspace size using du command for accuracy
+                    result = subprocess.run(
+                        ['du', '-sb', workspace_path],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    if result.returncode == 0:
+                        size_bytes = int(result.stdout.split()[0])
+                        disk_metrics["workspace"] = {
+                            "path": workspace_path,
+                            "size_gb": round(size_bytes / (1024**3), 2),
+                            "size_mb": round(size_bytes / (1024**2), 1),
+                            "exists": True
+                        }
+                    else:
+                        disk_metrics["workspace"] = {
+                            "path": workspace_path,
+                            "exists": True,
+                            "error": "Failed to calculate size with du command"
+                        }
+                else:
+                    disk_metrics["workspace"] = {
+                        "path": workspace_path,
+                        "exists": False
+                    }
+            except Exception as e:
+                disk_metrics["workspace"] = {
+                    "path": workspace_path,
+                    "error": str(e),
+                    "exists": False
+                }
+            
+            # Add warnings for disk space
+            warnings = []
+            if "used_percent" in disk_metrics:
+                if disk_metrics["used_percent"] > 90:
+                    warnings.append("CRITICAL: Disk usage above 90%")
+                elif disk_metrics["used_percent"] > 80:
+                    warnings.append("WARNING: Disk usage above 80%")
+                elif disk_metrics["used_percent"] > 70:
+                    warnings.append("NOTICE: Disk usage above 70%")
+            
+            if warnings:
+                disk_metrics["warnings"] = warnings
+            
+            return disk_metrics
+            
+        except Exception as e:
+            return {"error": f"Failed to get disk space metrics: {str(e)}"}
     
     def get_performance_metrics(self):
         try:
@@ -572,7 +667,8 @@ def main():
     Handler = create_handler_class(process_manager)
     
     with socketserver.TCPServer(("", PORT), Handler) as httpd:
-        logger.info(f"Multi-tenant ComfyUI management server running on port {PORT}")
+        logger.info(
+            f"Multi-tenant ComfyUI management server running on port {PORT}")
         
         try:
             httpd.serve_forever()
