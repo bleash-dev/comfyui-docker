@@ -994,3 +994,89 @@ jobs:
         echo "### 🎯 Usage" >> $GITHUB_STEP_SUMMARY
         echo "Launch EC2 instances from this AMI to run the multi-tenant ComfyUI system." >> $GITHUB_STEP_SUMMARY
         echo "The management server will be available on port 80." >> $GITHUB_STEP_SUMMARY
+
+  check-and-clean-amis:
+    runs-on: ubuntu-latest
+    needs: create-ami
+    if: github.event_name != 'pull_request'
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials via OIDC
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        role-to-assume: ${{ secrets.GH_ROLE_ARN }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Check for existing AMIs
+      id: check-existing-ami
+      timeout-minutes: 5
+      run: |
+        ENVIRONMENT="${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}"
+        
+        echo "🔍 Checking for existing ComfyUI AMIs for environment: $ENVIRONMENT"
+        
+        # Find existing AMIs for this environment
+        EXISTING_AMIS=$(aws ec2 describe-images \
+          --owners self \
+          --filters "Name=tag:Environment,Values=$ENVIRONMENT" \
+                   "Name=name,Values=comfyui-multitenant-${ENVIRONMENT}-*" \
+                   "Name=state,Values=available" \
+          --query 'Images[*].[ImageId,Name,CreationDate]' \
+          --output text \
+          --region ${{ env.AWS_REGION }} | sort -k3 -r || echo "")
+        
+        if [ -n "$EXISTING_AMIS" ]; then
+          echo "📋 Found existing ComfyUI AMIs for $ENVIRONMENT environment:"
+          echo "$EXISTING_AMIS" | while read ami_id ami_name creation_date; do
+            echo "  - AMI: $ami_id, Name: $ami_name, Created: $creation_date"
+          done
+          
+          # Count existing AMIs
+          AMI_COUNT=$(echo "$EXISTING_AMIS" | wc -l)
+          echo "📊 Total existing AMIs: $AMI_COUNT"
+          
+          # If we have 3 or more AMIs, we'll clean up the oldest ones after creating the new one
+          if [ $AMI_COUNT -ge 3 ]; then
+            echo "⚠️ Found $AMI_COUNT existing AMIs. Will clean up oldest ones after creating new AMI."
+            
+            # Get the oldest AMI(s) to deregister (keep only the 2 most recent + the new one we'll create)
+            AMIS_TO_DELETE=$(echo "$EXISTING_AMIS" | tail -n +3 | awk '{print $1}')
+            echo "🗑️ AMIs scheduled for cleanup after new AMI creation:"
+            echo "$AMIS_TO_DELETE" | while read ami_id; do
+              echo "  - Will delete: $ami_id"
+            done
+            echo "amis-to-delete<<EOF" >> $GITHUB_OUTPUT
+            echo "$AMIS_TO_DELETE" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "✅ AMI count is manageable ($AMI_COUNT), no cleanup needed"
+            echo "amis-to-delete=" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "📭 No existing ComfyUI AMIs found for $ENVIRONMENT environment"
+          echo "amis-to-delete=" >> $GITHUB_OUTPUT
+        fi
+        
+        # Store environment for later use
+        echo "environment=$ENVIRONMENT" >> $GITHUB_OUTPUT
+
+    - name: Clean up old AMIs
+      id: cleanup-amis
+      if: steps.check-existing-ami.outputs.amis-to-delete != ''
+      run: |
+        echo "🧹 Cleaning up old AMIs..."
+        AMIS_TO_DELETE="${{ steps.check-existing-ami.outputs.amis-to-delete }}"
+        
+        for AMI_ID in $AMIS_TO_DELETE; do
+          echo "📦 Deregistering AMI: $AMI_ID"
+          aws ec2 deregister-image --image-id $AMI_ID --region ${{ env.AWS_REGION }}
+        done
+        
+        echo "✅ Old AMIs cleaned up"
