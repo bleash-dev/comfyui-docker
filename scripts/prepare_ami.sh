@@ -23,16 +23,14 @@ echo "🔧 Setting up early CloudWatch logging configuration..."
 if [ -f "/scripts/setup_cloudwatch.sh" ]; then
     # Run CloudWatch configuration in config-only mode (no package installation)
     echo "📝 Configuring CloudWatch for early logging..."
-    bash /scripts/setup_cloudwatch.sh --config-only || {
+    if bash /scripts/setup_cloudwatch.sh --config-only; then
+        echo "✅ Early CloudWatch configuration completed"
+        checkpoint "CLOUDWATCH_EARLY_CONFIGURED"
+    else
         echo "⚠️ Early CloudWatch setup failed, but continuing..."
         echo "💡 Full CloudWatch setup will be attempted later"
         checkpoint "CLOUDWATCH_EARLY_FAILED"
         # Don't exit - this is not critical for the early phase
-    }
-    
-    if [ "$?" -eq 0 ]; then
-        echo "✅ Early CloudWatch configuration completed"
-        checkpoint "CLOUDWATCH_EARLY_CONFIGURED"
     fi
 else
     echo "⚠️ CloudWatch setup script not found at /scripts/setup_cloudwatch.sh"
@@ -75,12 +73,18 @@ for i in $(seq 1 $LOCK_TIMEOUT); do
     sleep 2
 done
 
+echo "✅ Package management locks acquired successfully"
+checkpoint "PACKAGE_LOCKS_ACQUIRED"
+
 # Configure apt to be non-interactive
+echo "🔧 Configuring apt for non-interactive operation..."
 echo 'APT::Get::Assume-Yes "true";' > /etc/apt/apt.conf.d/90-noninteractive
 echo 'APT::Get::AllowUnauthenticated "true";' >> /etc/apt/apt.conf.d/90-noninteractive
 echo 'DPkg::Options "--force-confdef";' >> /etc/apt/apt.conf.d/90-noninteractive
 echo 'DPkg::Options "--force-confold";' >> /etc/apt/apt.conf.d/90-noninteractive
 echo 'DPkg::Use-Pty "0";' >> /etc/apt/apt.conf.d/90-noninteractive
+
+checkpoint "APT_CONFIGURED"
 
 # Update package lists
 echo "🔄 Updating package lists..."
@@ -341,6 +345,13 @@ if ! command -v /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
         if command -v /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl &> /dev/null; then
             echo "✅ CloudWatch agent installed successfully"
             checkpoint "CLOUDWATCH_AGENT_INSTALLED"
+            
+            # Apply any temporary configuration that was created earlier
+            if [ -f "/tmp/apply_cloudwatch_config.sh" ]; then
+                echo "🔧 Applying temporary CloudWatch configuration..."
+                bash /tmp/apply_cloudwatch_config.sh
+                rm -f /tmp/apply_cloudwatch_config.sh
+            fi
         else
             echo "⚠️ CloudWatch agent installation may have failed, but continuing..."
         fi

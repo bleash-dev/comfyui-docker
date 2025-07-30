@@ -35,7 +35,20 @@ fi
 
 # Create CloudWatch agent configuration
 echo "📝 Creating CloudWatch agent configuration..."
-cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'EOF'
+
+# Create the configuration directory if it doesn't exist or if agent is available
+if [ "$CONFIG_ONLY" = "false" ] || [ -d "/opt/aws/amazon-cloudwatch-agent" ]; then
+    # Create directory structure if needed
+    mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+    CONFIG_PATH="/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json"
+else
+    # If in config-only mode and agent directory doesn't exist, create temp config
+    echo "⚠️ CloudWatch agent directory not found - creating temporary configuration"
+    mkdir -p /tmp/cloudwatch-config
+    CONFIG_PATH="/tmp/cloudwatch-config/amazon-cloudwatch-agent.json"
+fi
+
+cat > "$CONFIG_PATH" << 'EOF'
 {
     "agent": {
         "metrics_collection_interval": 60,
@@ -132,7 +145,27 @@ cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'EOF'
 }
 EOF
 
-echo "✅ CloudWatch agent configuration created"
+if [ $? -eq 0 ]; then
+    echo "✅ CloudWatch agent configuration created at $CONFIG_PATH"
+    
+    # If we created a temp config, set up a mechanism to copy it later
+    if [[ "$CONFIG_PATH" == "/tmp/cloudwatch-config/"* ]]; then
+        echo "💡 Temporary configuration created - will be applied when agent is installed"
+        echo "#!/bin/bash" > /tmp/apply_cloudwatch_config.sh
+        echo "if [ -d '/opt/aws/amazon-cloudwatch-agent/etc' ]; then" >> /tmp/apply_cloudwatch_config.sh
+        echo "  cp /tmp/cloudwatch-config/amazon-cloudwatch-agent.json /opt/aws/amazon-cloudwatch-agent/etc/" >> /tmp/apply_cloudwatch_config.sh
+        echo "  echo 'CloudWatch configuration applied'" >> /tmp/apply_cloudwatch_config.sh
+        echo "fi" >> /tmp/apply_cloudwatch_config.sh
+        chmod +x /tmp/apply_cloudwatch_config.sh
+    fi
+else
+    echo "❌ Failed to create CloudWatch agent configuration"
+    if [ "$CONFIG_ONLY" = "true" ]; then
+        echo "⚠️ Will retry when CloudWatch agent is installed"
+    else
+        return 1
+    fi
+fi
 
 # Create systemd service for CloudWatch agent
 echo "📝 Creating CloudWatch agent systemd service..."
