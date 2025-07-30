@@ -31,7 +31,7 @@ export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
 # Kill any lingering apt processes to prevent locks
-pkill -f dfn || true
+pkill -f dnf || true
 pkill -f dpkg || true
 sleep 3
 
@@ -47,7 +47,7 @@ echo 'DPkg::Options "--force-confold";' >> "$APT_CONFIG_FILE"
 echo 'DPkg::Use-Pty "0";' >> "$APT_CONFIG_FILE"
 
 # Update package lists
-dfn update -y
+dnf update -y
 checkpoint "PACKAGE_MANAGEMENT_READY"
 
 
@@ -71,7 +71,7 @@ PACKAGES=(
 )
 for package in "${PACKAGES[@]}"; do
     echo ">>> Installing package: $package"
-    dfn install -y --no-install-recommends "$package"
+    dnf install -y --no-install-recommends "$package"
 done
 checkpoint "BASE_PACKAGES_INSTALLED"
 
@@ -80,7 +80,7 @@ checkpoint "BASE_PACKAGES_INSTALLED"
 echo "📦 Installing CloudWatch Agent..."
 CW_AGENT_DEB="/tmp/amazon-cloudwatch-agent.deb"
 wget -q -O "$CW_AGENT_DEB" https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
-dpkg -i "$CW_AGENT_DEB" || dfn install -f -y # If dpkg fails, dfn -f will fix missing dependencies
+dpkg -i "$CW_AGENT_DEB" || dnf install -f -y # If dpkg fails, dnf -f will fix missing dependencies
 rm -f "$CW_AGENT_DEB"
 checkpoint "CLOUDWATCH_AGENT_INSTALLED"
 
@@ -219,8 +219,8 @@ systemctl stop comfyui-multitenant.service || true
 systemctl stop docker.service || true
 
 # Clean apt cache
-dfn autoremove -y
-dfn clean
+dnf autoremove -y
+dnf clean
 rm -rf /var/lib/apt/lists/*
 
 # Clear logs and shell history
