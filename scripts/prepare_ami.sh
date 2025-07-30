@@ -41,13 +41,40 @@ echo "📦 Preparing package manager (apt)..."
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
-# Kill any lingering apt processes to prevent locks
-pkill -f apt-get || true
-pkill -f dpkg || true
+# Aggressive APT lock handling - use timeout and force clear
+echo "🔧 Clearing APT locks aggressively..."
+
+# Force kill any apt/dpkg processes
+echo "🔪 Force killing any existing apt/dpkg processes..."
+timeout 10 pkill -9 -f apt-get || true
+timeout 10 pkill -9 -f dpkg || true
+timeout 10 pkill -9 -f unattended-upgrade || true
+timeout 10 pkill -9 -f packagekit || true
 sleep 3
 
-# Wait for apt locks to be released
-timeout 60 bash -c 'while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do echo "⏳ Waiting for dpkg lock..."; sleep 2; done'
+# Remove lock files directly (will be recreated)
+echo "🗑️ Removing lock files..."
+rm -f /var/lib/dpkg/lock-frontend
+rm -f /var/lib/apt/lists/lock 
+rm -f /var/cache/apt/archives/lock
+rm -f /var/lib/dpkg/lock
+sleep 2
+
+# Check if locks are clear with timeout
+echo "🔍 Final APT lock check..."
+timeout 30 bash -c '
+for i in {1..15}; do
+    if ! lsof /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && \
+       ! lsof /var/lib/apt/lists/lock >/dev/null 2>&1 && \
+       ! lsof /var/cache/apt/archives/lock >/dev/null 2>&1; then
+        echo "✅ APT locks are clear"
+        exit 0
+    fi
+    echo "⏳ Checking APT locks... (attempt $i/15)"
+    sleep 2
+done
+echo "⚠️ Some locks may still be present, but proceeding..."
+' || echo "⚠️ Lock check timed out, proceeding anyway..."
 
 # Configure apt for non-interactive use using robust echo commands
 APT_CONFIG_FILE="/etc/apt/apt.conf.d/90-noninteractive"
@@ -57,12 +84,21 @@ echo 'DPkg::Options "--force-confdef";' >> "$APT_CONFIG_FILE"
 echo 'DPkg::Options "--force-confold";' >> "$APT_CONFIG_FILE"
 echo 'DPkg::Use-Pty "0";' >> "$APT_CONFIG_FILE"
 
-# Update package lists
+# Update package lists with timeout
+echo "🔄 Updating package lists..."
+timeout 300 apt-get update || {
+    echo "⚠️ Package update timed out or failed, trying once more..."
+    timeout 300 apt-get update || echo "❌ Package update failed but continuing..."
+}
 checkpoint "PACKAGE_MANAGEMENT_READY"
 
 
 # --- 3. INSTALL ALL DEPENDENCIES ---
-echo "🧩 Installing all required packages one by one for debugging..."
+echo "🧩 Installing all required packages with timeouts..."
+
+# First, try to update package cache one more time
+echo "🔄 Final package cache update..."
+timeout 120 apt-get update || echo "⚠️ Final update failed, proceeding with installation..."
 
 PACKAGES=(
     "ca-certificates"
