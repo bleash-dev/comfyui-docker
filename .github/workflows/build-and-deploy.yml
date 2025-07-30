@@ -20,7 +20,7 @@ jobs:
       contents: read
 
     outputs:
-      image-uri: ${{ steps.build.outputs.image-uri }}
+      image-uri: ${{ steps.image-uri.outputs.image-uri }}
       image-tag: ${{ steps.meta.outputs.tags }}
 
     steps:
