@@ -3,18 +3,34 @@
 
 echo "🔧 Setting up CloudWatch logging configuration..."
 
-# Install CloudWatch agent
-if ! command -v /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl &> /dev/null; then
-    echo "📦 Installing CloudWatch agent..."
-    
-    # Download and install CloudWatch agent
-    wget -q https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
-    dpkg -i -E amazon-cloudwatch-agent.deb
-    rm -f amazon-cloudwatch-agent.deb
-    
-    echo "✅ CloudWatch agent installed"
+# Check if we should skip installation (--config-only flag)
+CONFIG_ONLY=false
+if [[ "$1" == "--config-only" ]]; then
+    CONFIG_ONLY=true
+    echo "📝 Configuration-only mode - skipping package installation"
+fi
+
+# Install CloudWatch agent (only if not in config-only mode)
+if [ "$CONFIG_ONLY" = "false" ]; then
+    if ! command -v /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl &> /dev/null; then
+        echo "📦 Installing CloudWatch agent..."
+        
+        # Download and install CloudWatch agent
+        wget -q https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+        dpkg -i -E amazon-cloudwatch-agent.deb
+        rm -f amazon-cloudwatch-agent.deb
+        
+        echo "✅ CloudWatch agent installed"
+    else
+        echo "✅ CloudWatch agent already installed"
+    fi
 else
-    echo "✅ CloudWatch agent already installed"
+    # In config-only mode, just check if it's available
+    if command -v /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl &> /dev/null; then
+        echo "✅ CloudWatch agent found - proceeding with configuration"
+    else
+        echo "⚠️ CloudWatch agent not found - configuration will be applied when agent is installed"
+    fi
 fi
 
 # Create CloudWatch agent configuration

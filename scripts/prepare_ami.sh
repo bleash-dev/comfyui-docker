@@ -19,14 +19,25 @@ checkpoint() {
 checkpoint "AMI_PREP_STARTED"
 
 # Setup CloudWatch logging early for real-time monitoring
-echo "🔧 Setting up CloudWatch logging early for debugging..."
+echo "🔧 Setting up early CloudWatch logging configuration..."
 if [ -f "/scripts/setup_cloudwatch.sh" ]; then
-    bash /scripts/setup_cloudwatch.sh
-    echo "✅ CloudWatch logging configured - logs should be visible in AWS Console"
-    checkpoint "CLOUDWATCH_CONFIGURED"
+    # Run CloudWatch configuration in config-only mode (no package installation)
+    echo "📝 Configuring CloudWatch for early logging..."
+    bash /scripts/setup_cloudwatch.sh --config-only || {
+        echo "⚠️ Early CloudWatch setup failed, but continuing..."
+        echo "💡 Full CloudWatch setup will be attempted later"
+        checkpoint "CLOUDWATCH_EARLY_FAILED"
+        # Don't exit - this is not critical for the early phase
+    }
+    
+    if [ "$?" -eq 0 ]; then
+        echo "✅ Early CloudWatch configuration completed"
+        checkpoint "CLOUDWATCH_EARLY_CONFIGURED"
+    fi
 else
-    echo "⚠️ CloudWatch setup script not found, will retry later..."
-    checkpoint "CLOUDWATCH_SKIPPED"
+    echo "⚠️ CloudWatch setup script not found at /scripts/setup_cloudwatch.sh"
+    echo "💡 CloudWatch setup will be skipped"
+    checkpoint "CLOUDWATCH_SCRIPT_MISSING"
 fi
 
 # Update system packages
@@ -308,6 +319,37 @@ checkpoint "ADDITIONAL_PACKAGES_STARTED"
 
 ADDITIONAL_PACKAGES=("jq" "unzip" "htop" "tree" "vim" "git")
 
+# Install CloudWatch agent separately (requires special handling)
+echo "📦 Installing CloudWatch agent..."
+if ! command -v /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl &> /dev/null; then
+    # Download CloudWatch agent package
+    echo "⬇️ Downloading CloudWatch agent..."
+    wget -q -O /tmp/amazon-cloudwatch-agent.deb https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb || {
+        echo "❌ Failed to download CloudWatch agent"
+        echo "⚠️ Continuing without CloudWatch agent..."
+    }
+    
+    if [ -f "/tmp/amazon-cloudwatch-agent.deb" ]; then
+        echo "📦 Installing CloudWatch agent package..."
+        dpkg -i /tmp/amazon-cloudwatch-agent.deb || {
+            echo "❌ Failed to install CloudWatch agent package"
+            echo "🔧 Attempting to fix broken dependencies..."
+            apt-get install -f -y || echo "Failed to fix dependencies"
+        }
+        rm -f /tmp/amazon-cloudwatch-agent.deb
+        
+        if command -v /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl &> /dev/null; then
+            echo "✅ CloudWatch agent installed successfully"
+            checkpoint "CLOUDWATCH_AGENT_INSTALLED"
+        else
+            echo "⚠️ CloudWatch agent installation may have failed, but continuing..."
+        fi
+    fi
+else
+    echo "✅ CloudWatch agent already installed"
+    checkpoint "CLOUDWATCH_AGENT_ALREADY_PRESENT"
+fi
+
 for package in "${ADDITIONAL_PACKAGES[@]}"; do
     echo "📦 Installing $package..."
     apt-get install -y --no-install-recommends "$package" || {
@@ -330,10 +372,14 @@ checkpoint "ADDITIONAL_PACKAGES_INSTALLED"
 echo "🔧 Ensuring CloudWatch logging is configured..."
 if ! systemctl is-active --quiet amazon-cloudwatch-agent; then
     if [ -f "/scripts/setup_cloudwatch.sh" ]; then
+        echo "🔧 Running full CloudWatch setup (including service configuration)..."
         bash /scripts/setup_cloudwatch.sh
+        checkpoint "CLOUDWATCH_FULLY_CONFIGURED"
     else
         echo "⚠️ CloudWatch setup script not found, skipping..."
     fi
+else
+    echo "✅ CloudWatch agent already running"
 fi
 
 # Create directories for multi-tenant operation
