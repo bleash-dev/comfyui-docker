@@ -11,6 +11,17 @@ set -ex
 # --- 1. INITIAL SETUP ---
 echo "🏗️ Preparing EC2 instance for AMI creation..."
 
+# Get Docker image from command line parameter
+DOCKER_IMAGE="$1"
+if [ -z "$DOCKER_IMAGE" ]; then
+    echo "❌ ERROR: Docker image must be provided as first parameter"
+    echo "Usage: $0 <docker-image-uri>"
+    exit 1
+fi
+
+echo "📝 Using Docker image: $DOCKER_IMAGE"
+echo "🔍 Docker image parameter received: '$1'"
+
 # Set up unified logging
 LOG_FILE="/var/log/ami-preparation.log"
 exec &> >(tee -a "$LOG_FILE")
@@ -124,20 +135,74 @@ mkdir -p /var/log/comfyui /workspace /scripts
 chmod 755 /var/log/comfyui /workspace /scripts
 
 # Pull the ComfyUI Docker image
-DOCKER_IMAGE="${COMFYUI_DOCKER_IMAGE:?ERROR: COMFYUI_DOCKER_IMAGE is not set}"
-echo "📝 Using Docker image: $DOCKER_IMAGE"
+echo "📝 Pulling Docker image: $DOCKER_IMAGE"
 
-# Login to ECR if necessary
+# Verify Docker is working before attempting image operations
+if ! docker version >/dev/null 2>&1; then
+    echo "❌ CRITICAL: Docker daemon is not responding"
+    docker version
+    exit 1
+fi
+
+# Login to ECR if necessary (with better error handling)
 if [[ "$DOCKER_IMAGE" == *"ecr"* ]]; then
     echo "🔐 Logging into ECR..."
-    # Use || true to prevent script exit if login fails (e.g., for public images)
-    aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws || true
+    
+    # Try ECR login with timeout and error handling
+    if timeout 30 aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws; then
+        echo "✅ Successfully logged into ECR"
+    else
+        echo "⚠️ ECR login failed - this may be okay if the image is public"
+        echo "🔍 Checking if we can reach ECR without authentication..."
+        
+        # Test if we can reach ECR endpoint
+        if curl -s --max-time 10 https://public.ecr.aws >/dev/null; then
+            echo "✅ ECR endpoint is reachable"
+        else
+            echo "❌ Cannot reach ECR endpoint - check network connectivity"
+            exit 1
+        fi
+    fi
 fi
 
 echo "⬇️ Pulling Docker image: $DOCKER_IMAGE"
-docker pull "$DOCKER_IMAGE"
+echo "🔍 This may take several minutes for large images..."
+
+# Pull with timeout and detailed error handling
+if timeout 900 docker pull "$DOCKER_IMAGE"; then
+    echo "✅ Docker image pulled successfully"
+else
+    PULL_EXIT_CODE=$?
+    echo "❌ Failed to pull Docker image: $DOCKER_IMAGE"
+    echo "💡 Exit code: $PULL_EXIT_CODE"
+    
+    # Provide debugging information
+    echo "🔍 Docker daemon status:"
+    docker version
+    echo "🔍 Available Docker images:"
+    docker images
+    echo "🔍 Docker system info:"
+    docker system df
+    echo "🔍 Network connectivity test:"
+    curl -I https://public.ecr.aws || echo "Cannot reach ECR"
+    
+    exit 1
+fi
+
+# Tag the image for local use
 docker tag "$DOCKER_IMAGE" comfyui-multitenant:latest
-docker images | grep comfyui-multitenant
+
+# Verify the image was tagged correctly
+echo "🔍 Verifying image was tagged correctly..."
+if docker images | grep comfyui-multitenant; then
+    echo "✅ Image tagged successfully"
+else
+    echo "❌ Failed to tag image"
+    echo "🔍 Available images:"
+    docker images
+    exit 1
+fi
+
 checkpoint "DOCKER_IMAGE_PULLED"
 
 

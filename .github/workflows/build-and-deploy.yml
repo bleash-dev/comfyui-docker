@@ -175,7 +175,6 @@ jobs:
         set -e
         
         # Set environment variables
-        export COMFYUI_DOCKER_IMAGE="${{ needs.build-and-push.outputs.image-uri }}"
         export DEBIAN_FRONTEND=noninteractive
         
         # Log everything
@@ -203,10 +202,13 @@ jobs:
         
         # Run the AMI preparation
         echo "Starting AMI preparation script..."
-        export COMFYUI_DOCKER_IMAGE="${{ needs.build-and-push.outputs.image-uri }}"
+        
+        # Pass Docker image as parameter to ensure it's available
+        DOCKER_IMAGE="${{ needs.build-and-push.outputs.image-uri }}"
+        echo "Using Docker image: \$DOCKER_IMAGE"
         
         # Run with timeout to prevent infinite hangs
-        timeout 1800 /scripts/prepare_ami.sh || {
+        timeout 1800 /scripts/prepare_ami.sh "\$DOCKER_IMAGE" || {
             echo "❌ AMI preparation script timed out or failed"
             echo "Exit code: $?"
             echo "Last checkpoint:"
