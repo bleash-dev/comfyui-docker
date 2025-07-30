@@ -1,6 +1,7 @@
 #!/bin/bash
 #
 # Simplified and Robust AMI Preparation Script for Multi-Tenant ComfyUI
+# Version 3 - Corrected APT configuration
 #
 
 # Exit immediately if a command exits with a non-zero status.
@@ -37,14 +38,13 @@ sleep 3
 # Wait for apt locks to be released
 timeout 60 bash -c 'while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do echo "⏳ Waiting for dpkg lock..."; sleep 2; done'
 
-# Configure apt for non-interactive use
-cat > /etc/apt/apt.conf.d/90-noninteractive <<EOF
-APT::Get::Assume-Yes "true";
-APT::Get::AllowUnauthenticated "true";
-DPkg::Options "--force-confdef";
-DPkg::Options "--force-confold";
-DPkg::Use-Pty "0";
-EOF
+# Configure apt for non-interactive use using robust echo commands
+APT_CONFIG_FILE="/etc/apt/apt.conf.d/90-noninteractive"
+echo 'APT::Get::Assume-Yes "true";' > "$APT_CONFIG_FILE"
+echo 'APT::Get::AllowUnauthenticated "true";' >> "$APT_CONFIG_FILE"
+echo 'DPkg::Options "--force-confdef";' >> "$APT_CONFIG_FILE"
+echo 'DPkg::Options "--force-confold";' >> "$APT_CONFIG_FILE"
+echo 'DPkg::Use-Pty "0";' >> "$APT_CONFIG_FILE"
 
 # Update package lists
 apt-get update -y
@@ -128,6 +128,7 @@ echo "📝 Using Docker image: $DOCKER_IMAGE"
 # Login to ECR if necessary
 if [[ "$DOCKER_IMAGE" == *"ecr"* ]]; then
     echo "🔐 Logging into ECR..."
+    # Use || true to prevent script exit if login fails (e.g., for public images)
     aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws || true
 fi
 
@@ -211,8 +212,8 @@ checkpoint "SERVICES_CREATED"
 echo "🧹 Finalizing and cleaning up for AMI creation..."
 
 # Stop services that shouldn't be running in the AMI
-systemctl stop comfyui-multitenant.service
-systemctl stop docker.service
+systemctl stop comfyui-multitenant.service || true
+systemctl stop docker.service || true
 
 # Clean apt cache
 apt-get autoremove -y
