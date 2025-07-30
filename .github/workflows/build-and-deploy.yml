@@ -135,12 +135,36 @@ jobs:
         echo "🔍 Looking for existing ComfyUI AMI for environment: $ENVIRONMENT"
         
         # First, try to get the latest ComfyUI AMI for this environment
+        # Try multiple search patterns to catch different naming conventions
+        EXISTING_AMI=""
+        
+        # Pattern 1: Exact name match (comfyui-multitenant-dev)
         EXISTING_AMI=$(aws ec2 describe-images \
           --owners self \
-          --filters "Name=tag:Environment,Values=$ENVIRONMENT" "Name=name,Values=comfyui-multitenant-$ENVIRONMENT-*" \
-          --query 'Images | sort_by(@, &CreationDate) | [-1].ImageId' \
+          --filters "Name=name,Values=comfyui-multitenant-$ENVIRONMENT" \
+          --query 'Images[0].ImageId' \
           --output text \
           --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+        
+        # Pattern 2: Name with wildcard (comfyui-multitenant-dev-*)
+        if [ -z "$EXISTING_AMI" ] || [ "$EXISTING_AMI" = "None" ]; then
+          EXISTING_AMI=$(aws ec2 describe-images \
+            --owners self \
+            --filters "Name=name,Values=comfyui-multitenant-$ENVIRONMENT-*" \
+            --query 'Images | sort_by(@, &CreationDate) | [-1].ImageId' \
+            --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+        fi
+        
+        # Pattern 3: Tag-based search for Environment
+        if [ -z "$EXISTING_AMI" ] || [ "$EXISTING_AMI" = "None" ]; then
+          EXISTING_AMI=$(aws ec2 describe-images \
+            --owners self \
+            --filters "Name=tag:Environment,Values=$ENVIRONMENT" \
+            --query 'Images | sort_by(@, &CreationDate) | [-1].ImageId' \
+            --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+        fi
         
         if [ -n "$EXISTING_AMI" ] && [ "$EXISTING_AMI" != "None" ]; then
           echo "✅ Found existing ComfyUI AMI: $EXISTING_AMI"
@@ -326,30 +350,145 @@ jobs:
         echo "AMI update completed at \$(date)"
         EOF
         
-        # Get available VPC and subnet
-        echo "🔍 Finding available VPC and subnet..."
+        # Get VPC and subnet with specific preference
+        echo "🔍 Finding VPC and subnet (preferred: viral-comm-api-proxy-vpc-dev)..."
+        
+        # Try to find the specific VPC first
+        PREFERRED_VPC_NAME="viral-comm-api-viral-community-stack-dev/viral-comm-api-common-networking-dev/viral-comm-api-proxy-vpc-dev"
+        PREFERRED_SUBNET_NAME="*vpc-proxy-subnetSubnet1*"
+        PREFERRED_SUBNET_LOGICAL_ID="vpc-proxy-subnetSubnet1"
+        
+        echo "🎯 Looking for preferred VPC: $PREFERRED_VPC_NAME"
+        
+        # Try to find VPC by Name tag (CDK-managed resources usually have Name tags)
         VPC_ID=$(aws ec2 describe-vpcs \
-          --filters "Name=is-default,Values=true" \
+          --filters "Name=tag:Name,Values=$PREFERRED_VPC_NAME" \
           --query 'Vpcs[0].VpcId' \
           --output text \
           --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
         
+        # Also try shorter name patterns in case the full path isn't used
         if [[ -z "$VPC_ID" || "$VPC_ID" == "None" ]]; then
-          echo "No default VPC found, using any available VPC..."
+          echo "🔍 Trying shorter VPC name pattern: *proxy-vpc-dev"
+          VPC_ID=$(aws ec2 describe-vpcs \
+            --filters "Name=tag:Name,Values=*proxy-vpc-dev" \
+            --query 'Vpcs[0].VpcId' \
+            --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+        fi
+        
+        # Fallback to default VPC
+        if [[ -z "$VPC_ID" || "$VPC_ID" == "None" ]]; then
+          echo "⚠️ Preferred VPC not found, trying default VPC..."
+          VPC_ID=$(aws ec2 describe-vpcs \
+            --filters "Name=is-default,Values=true" \
+            --query 'Vpcs[0].VpcId' \
+            --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+        fi
+        
+        # Final fallback to any available VPC
+        if [[ -z "$VPC_ID" || "$VPC_ID" == "None" ]]; then
+          echo "⚠️ No default VPC found, using any available VPC..."
           VPC_ID=$(aws ec2 describe-vpcs \
             --query 'Vpcs[0].VpcId' \
             --output text \
             --region ${{ env.AWS_REGION }})
         fi
         
-        SUBNET_ID=$(aws ec2 describe-subnets \
-          --filters "Name=vpc-id,Values=${VPC_ID}" \
-          --query 'Subnets[0].SubnetId' \
-          --output text \
-          --region ${{ env.AWS_REGION }})
+        echo "✅ Selected VPC: $VPC_ID"
         
-        echo "Using VPC: $VPC_ID"
-        echo "Using Subnet: $SUBNET_ID"
+        # Now find the subnet - try preferred subnet first
+        if [[ "$VPC_ID" != "None" && -n "$VPC_ID" ]]; then
+          echo "🎯 Looking for preferred subnet: vpc-proxy-subnetSubnet1"
+          
+          SUBNET_ID=$(aws ec2 describe-subnets \
+            --filters "Name=vpc-id,Values=${VPC_ID}" "Name=tag:Name,Values=$PREFERRED_SUBNET_NAME" \
+            --query 'Subnets[0].SubnetId' \
+            --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+          
+          # Try CDK logical ID pattern
+          if [[ -z "$SUBNET_ID" || "$SUBNET_ID" == "None" ]]; then
+            echo "🔍 Trying CDK logical ID pattern: *vpc-proxy-subnetSubnet1*"
+            SUBNET_ID=$(aws ec2 describe-subnets \
+              --filters "Name=vpc-id,Values=${VPC_ID}" "Name=tag:aws:cloudformation:logical-id,Values=*vpc-proxy-subnetSubnet1*" \
+              --query 'Subnets[0].SubnetId' \
+              --output text \
+              --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+          fi
+          
+          # Try looking for any SubnetSubnet1 pattern
+          if [[ -z "$SUBNET_ID" || "$SUBNET_ID" == "None" ]]; then
+            echo "🔍 Trying generic SubnetSubnet1 pattern: *SubnetSubnet1*"
+            SUBNET_ID=$(aws ec2 describe-subnets \
+              --filters "Name=vpc-id,Values=${VPC_ID}" "Name=tag:Name,Values=*SubnetSubnet1*" \
+              --query 'Subnets[0].SubnetId' \
+              --output text \
+              --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+          fi
+          
+          # Fallback to any public subnet in the VPC
+          if [[ -z "$SUBNET_ID" || "$SUBNET_ID" == "None" ]]; then
+            echo "⚠️ Preferred subnet not found, looking for any public subnet in VPC..."
+            SUBNET_ID=$(aws ec2 describe-subnets \
+              --filters "Name=vpc-id,Values=${VPC_ID}" "Name=map-public-ip-on-launch,Values=true" \
+              --query 'Subnets[0].SubnetId' \
+              --output text \
+              --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+          fi
+          
+          # Final fallback to any subnet in the VPC
+          if [[ -z "$SUBNET_ID" || "$SUBNET_ID" == "None" ]]; then
+            echo "⚠️ No public subnet found, using any available subnet in VPC..."
+            SUBNET_ID=$(aws ec2 describe-subnets \
+              --filters "Name=vpc-id,Values=${VPC_ID}" \
+              --query 'Subnets[0].SubnetId' \
+              --output text \
+              --region ${{ env.AWS_REGION }})
+          fi
+        fi
+        
+        echo "✅ Selected Subnet: $SUBNET_ID"
+        
+        # Verify we have valid VPC and subnet
+        if [[ -z "$VPC_ID" || "$VPC_ID" == "None" || -z "$SUBNET_ID" || "$SUBNET_ID" == "None" ]]; then
+          echo "❌ Could not find valid VPC and subnet combination"
+          echo "VPC_ID: $VPC_ID"
+          echo "SUBNET_ID: $SUBNET_ID"
+          exit 1
+        fi
+        
+        # Get VPC and subnet names for better logging
+        VPC_NAME=$(aws ec2 describe-vpcs \
+          --vpc-ids "$VPC_ID" \
+          --query 'Vpcs[0].Tags[?Key==`Name`].Value' \
+          --output text \
+          --region ${{ env.AWS_REGION }} 2>/dev/null || echo "No name tag")
+        
+        SUBNET_NAME=$(aws ec2 describe-subnets \
+          --subnet-ids "$SUBNET_ID" \
+          --query 'Subnets[0].Tags[?Key==`Name`].Value' \
+          --output text \
+          --region ${{ env.AWS_REGION }} 2>/dev/null || echo "No name tag")
+        
+        # Log what we're using with better details
+        echo "📋 Network Configuration Summary:"
+        echo "   VPC ID: $VPC_ID (Name: $VPC_NAME)"
+        echo "   Subnet ID: $SUBNET_ID (Name: $SUBNET_NAME)"
+        
+        # Check if we got our preferred resources
+        if [[ "$VPC_NAME" == *"viral-comm-api-proxy-vpc-dev"* ]]; then
+          echo "🎉 Successfully using preferred viral-comm-api VPC!"
+        else
+          echo "⚠️ Using fallback VPC - preferred VPC not found"
+        fi
+        
+        if [[ "$SUBNET_NAME" == *"vpc-proxy-subnetSubnet1"* ]]; then
+          echo "🎉 Successfully using preferred subnet!"
+        else
+          echo "⚠️ Using fallback subnet - preferred subnet not found"
+        fi
         
         # Create IAM role for EC2 instance to access S3
         echo "🔐 Creating IAM role for EC2 instance..."
@@ -410,6 +549,72 @@ jobs:
         sleep 15
         
         echo "✅ IAM role created: $ROLE_NAME"
+        
+        # Find security group - prefer CDK-managed security group from viral-comm-api stack
+        echo "🔒 Finding security group (preferred: viral-comm-api proxy security group)..."
+        
+        PREFERRED_SG_NAME="viral-comm-api-proxy-security-dev"
+        
+        # Try to find the CDK-managed security group first
+        SG_ID=$(aws ec2 describe-security-groups \
+          --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Name,Values=$PREFERRED_SG_NAME" \
+          --query 'SecurityGroups[0].GroupId' \
+          --output text \
+          --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+        
+        # Try shorter patterns for the security group
+        if [[ -z "$SG_ID" || "$SG_ID" == "None" ]]; then
+          echo "🔍 Trying shorter security group name pattern: *proxy-security*"
+          SG_ID=$(aws ec2 describe-security-groups \
+            --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Name,Values=*proxy-security*" \
+            --query 'SecurityGroups[0].GroupId' \
+            --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+        fi
+        
+        # Try group name instead of tag
+        if [[ -z "$SG_ID" || "$SG_ID" == "None" ]]; then
+          echo "🔍 Trying security group by group name: *proxy-security*"
+          SG_ID=$(aws ec2 describe-security-groups \
+            --filters "Name=vpc-id,Values=$VPC_ID" "Name=group-name,Values=*proxy-security*" \
+            --query 'SecurityGroups[0].GroupId' \
+            --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+        fi
+        
+        # Fallback to default security group
+        if [[ -z "$SG_ID" || "$SG_ID" == "None" ]]; then
+          echo "⚠️ Preferred security group not found, using default security group..."
+          SG_ID=$(aws ec2 describe-security-groups \
+            --filters "Name=vpc-id,Values=$VPC_ID" "Name=group-name,Values=default" \
+            --query 'SecurityGroups[0].GroupId' \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+        fi
+        
+        echo "✅ Selected Security Group: $SG_ID"
+        
+        # Log what security group we're using and its rules
+        SG_NAME=$(aws ec2 describe-security-groups \
+          --group-ids "$SG_ID" \
+          --query 'SecurityGroups[0].GroupName' \
+          --output text \
+          --region ${{ env.AWS_REGION }} 2>/dev/null || echo "unknown")
+        
+        if [[ "$SG_NAME" == *"proxy-security"* ]]; then
+          echo "🎉 Using viral-comm-api proxy security group with proper ComfyUI ports"
+        else
+          echo "⚠️ Using fallback security group: $SG_NAME"
+          echo "⚠️ Note: This may not have the required ports open for ComfyUI access"
+        fi
+        
+        # Display security group rules for debugging
+        echo "📋 Security Group Rules:"
+        aws ec2 describe-security-groups \
+          --group-ids "$SG_ID" \
+          --query 'SecurityGroups[0].IpPermissions[*].[IpProtocol,FromPort,ToPort,IpRanges[*].CidrIp]' \
+          --output table \
+          --region ${{ env.AWS_REGION }} 2>/dev/null || echo "Could not retrieve security group rules"
         
         # Launch instance with VPC configuration and IAM role
         INSTANCE_ID=$(aws ec2 run-instances \
@@ -913,18 +1118,46 @@ jobs:
         fi
         
         # If this was an update to an existing AMI, we need to deregister the old one first
+        # Also check for any existing AMI with the same name (regardless of AMI_TYPE)
+        EXISTING_AMI_WITH_NAME=$(aws ec2 describe-images \
+          --owners self \
+          --filters "Name=name,Values=$AMI_NAME" \
+          --query 'Images[0].ImageId' \
+          --output text \
+          --region ${{ env.AWS_REGION }} 2>/dev/null || echo "None")
+        
         if [ "$AMI_TYPE" = "existing" ]; then
           OLD_AMI_ID="${{ steps.base-ami.outputs.ami-id }}"
           echo "🗑️ Preparing to replace existing AMI: $OLD_AMI_ID"
-          
-          # Get the snapshots associated with the old AMI before deregistering
+        elif [ -n "$EXISTING_AMI_WITH_NAME" ] && [ "$EXISTING_AMI_WITH_NAME" != "None" ]; then
+          OLD_AMI_ID="$EXISTING_AMI_WITH_NAME"
+          echo "🗑️ Found existing AMI with same name, will replace: $OLD_AMI_ID"
+        else
+          OLD_AMI_ID=""
+          echo "🆕 Creating fresh AMI (no existing AMI found)"
+        fi
+        
+        # Get snapshots for cleanup if we have an old AMI to replace
+        if [ -n "$OLD_AMI_ID" ] && [ "$OLD_AMI_ID" != "None" ]; then
           OLD_SNAPSHOTS=$(aws ec2 describe-images \
             --image-ids $OLD_AMI_ID \
             --query 'Images[0].BlockDeviceMappings[*].Ebs.SnapshotId' \
             --output text \
             --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
           
+          echo "📋 Old AMI to replace: $OLD_AMI_ID"
           echo "📋 Old AMI snapshots to clean up: $OLD_SNAPSHOTS"
+          
+          # Deregister the old AMI BEFORE creating the new one to avoid name conflict
+          echo "🗑️ Deregistering old AMI to avoid name conflict..."
+          aws ec2 deregister-image --image-id $OLD_AMI_ID --region ${{ env.AWS_REGION }} || {
+            echo "⚠️ Failed to deregister old AMI, continuing anyway..."
+          }
+          
+          # Wait a moment for deregistration to propagate
+          sleep 5
+        else
+          OLD_SNAPSHOTS=""
         fi
         
         # Stop the instance before creating AMI
@@ -946,7 +1179,7 @@ jobs:
         echo "old-snapshots=${OLD_SNAPSHOTS:-}" >> $GITHUB_OUTPUT
         echo "✅ New AMI created: $NEW_AMI_ID"
         
-        if [ "$AMI_TYPE" = "existing" ]; then
+        if [ -n "$OLD_AMI_ID" ] && [ "$OLD_AMI_ID" != "None" ]; then
           echo "🔄 This replaces the previous AMI: $OLD_AMI_ID"
         else
           echo "🆕 This is a fresh AMI creation"
@@ -960,35 +1193,30 @@ jobs:
         aws ec2 wait image-available --image-ids $AMI_ID --region ${{ env.AWS_REGION }}
         echo "✅ AMI is available: $AMI_ID"
 
-    - name: Clean up old AMI
-      if: steps.create-ami.outputs.old-ami-id != ''
+    - name: Clean up old AMI snapshots
+      if: steps.create-ami.outputs.old-snapshots != ''
       run: |
-        OLD_AMI_ID="${{ steps.create-ami.outputs.old-ami-id }}"
         OLD_SNAPSHOTS="${{ steps.create-ami.outputs.old-snapshots }}"
         NEW_AMI_ID="${{ steps.create-ami.outputs.ami-id }}"
+        OLD_AMI_ID="${{ steps.create-ami.outputs.old-ami-id }}"
         
-        echo "🧹 Cleaning up old AMI now that new AMI is available..."
+        echo "🧹 Cleaning up old AMI snapshots now that new AMI is available..."
         echo "New AMI: $NEW_AMI_ID"
-        echo "Old AMI to remove: $OLD_AMI_ID"
+        echo "Old AMI (already deregistered): $OLD_AMI_ID"
         
-        if [ -n "$OLD_AMI_ID" ] && [ "$OLD_AMI_ID" != "None" ]; then
-          echo "🗑️ Deregistering old AMI: $OLD_AMI_ID"
-          aws ec2 deregister-image --image-id $OLD_AMI_ID --region ${{ env.AWS_REGION }} || echo "⚠️ Failed to deregister old AMI"
+        # Clean up old snapshots (AMI was already deregistered during creation)
+        if [ -n "$OLD_SNAPSHOTS" ] && [ "$OLD_SNAPSHOTS" != "None" ] && [ "$OLD_SNAPSHOTS" != "" ]; then
+          echo "🗑️ Cleaning up old snapshots: $OLD_SNAPSHOTS"
+          for SNAPSHOT in $OLD_SNAPSHOTS; do
+            if [ "$SNAPSHOT" != "None" ] && [ -n "$SNAPSHOT" ]; then
+              echo "🗑️ Deleting snapshot: $SNAPSHOT"
+              aws ec2 delete-snapshot --snapshot-id $SNAPSHOT --region ${{ env.AWS_REGION }} || echo "⚠️ Failed to delete snapshot $SNAPSHOT"
+            fi
+          done
           
-          # Clean up old snapshots
-          if [ -n "$OLD_SNAPSHOTS" ] && [ "$OLD_SNAPSHOTS" != "None" ] && [ "$OLD_SNAPSHOTS" != "" ]; then
-            echo "🗑️ Cleaning up old snapshots: $OLD_SNAPSHOTS"
-            for SNAPSHOT in $OLD_SNAPSHOTS; do
-              if [ "$SNAPSHOT" != "None" ] && [ -n "$SNAPSHOT" ]; then
-                echo "🗑️ Deleting snapshot: $SNAPSHOT"
-                aws ec2 delete-snapshot --snapshot-id $SNAPSHOT --region ${{ env.AWS_REGION }} || echo "⚠️ Failed to delete snapshot $SNAPSHOT"
-              fi
-            done
-          fi
-          
-          echo "✅ Old AMI and snapshots cleaned up successfully"
+          echo "✅ Old AMI snapshots cleaned up successfully"
         else
-          echo "ℹ️ No old AMI to clean up"
+          echo "ℹ️ No old snapshots to clean up"
         fi
 
     - name: Store AMI details in SSM Parameter Store
