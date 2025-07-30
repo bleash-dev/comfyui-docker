@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Simplified and Robust AMI Preparation Script for Multi-Tenant ComfyUI
-# Version 3 - Corrected APT configuration
+# Version 4 - With package-by-package installation for debugging
 #
 
 # Exit immediately if a command exits with a non-zero status.
@@ -52,9 +52,8 @@ checkpoint "PACKAGE_MANAGEMENT_READY"
 
 
 # --- 3. INSTALL ALL DEPENDENCIES ---
-echo "🧩 Installing all required packages..."
+echo "🧩 Installing all required packages one by one for debugging..."
 
-# Combine all packages into one list for a single, efficient install command
 PACKAGES=(
     "ca-certificates"
     "curl"
@@ -68,10 +67,14 @@ PACKAGES=(
     "tree"
     "vim"
     "git"
-    "awscli" # Explicitly install awscli for clarity
+    "awscli"
 )
-apt-get install -y --no-install-recommends "${PACKAGES[@]}"
+for package in "${PACKAGES[@]}"; do
+    echo ">>> Installing package: $package"
+    apt-get install -y --no-install-recommends "$package"
+done
 checkpoint "BASE_PACKAGES_INSTALLED"
+
 
 # Install CloudWatch Agent separately via its .deb package
 echo "📦 Installing CloudWatch Agent..."
