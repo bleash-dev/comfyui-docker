@@ -1,57 +1,45 @@
 #!/bin/bash
-# CloudWatch setup for multi-tenant ComfyUI logging
+#
+# CloudWatch Setup Script
+#
+# This script configures and starts the CloudWatch agent.
+# It ASSUMES the following are already installed:
+#   - amazon-cloudwatch-agent package
+#   - awscli package
+# It also ASSUMES it's running on an EC2 instance with an IAM role.
+#
 
-echo "🔧 Setting up CloudWatch logging configuration..."
+# Exit immediately if a command fails
+set -e
 
-# Check if we should skip installation (--config-only flag)
-CONFIG_ONLY=false
-if [[ "$1" == "--config-only" ]]; then
-    CONFIG_ONLY=true
-    echo "📝 Configuration-only mode - skipping package installation"
+echo "🔧 [CW] Starting CloudWatch agent configuration."
+
+# --- Prerequisite Checks (optional but highly recommended) ---
+if ! command -v /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl &> /dev/null; then
+    echo "❌ [CW] CRITICAL: CloudWatch agent command not found. Please install the agent first."
+    exit 1
 fi
-
-# Install CloudWatch agent (only if not in config-only mode)
-if [ "$CONFIG_ONLY" = "false" ]; then
-    if ! command -v /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl &> /dev/null; then
-        echo "📦 Installing CloudWatch agent..."
-        
-        # Download and install CloudWatch agent
-        wget -q https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
-        dpkg -i -E amazon-cloudwatch-agent.deb
-        rm -f amazon-cloudwatch-agent.deb
-        
-        echo "✅ CloudWatch agent installed"
-    else
-        echo "✅ CloudWatch agent already installed"
-    fi
-else
-    # In config-only mode, just check if it's available
-    if command -v /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl &> /dev/null; then
-        echo "✅ CloudWatch agent found - proceeding with configuration"
-    else
-        echo "⚠️ CloudWatch agent not found - configuration will be applied when agent is installed"
-    fi
+if ! command -v aws &> /dev/null; then
+    echo "❌ [CW] CRITICAL: AWS CLI not found. Please install it first."
+    exit 1
 fi
+# --- End of Checks ---
 
-# Create CloudWatch agent configuration
-echo "📝 Creating CloudWatch agent configuration..."
 
-# Create the configuration directory if it doesn't exist or if agent is available
-if [ "$CONFIG_ONLY" = "false" ] || [ -d "/opt/aws/amazon-cloudwatch-agent" ]; then
-    # Create directory structure if needed
-    mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
-    CONFIG_PATH="/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json"
-else
-    # If in config-only mode and agent directory doesn't exist, create temp config
-    echo "⚠️ CloudWatch agent directory not found - creating temporary configuration"
-    mkdir -p /tmp/cloudwatch-config
-    CONFIG_PATH="/tmp/cloudwatch-config/amazon-cloudwatch-agent.json"
-fi
+# Define paths and get region
+CONFIG_DIR="/opt/aws/amazon-cloudwatch-agent/etc"
+CONFIG_FILE="$CONFIG_DIR/amazon-cloudwatch-agent.json"
+SCRIPTS_DIR="/scripts" # Define a single location for helper scripts
+REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
 
-cat > "$CONFIG_PATH" << 'EOF'
+# Ensure directories exist
+mkdir -p "$CONFIG_DIR"
+mkdir -p "$SCRIPTS_DIR"
+
+echo "📝 [CW] Creating agent configuration at $CONFIG_FILE"
+cat > "$CONFIG_FILE" << 'EOF'
 {
     "agent": {
-        "metrics_collection_interval": 60,
         "run_as_user": "root"
     },
     "logs": {
@@ -61,334 +49,85 @@ cat > "$CONFIG_PATH" << 'EOF'
                     {
                         "file_path": "/var/log/ami-preparation.log",
                         "log_group_name": "/aws/ec2/comfyui/ami-preparation",
-                        "log_stream_name": "{instance_id}-ami-prep",
-                        "timestamp_format": "%Y-%m-%d %H:%M:%S"
+                        "log_stream_name": "{instance_id}-ami-prep"
                     },
                     {
-                        "file_path": "/var/log/user-data.log",
+                        "file_path": "/var/log/cloud-init-output.log",
                         "log_group_name": "/aws/ec2/comfyui/user-data",
-                        "log_stream_name": "{instance_id}-user-data",
-                        "timestamp_format": "%Y-%m-%d %H:%M:%S"
-                    },
-                    {
-                        "file_path": "/var/log/tenant_manager.log",
-                        "log_group_name": "/aws/ec2/comfyui/tenant-manager",
-                        "log_stream_name": "{instance_id}-tenant-manager",
-                        "timestamp_format": "%Y-%m-%d %H:%M:%S"
+                        "log_stream_name": "{instance_id}-user-data"
                     },
                     {
                         "file_path": "/var/log/docker.log",
                         "log_group_name": "/aws/ec2/comfyui/docker",
-                        "log_stream_name": "{instance_id}-docker",
-                        "timestamp_format": "%Y-%m-%d %H:%M:%S"
+                        "log_stream_name": "{instance_id}-docker"
+                    },
+                    {
+                        "file_path": "/var/log/comfyui/*.log",
+                        "log_group_name": "/aws/ec2/comfyui/tenant-manager",
+                        "log_stream_name": "{instance_id}-tenant-manager"
                     }
                 ]
             }
         }
-    },
-    "metrics": {
-        "namespace": "ComfyUI/MultiTenant",
-        "metrics_collected": {
-            "cpu": {
-                "measurement": [
-                    "cpu_usage_idle",
-                    "cpu_usage_iowait",
-                    "cpu_usage_user",
-                    "cpu_usage_system"
-                ],
-                "metrics_collection_interval": 60,
-                "totalcpu": false
-            },
-            "disk": {
-                "measurement": [
-                    "used_percent"
-                ],
-                "metrics_collection_interval": 60,
-                "resources": [
-                    "*"
-                ]
-            },
-            "diskio": {
-                "measurement": [
-                    "io_time",
-                    "read_bytes",
-                    "write_bytes",
-                    "reads",
-                    "writes"
-                ],
-                "metrics_collection_interval": 60,
-                "resources": [
-                    "*"
-                ]
-            },
-            "mem": {
-                "measurement": [
-                    "mem_used_percent"
-                ],
-                "metrics_collection_interval": 60
-            },
-            "netstat": {
-                "measurement": [
-                    "tcp_established",
-                    "tcp_time_wait"
-                ],
-                "metrics_collection_interval": 60
-            },
-            "swap": {
-                "measurement": [
-                    "swap_used_percent"
-                ],
-                "metrics_collection_interval": 60
-            }
-        }
     }
 }
 EOF
+echo "✅ [CW] Agent configuration created."
 
-if [ $? -eq 0 ]; then
-    echo "✅ CloudWatch agent configuration created at $CONFIG_PATH"
-    
-    # If we created a temp config, set up a mechanism to copy it later
-    if [[ "$CONFIG_PATH" == "/tmp/cloudwatch-config/"* ]]; then
-        echo "💡 Temporary configuration created - will be applied when agent is installed"
-        echo "#!/bin/bash" > /tmp/apply_cloudwatch_config.sh
-        echo "if [ -d '/opt/aws/amazon-cloudwatch-agent/etc' ]; then" >> /tmp/apply_cloudwatch_config.sh
-        echo "  cp /tmp/cloudwatch-config/amazon-cloudwatch-agent.json /opt/aws/amazon-cloudwatch-agent/etc/" >> /tmp/apply_cloudwatch_config.sh
-        echo "  echo 'CloudWatch configuration applied'" >> /tmp/apply_cloudwatch_config.sh
-        echo "fi" >> /tmp/apply_cloudwatch_config.sh
-        chmod +x /tmp/apply_cloudwatch_config.sh
-    fi
-else
-    echo "❌ Failed to create CloudWatch agent configuration"
-    if [ "$CONFIG_ONLY" = "true" ]; then
-        echo "⚠️ Will retry when CloudWatch agent is installed"
-    else
-        return 1
-    fi
-fi
-
-# Create systemd service for CloudWatch agent
-echo "📝 Creating CloudWatch agent systemd service..."
-cat > /etc/systemd/system/amazon-cloudwatch-agent.service << 'EOF'
-[Unit]
-Description=Amazon CloudWatch Agent
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent -c /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
-Restart=always
-RestartSec=10
-User=root
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Enable and start the service
-systemctl daemon-reload
-systemctl enable amazon-cloudwatch-agent
-echo "✅ CloudWatch agent service configured"
-
-# Create CloudWatch log groups
-echo "🔧 Creating CloudWatch log groups..."
-REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "us-east-1")
-
-# List of log groups to create
+echo "🔧 [CW] Creating required log groups..."
 LOG_GROUPS=(
     "/aws/ec2/comfyui/ami-preparation"
     "/aws/ec2/comfyui/user-data"
-    "/aws/ec2/comfyui/tenant-manager"
     "/aws/ec2/comfyui/docker"
-)
-
-for LOG_GROUP in "${LOG_GROUPS[@]}"; do
-    echo "📝 Creating log group: $LOG_GROUP"
-    aws logs create-log-group \
-        --log-group-name "$LOG_GROUP" \
-        --region "$REGION" 2>/dev/null || {
-        echo "⚠️ Log group $LOG_GROUP may already exist"
-    }
-    
-    # Set retention policy (30 days for AMI prep, 7 days for others)
-    if [[ "$LOG_GROUP" == *"ami-preparation"* ]]; then
-        RETENTION_DAYS=30
-    else
-        RETENTION_DAYS=7
-    fi
-    
-    aws logs put-retention-policy \
-        --log-group-name "$LOG_GROUP" \
-        --retention-in-days "$RETENTION_DAYS" \
-        --region "$REGION" 2>/dev/null || {
-        echo "⚠️ Could not set retention policy for $LOG_GROUP"
-    }
-done
-
-echo "✅ CloudWatch log groups created"
-
-# Start the CloudWatch agent immediately
-echo "🚀 Starting CloudWatch agent..."
-systemctl start amazon-cloudwatch-agent || {
-    echo "⚠️ CloudWatch agent failed to start, will retry later"
-}
-
-# Create log groups creation script
-echo "📝 Creating log groups setup script..."
-cat > /scripts/setup_cloudwatch_log_groups.sh << 'EOF'
-#!/bin/bash
-# Create CloudWatch log groups
-
-echo "🔧 Setting up CloudWatch log groups..."
-
-# Get instance region
-REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
-
-# Create log groups
-LOG_GROUPS=(
     "/aws/ec2/comfyui/tenant-manager"
+    # Add pod-specific groups here too so they are ready
     "/aws/ec2/comfyui/tenant-startup"
     "/aws/ec2/comfyui/tenant-runtime"
     "/aws/ec2/comfyui/tenant-user-scripts"
 )
 
-for log_group in "${LOG_GROUPS[@]}"; do
-    echo "Creating log group: $log_group"
-    aws logs create-log-group --log-group-name "$log_group" --region "$REGION" 2>/dev/null || echo "Log group $log_group already exists"
-    
-    # Set retention policy (30 days)
-    aws logs put-retention-policy --log-group-name "$log_group" --retention-in-days 30 --region "$REGION" 2>/dev/null || echo "Could not set retention for $log_group"
+for group in "${LOG_GROUPS[@]}"; do
+    echo "   - Ensuring log group '$group' exists..."
+    aws logs create-log-group --log-group-name "$group" --region "$REGION" || true
 done
+echo "✅ [CW] Log groups are ready."
 
-echo "✅ CloudWatch log groups setup completed"
-EOF
+echo "🚀 [CW] Applying configuration and starting agent..."
+# This command validates the config, applies it, and starts/restarts the service.
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:"$CONFIG_FILE" -s
 
-chmod +x /scripts/setup_cloudwatch_log_groups.sh
+echo "✅ [CW] CloudWatch agent is configured and running."
 
-# Create dynamic CloudWatch configuration update script for per-pod logging
-echo "📝 Creating dynamic CloudWatch pod configuration script..."
-cat > /scripts/setup_pod_cloudwatch.sh << 'EOF'
+
+# ---- Create the helper script for dynamic pod logging ----
+# This script will be called later by your application logic.
+echo "📝 [CW] Creating pod log setup helper at $SCRIPTS_DIR/setup_pod_cloudwatch.sh"
+cat > "$SCRIPTS_DIR/setup_pod_cloudwatch.sh" << 'EOF'
 #!/bin/bash
-# Setup CloudWatch logging for a specific pod
-
-if [ -z "$1" ]; then
-    echo "Usage: $0 <POD_ID>"
-    exit 1
-fi
-
+set -e
+if [ -z "$1" ]; then echo "Usage: $0 <POD_ID>"; exit 1; fi
 POD_ID="$1"
-WORKSPACE_DIR="/workspace/$POD_ID"
-REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
 INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
 
-echo "🔧 Setting up CloudWatch logging for pod: $POD_ID"
-
-# Create pod-specific log configuration
-cat > "/tmp/cloudwatch-pod-$POD_ID.json" << EOFCONFIG
-{
-    "logs": {
-        "logs_collected": {
-            "files": {
-                "collect_list": [
-                    {
-                        "file_path": "$WORKSPACE_DIR/logs/startup.log",
-                        "log_group_name": "/aws/ec2/comfyui/tenant-startup",
-                        "log_stream_name": "$INSTANCE_ID-$POD_ID-startup",
-                        "timestamp_format": "%Y-%m-%d %H:%M:%S"
-                    },
-                    {
-                        "file_path": "$WORKSPACE_DIR/logs/comfyui.log",
-                        "log_group_name": "/aws/ec2/comfyui/tenant-runtime",
-                        "log_stream_name": "$INSTANCE_ID-$POD_ID-runtime",
-                        "timestamp_format": "%Y-%m-%d %H:%M:%S"
-                    },
-                    {
-                        "file_path": "$WORKSPACE_DIR/logs/user-script.log",
-                        "log_group_name": "/aws/ec2/comfyui/tenant-user-scripts",
-                        "log_stream_name": "$INSTANCE_ID-$POD_ID-user-scripts",
-                        "timestamp_format": "%Y-%m-%d %H:%M:%S"
-                    }
-                ]
+echo "  -> Appending config for pod $POD_ID"
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+    -a append-config -m ec2 -s \
+    -c 'text:{
+        "logs": {
+            "logs_collected": {
+                "files": {
+                    "collect_list": [
+                        {"file_path": "/workspace/'"$POD_ID"'/logs/startup.log", "log_group_name": "/aws/ec2/comfyui/tenant-startup", "log_stream_name": "'"$INSTANCE_ID"'-'"$POD_ID"'-startup"},
+                        {"file_path": "/workspace/'"$POD_ID"'/logs/runtime.log", "log_group_name": "/aws/ec2/comfyui/tenant-runtime", "log_stream_name": "'"$INSTANCE_ID"'-'"$POD_ID"'-runtime"},
+                        {"file_path": "/workspace/'"$POD_ID"'/logs/user-scripts.log", "log_group_name": "/aws/ec2/comfyui/tenant-user-scripts", "log_stream_name": "'"$INSTANCE_ID"'-'"$POD_ID"'-user-scripts"}
+                    ]
+                }
             }
         }
-    }
-}
-EOFCONFIG
-
-# Use AWS CLI to send logs directly (alternative approach)
-# This ensures pod-specific log streams are created
-mkdir -p "$WORKSPACE_DIR/logs"
-
-# Setup log streaming using AWS CLI for this specific pod
-echo "📝 Creating log streams for pod $POD_ID..."
-
-LOG_STREAMS=(
-    "/aws/ec2/comfyui/tenant-startup:$INSTANCE_ID-$POD_ID-startup"
-    "/aws/ec2/comfyui/tenant-runtime:$INSTANCE_ID-$POD_ID-runtime"
-    "/aws/ec2/comfyui/tenant-user-scripts:$INSTANCE_ID-$POD_ID-user-scripts"
-)
-
-for stream_info in "${LOG_STREAMS[@]}"; do
-    log_group=$(echo "$stream_info" | cut -d':' -f1)
-    log_stream=$(echo "$stream_info" | cut -d':' -f2)
-    
-    echo "Creating log stream: $log_stream in group: $log_group"
-    aws logs create-log-stream \
-        --log-group-name "$log_group" \
-        --log-stream-name "$log_stream" \
-        --region "$REGION" 2>/dev/null || echo "Log stream $log_stream already exists"
-done
-
-echo "✅ CloudWatch logging configured for pod: $POD_ID"
-echo "📍 Log streams created:"
-echo "  - Startup: $INSTANCE_ID-$POD_ID-startup"
-echo "  - Runtime: $INSTANCE_ID-$POD_ID-runtime"
-echo "  - User Scripts: $INSTANCE_ID-$POD_ID-user-scripts"
-
-# Cleanup temp config
-rm -f "/tmp/cloudwatch-pod-$POD_ID.json"
+    }'
+echo "  -> CloudWatch config updated for pod $POD_ID"
 EOF
+chmod +x "$SCRIPTS_DIR/setup_pod_cloudwatch.sh"
+echo "✅ [CW] Helper script created."
 
-chmod +x /scripts/setup_pod_cloudwatch.sh
-
-# Create log streaming helper script for pods
-echo "📝 Creating log streaming helper script..."
-cat > /scripts/stream_pod_logs.sh << 'EOF'
-#!/bin/bash
-# Stream logs from a pod to CloudWatch
-
-if [ -z "$1" ] || [ -z "$2" ] || [ -z "$3" ]; then
-    echo "Usage: $0 <POD_ID> <LOG_TYPE> <LOG_FILE>"
-    echo "LOG_TYPE: startup|runtime|user-scripts"
-    exit 1
-fi
-
-POD_ID="$1"
-LOG_TYPE="$2"
-LOG_FILE="$3"
-
-REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
-INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
-
-LOG_GROUP="/aws/ec2/comfyui/tenant-$LOG_TYPE"
-LOG_STREAM="$INSTANCE_ID-$POD_ID-$LOG_TYPE"
-
-if [ -f "$LOG_FILE" ]; then
-    echo "📤 Streaming $LOG_FILE to CloudWatch..."
-    aws logs put-log-events \
-        --log-group-name "$LOG_GROUP" \
-        --log-stream-name "$LOG_STREAM" \
-        --log-events timestamp=$(date +%s000),message="$(cat "$LOG_FILE")" \
-        --region "$REGION"
-else
-    echo "⚠️ Log file not found: $LOG_FILE"
-fi
-EOF
-
-chmod +x /scripts/stream_pod_logs.sh
-
-echo "✅ CloudWatch logging setup completed"
-echo "💡 Note: CloudWatch agent will start automatically when the system boots"
-echo "💡 To manually start: systemctl start amazon-cloudwatch-agent"
-echo "💡 Pod-specific logging: Use /scripts/setup_pod_cloudwatch.sh <POD_ID>"
-echo "💡 Expected log structure: /workspace/<POD_ID>/logs/"
+echo "✅ [CW] Full setup complete."
