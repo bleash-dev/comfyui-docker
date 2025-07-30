@@ -119,38 +119,47 @@ echo "  - Available memory: $(free -h | grep 'Mem:' | awk '{print $7}')"
 echo "  - Network connectivity: $(curl -s --max-time 5 http://google.com >/dev/null && echo 'OK' || echo 'FAILED')"
 
 if ! command -v docker &> /dev/null; then
-    echo "🐳 Docker not found, installing Docker using APT..."
+    echo "🐳 Docker not found, installing Docker with timeout protection..."
     
-    # Install Docker from Ubuntu repository (more reliable than script)
-    echo "📦 Installing Docker from Ubuntu repository..."
+    # Simple, reliable Docker installation with timeouts
+    echo "📦 Installing Docker from Ubuntu repository with timeout..."
     
-    # Update package lists first
-    apt-get update -y
+    # Method 1: Try docker.io from Ubuntu repo (fastest)
+    echo "📦 Attempting docker.io installation..."
+    apt-get install -y --no-install-recommends docker.io 2>&1 | tee /tmp/docker_install.log
+    DOCKER_INSTALL_EXIT_CODE=$?
     
-    # Install Docker.io from Ubuntu repository (simpler and more reliable)
-    echo "📦 Installing docker.io package..."
-    apt-get install -y --no-install-recommends docker.io docker-compose-plugin || {
-        echo "❌ Failed to install docker.io package"
-        echo "🔍 Trying alternative installation method..."
+    if [ $DOCKER_INSTALL_EXIT_CODE -ne 0 ]; then
+        echo "❌ docker.io installation failed (exit code: $DOCKER_INSTALL_EXIT_CODE)"
+        echo "🔍 Installation log:"
+        tail -20 /tmp/docker_install.log 2>/dev/null || echo "No installation log available"
         
-        # Fallback: Try installing docker-ce manually
-        echo "📦 Adding Docker GPG key..."
-        mkdir -p /etc/apt/keyrings
-        curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-        chmod a+r /etc/apt/keyrings/docker.asc
-        
-        echo "📦 Adding Docker repository..."
-        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
-        
-        echo "� Updating package lists..."
-        apt-get update -y
-        
-        echo "� Installing Docker CE..."
-        apt-get install -y docker-ce docker-ce-cli containerd.io || {
-            echo "❌ Failed to install Docker via both methods"
+        # Method 2: Try installing via Docker convenience script with timeout
+        echo "📦 Trying Docker convenience script..."
+        curl -fsSL https://get.docker.com -o /tmp/get-docker.sh || {
+            echo "❌ Failed to download Docker script"
             exit 1
         }
-    }
+        
+        echo "🔧 Running Docker installation script with timeout..."
+        timeout 600 sh /tmp/get-docker.sh 2>&1 | tee /tmp/docker_script.log
+        SCRIPT_EXIT_CODE=$?
+        
+        if [ $SCRIPT_EXIT_CODE -ne 0 ]; then
+            echo "❌ Docker script installation failed (exit code: $SCRIPT_EXIT_CODE)"
+            echo "🔍 Script log:"
+            tail -20 /tmp/docker_script.log 2>/dev/null || echo "No script log available"
+            exit 1
+        fi
+        
+        rm -f /tmp/get-docker.sh
+        echo "✅ Docker installed via convenience script"
+    else
+        echo "✅ Docker installed via apt"
+    fi
+    
+    # Clean up installation logs
+    rm -f /tmp/docker_install.log /tmp/docker_script.log
     
     echo "🔍 Verifying Docker was installed..."
     if ! command -v docker &> /dev/null; then
@@ -176,23 +185,31 @@ if ! command -v docker &> /dev/null; then
         echo "✅ Added ubuntu user to docker group"
     fi
     
+    checkpoint "DOCKER_PACKAGE_INSTALLED"
+    
     # Enable Docker service
     echo "🔧 Enabling Docker service..."
     systemctl enable docker || {
         echo "❌ Failed to enable Docker service"
+        systemctl status docker --no-pager || echo "No Docker service status available"
         exit 1
     }
     
-    # Start Docker service
+    # Start Docker service with debugging
     echo "🚀 Starting Docker service..."
     systemctl start docker || {
         echo "❌ Failed to start Docker service"
+        echo "🔍 Docker service status:"
         systemctl status docker --no-pager -l
+        echo "🔍 Docker service logs:"
+        journalctl -u docker.service --no-pager -l --since "1 minute ago" || echo "No Docker service logs available"
         exit 1
     }
     
-    echo "🔍 Checking Docker service status..."
+    echo "🔍 Checking Docker service status after start..."
     systemctl status docker --no-pager -l || echo "Docker service status check completed"
+    
+    checkpoint "DOCKER_SERVICE_STARTED"
     
     # Wait for Docker to be fully ready with better error handling
     echo "⏳ Waiting for Docker to be ready..."
@@ -220,6 +237,23 @@ if ! command -v docker &> /dev/null; then
         echo "🔍 Docker daemon logs:"
         journalctl -u docker.service --no-pager -l --since "5 minutes ago" || echo "No recent Docker logs"
         exit 1
+    fi
+    
+    # Test Docker functionality with a simple command
+    echo "🧪 Testing Docker functionality..."
+    if timeout 30 docker run --rm hello-world >/dev/null 2>&1; then
+        echo "✅ Docker functionality test passed"
+    else
+        echo "⚠️ Docker functionality test failed, but continuing (hello-world image may not be available)"
+        # Test with a simpler docker command
+        if timeout 10 docker version >/dev/null 2>&1; then
+            echo "✅ Docker daemon is responding to commands"
+        else
+            echo "❌ Docker daemon is not responding to commands"
+            echo "🔍 Docker daemon status:"
+            systemctl status docker --no-pager -l
+            exit 1
+        fi
     fi
     
     echo "✅ Docker installed and configured successfully"
