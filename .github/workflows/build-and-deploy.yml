@@ -467,7 +467,6 @@ jobs:
             if [[ "$RESULT" == *"NO_PROCESS_RUNNING"* ]]; then
               echo "⚠️ AMI preparation process is not running - may have failed"
               echo "🔍 Getting detailed logs for debugging..."
-              break
             fi
           fi
           
