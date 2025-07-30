@@ -84,25 +84,8 @@ echo 'DPkg::Options "--force-confdef";' >> "$APT_CONFIG_FILE"
 echo 'DPkg::Options "--force-confold";' >> "$APT_CONFIG_FILE"
 echo 'DPkg::Use-Pty "0";' >> "$APT_CONFIG_FILE"
 
-PACKAGES=(
-    "ca-certificates"
-    "curl"
-    "wget"
-    "gnupg"
-    "lsb-release"
-    "docker.io"
-    "jq"
-    "unzip"
-    "htop"
-    "tree"
-    "vim"
-    "git"
-    "awscli"
-)
-for package in "${PACKAGES[@]}"; do
-    echo ">>> Installing package: $package"
-    apt-get install -y --no-install-recommends "$package"
-done
+sudo apt-get install -y --no-install-recommends awscli git vim tree htop unzip jq docker.io lsb-release gnupg wget curl ca-certificates
+
 checkpoint "BASE_PACKAGES_INSTALLED"
 
 

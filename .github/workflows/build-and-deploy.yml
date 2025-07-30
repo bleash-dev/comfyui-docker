@@ -382,7 +382,12 @@ jobs:
               "  echo CURRENT_PROGRESS: UNKNOWN",
               "fi",
               "echo === Completion Check ===",
-              "test -f /tmp/ami_ready.txt && echo READY || echo NOT_READY",
+              "if [ -f /tmp/ami_ready.txt ]; then",
+              "  echo FILE_EXISTS: READY",
+              "  echo FILE_CONTENT: $(cat /tmp/ami_ready.txt)",
+              "else",
+              "  echo FILE_EXISTS: NOT_READY",
+              "fi",
               "echo === Process Check ===",
               "ps aux | grep prepare_ami.sh | grep -v grep || echo NO_PROCESS_RUNNING",
               "echo === Error Check ===",
@@ -452,8 +457,15 @@ jobs:
               exit 1
             fi
             
-            if [[ "$RESULT" == "READY" ]]; then
+            # Check for completion - either file exists (READY) or contains completion marker
+            if [[ "$RESULT" == *"FILE_EXISTS: READY"* ]] || [[ "$RESULT" == *"AMI_PREPARATION_COMPLETE"* ]]; then
               echo "✅ AMI preparation completed!"
+              if [[ "$RESULT" == *"FILE_EXISTS: READY"* ]]; then
+                echo "   → Detected completion file exists"
+              fi
+              if [[ "$RESULT" == *"AMI_PREPARATION_COMPLETE"* ]]; then
+                echo "   → Detected completion marker in file content"
+              fi
               break
             fi
             
