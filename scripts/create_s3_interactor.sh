@@ -11,40 +11,21 @@ echo "☁️ Creating centralized S3 interactor script..."
 cat > "$TARGET_DIR/s3_interactor.sh" << 'EOF'
 #!/bin/bash
 # Centralized S3 Interactor Script
-# Provides a consistent interface for S3 operations supporting both AWS S3 and Cloudflare R2
+# Provides a consistent interface for S3 operations with AWS S3
 
 # Configuration
 S3_INTERACTOR_LOG="$NETWORK_VOLUME/.s3_interactor.log"
 
 # Default S3 configuration (can be overridden by environment variables)
-S3_PROVIDER="${S3_PROVIDER:-aws}"  # "aws" or "cloudflare"
-S3_ENDPOINT_URL="${S3_ENDPOINT_URL:-}"  # Custom endpoint for R2 or S3-compatible services
+S3_PROVIDER="${S3_PROVIDER:-aws}"  # AWS S3 only
+S3_ENDPOINT_URL="${S3_ENDPOINT_URL:-}"  # Custom endpoint for S3-compatible services
 S3_BUCKET_NAME="${S3_BUCKET_NAME:-$AWS_BUCKET_NAME}"  # Fallback to AWS_BUCKET_NAME
 S3_REGION="${S3_REGION:-$AWS_REGION}"  # Fallback to AWS_REGION
 S3_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID:-$AWS_ACCESS_KEY_ID}"
 S3_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY:-$AWS_SECRET_ACCESS_KEY}"
 
-# Models Staging Bucket Configuration (AWS S3 for fast uploads)
-# Note: When configured, ALL uploads go to staging bucket for speed
-MODELS_STAGING_BUCKET_NAME="${MODELS_STAGING_BUCKET_NAME:-}"
-MODELS_STAGING_REGION="${MODELS_STAGING_REGION:-us-east-1}"
-MODELS_STAGING_ACCESS_KEY_ID="${MODELS_STAGING_ACCESS_KEY_ID:-}"
-MODELS_STAGING_SECRET_ACCESS_KEY="${MODELS_STAGING_SECRET_ACCESS_KEY:-}"
-
 # Provider-specific configuration
 case "$S3_PROVIDER" in
-    "cloudflare")
-        # Cloudflare R2 configuration
-        if [ -z "$S3_ENDPOINT_URL" ]; then
-            # Format: https://<account-id>.r2.cloudflarestorage.com
-            S3_ENDPOINT_URL="${CLOUDFLARE_R2_ENDPOINT:-}"
-            if [ -z "$S3_ENDPOINT_URL" ]; then
-                echo "ERROR: For Cloudflare R2, set CLOUDFLARE_R2_ENDPOINT or S3_ENDPOINT_URL"
-                exit 1
-            fi
-        fi
-        S3_CLI_PROVIDER_ARGS="--endpoint-url $S3_ENDPOINT_URL"
-        ;;
     "aws")
         # AWS S3 configuration (default)
         S3_CLI_PROVIDER_ARGS=""
@@ -53,7 +34,7 @@ case "$S3_PROVIDER" in
         fi
         ;;
     *)
-        echo "ERROR: Unsupported S3_PROVIDER: $S3_PROVIDER. Use 'aws' or 'cloudflare'"
+        echo "ERROR: Unsupported S3_PROVIDER: $S3_PROVIDER. Only 'aws' is supported"
         exit 1
         ;;
 esac
@@ -128,48 +109,6 @@ execute_aws_cli() {
     fi
 }
 
-# Function to execute AWS CLI with staging bucket credentials (for all uploads)
-execute_staging_aws_cli() {
-    local aws_cmd
-    aws_cmd=$(get_aws_cli_cmd)
-    
-    # Set environment variables for staging bucket
-    export AWS_ACCESS_KEY_ID="$MODELS_STAGING_ACCESS_KEY_ID"
-    export AWS_SECRET_ACCESS_KEY="$MODELS_STAGING_SECRET_ACCESS_KEY"
-    export AWS_DEFAULT_REGION="$MODELS_STAGING_REGION"
-    
-    # Always use standard AWS S3 for staging (no custom endpoint)
-    log_s3_activity "DEBUG" "Executing staging: $aws_cmd $*"
-    "$aws_cmd" "$@"
-}
-
-# Function to check if an S3 path contains models
-is_models_path() {
-    local s3_path="$1"
-    
-    # Check if path contains "models/" or "model" (case insensitive)
-    if echo "$s3_path" | grep -qi "models/"; then
-        return 0
-    fi
-    return 1
-}
-
-# Function to get staging bucket name for models
-get_staging_bucket_for_models() {
-    if [ -n "$MODELS_STAGING_BUCKET_NAME" ]; then
-        echo "$MODELS_STAGING_BUCKET_NAME"
-    else
-        echo "$S3_BUCKET_NAME"  # Fallback to regular bucket
-    fi
-}
-
-# Function to check if staging bucket is configured
-is_staging_configured() {
-    [ -n "$MODELS_STAGING_BUCKET_NAME" ] && \
-    [ -n "$MODELS_STAGING_ACCESS_KEY_ID" ] && \
-    [ -n "$MODELS_STAGING_SECRET_ACCESS_KEY" ]
-}
-
 # =============================================================================
 # S3 OPERATION FUNCTIONS
 # =============================================================================
@@ -199,36 +138,12 @@ s3_copy_to() {
         return 1
     fi
     
-    # Check if staging is configured - if so, ALL uploads go to staging
-    if is_staging_configured; then
-        log_s3_activity "INFO" "Upload detected - using staging bucket for fast upload: $source_path -> $s3_destination"
-        
-        # Parse original destination to get the key
-        local bucket key
-        if parse_s3_uri "$s3_destination" bucket key; then
-            # Create staging destination with staging bucket
-            local staging_destination="s3://$MODELS_STAGING_BUCKET_NAME/$key"
-            log_s3_activity "INFO" "Staging upload: $source_path -> $staging_destination"
-            
-            # Upload to staging bucket using staging credentials
-            if [ -n "$options" ]; then
-                execute_staging_aws_cli s3 cp "$source_path" "$staging_destination" $options
-            else
-                execute_staging_aws_cli s3 cp "$source_path" "$staging_destination"
-            fi
-        else
-            log_s3_activity "ERROR" "Failed to parse S3 destination: $s3_destination"
-            return 1
-        fi
+    log_s3_activity "INFO" "Copying to S3: $source_path -> $s3_destination"
+    
+    if [ -n "$options" ]; then
+        execute_aws_cli s3 cp "$source_path" "$s3_destination" $options
     else
-        # No staging configured - upload directly to main bucket
-        log_s3_activity "INFO" "Copying to S3 (no staging): $source_path -> $s3_destination"
-        
-        if [ -n "$options" ]; then
-            execute_aws_cli s3 cp "$source_path" "$s3_destination" $options
-        else
-            execute_aws_cli s3 cp "$source_path" "$s3_destination"
-        fi
+        execute_aws_cli s3 cp "$source_path" "$s3_destination"
     fi
 }
 
@@ -241,32 +156,6 @@ s3_copy_from() {
     # Create destination directory if it doesn't exist
     mkdir -p "$(dirname "$destination_path")"
     
-    # For chunked downloads and cache files, try staging bucket first if configured
-    if is_staging_configured && (echo "$s3_source" | grep -q "/venv_chunks/" || echo "$s3_source" | grep -q "_cache\.tar\.gz"); then
-        local bucket key
-        if parse_s3_uri "$s3_source" bucket key; then
-            local staging_source="s3://$MODELS_STAGING_BUCKET_NAME/$key"
-            
-            log_s3_activity "INFO" "Attempting download from staging (venv chunks or cache): $staging_source -> $destination_path"
-            
-            # Try downloading from staging first
-            if [ -n "$options" ]; then
-                if execute_staging_aws_cli s3 cp "$staging_source" "$destination_path" $options 2>/dev/null; then
-                    log_s3_activity "INFO" "Successfully downloaded from staging bucket"
-                    return 0
-                fi
-            else
-                if execute_staging_aws_cli s3 cp "$staging_source" "$destination_path" 2>/dev/null; then
-                    log_s3_activity "INFO" "Successfully downloaded from staging bucket"
-                    return 0
-                fi
-            fi
-            
-            log_s3_activity "INFO" "Staging download failed, falling back to main bucket"
-        fi
-    fi
-    
-    # Standard download from main bucket
     log_s3_activity "INFO" "Copying from S3: $s3_source -> $destination_path"
     
     if [ -n "$options" ]; then
@@ -287,36 +176,12 @@ s3_sync_to() {
         return 1
     fi
     
-    # Check if staging is configured - if so, ALL syncs go to staging
-    if is_staging_configured; then
-        log_s3_activity "INFO" "Directory sync detected - using staging bucket for fast upload: $source_path -> $s3_destination"
-        
-        # Parse original destination to get the key
-        local bucket key
-        if parse_s3_uri "$s3_destination" bucket key; then
-            # Create staging destination with staging bucket
-            local staging_destination="s3://$MODELS_STAGING_BUCKET_NAME/$key"
-            log_s3_activity "INFO" "Staging sync: $source_path -> $staging_destination"
-            
-            # Sync to staging bucket using staging credentials
-            if [ -n "$options" ]; then
-                execute_staging_aws_cli s3 sync "$source_path" "$staging_destination" $options
-            else
-                execute_staging_aws_cli s3 sync "$source_path" "$staging_destination"
-            fi
-        else
-            log_s3_activity "ERROR" "Failed to parse S3 destination: $s3_destination"
-            return 1
-        fi
+    log_s3_activity "INFO" "Syncing to S3: $source_path -> $s3_destination"
+    
+    if [ -n "$options" ]; then
+        execute_aws_cli s3 sync "$source_path" "$s3_destination" $options
     else
-        # No staging configured - sync directly to main bucket
-        log_s3_activity "INFO" "Syncing to S3 (no staging): $source_path -> $s3_destination"
-        
-        if [ -n "$options" ]; then
-            execute_aws_cli s3 sync "$source_path" "$s3_destination" $options
-        else
-            execute_aws_cli s3 sync "$source_path" "$s3_destination"
-        fi
+        execute_aws_cli s3 sync "$source_path" "$s3_destination"
     fi
 }
 
@@ -449,12 +314,7 @@ s3_get_config() {
     "bucket": "$S3_BUCKET_NAME",
     "region": "$S3_REGION",
     "endpoint_url": "$S3_ENDPOINT_URL",
-    "provider_args": "$S3_CLI_PROVIDER_ARGS",
-    "staging": {
-        "configured": $(is_staging_configured && echo "true" || echo "false"),
-        "bucket": "$MODELS_STAGING_BUCKET_NAME",
-        "region": "$MODELS_STAGING_REGION"
-    }
+    "provider_args": "$S3_CLI_PROVIDER_ARGS"
 }
 CONFIG_EOF
 }
@@ -466,29 +326,19 @@ show_s3_usage() {
     echo "================================"
     echo ""
     echo "Configuration:"
-    echo "  export S3_PROVIDER=aws          # or 'cloudflare'"
+    echo "  export S3_PROVIDER=aws"
     echo "  export S3_BUCKET_NAME=my-bucket"
     echo "  export S3_REGION=us-east-1"
-    echo "  export S3_ENDPOINT_URL=https://account-id.r2.cloudflarestorage.com  # For R2"
-    echo ""
-    echo "Models Staging Configuration (for fast uploads):"
-    echo "  export MODELS_STAGING_BUCKET_NAME=my-staging-bucket"
-    echo "  export MODELS_STAGING_REGION=us-east-1"
-    echo "  export MODELS_STAGING_ACCESS_KEY_ID=staging-key"
-    echo "  export MODELS_STAGING_SECRET_ACCESS_KEY=staging-secret"
+    echo "  export S3_ENDPOINT_URL=https://custom-s3-endpoint.com  # For S3-compatible services (optional)"
     echo ""
     echo "Basic Operations:"
-    echo "  s3_copy_to /local/file.txt s3://bucket/path/file.txt        # Auto-staging if configured"
-    echo "  s3_copy_to /local/model.safetensors s3://bucket/models/model.safetensors  # Auto-staging"
-    echo "  s3_copy_from s3://bucket/path/file.txt /local/file.txt      # Direct from R2"
-    echo "  s3_sync_to /local/dir s3://bucket/path/                     # Auto-staging if configured"
-    echo "  s3_sync_from s3://bucket/path/ /local/dir                   # Direct from R2"
+    echo "  s3_copy_to /local/file.txt s3://bucket/path/file.txt"
+    echo "  s3_copy_to /local/model.safetensors s3://bucket/models/model.safetensors"
+    echo "  s3_copy_from s3://bucket/path/file.txt /local/file.txt"
+    echo "  s3_sync_to /local/dir s3://bucket/path/"
+    echo "  s3_sync_from s3://bucket/path/ /local/dir"
     echo "  s3_list s3://bucket/path/"
     echo "  s3_remove s3://bucket/path/file.txt"
-    echo ""
-    echo "Staging Operations:"
-    echo "  s3_get_staging_status                    # Check staging bucket status"
-    echo "  # Note: ALL uploads go to staging when configured (backend syncs to R2)"
     echo ""
     echo "Advanced Operations:"
     echo "  s3_object_exists s3://bucket/path/file.txt"
@@ -510,11 +360,7 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     esac
 else
     # Script is being sourced
-    if is_staging_configured; then
-        log_s3_activity "INFO" "S3 Interactor loaded (Provider: $S3_PROVIDER, Bucket: $S3_BUCKET_NAME, Staging: $MODELS_STAGING_BUCKET_NAME)"
-    else
-        log_s3_activity "INFO" "S3 Interactor loaded (Provider: $S3_PROVIDER, Bucket: $S3_BUCKET_NAME, Staging: Not configured)"
-    fi
+    log_s3_activity "INFO" "S3 Interactor loaded (Provider: $S3_PROVIDER, Bucket: $S3_BUCKET_NAME)"
 fi
 EOF
 
@@ -526,21 +372,11 @@ echo "📚 Usage:"
 echo "  Source the script: source \$NETWORK_VOLUME/scripts/s3_interactor.sh"
 echo "  Test connectivity: s3_test_connectivity"
 echo "  Get configuration: s3_get_config"
-echo "  Migrate to Cloudflare R2: s3_migrate_to_cloudflare 'your-account-id'"
 echo ""
 echo "🔧 Configuration Environment Variables:"
-echo "  S3_PROVIDER=aws|cloudflare"
-echo "  S3_ENDPOINT_URL=https://account-id.r2.cloudflarestorage.com"
+echo "  S3_PROVIDER=aws"
+echo "  S3_ENDPOINT_URL=https://custom-s3-endpoint.com  # For S3-compatible services (optional)"
 echo "  S3_BUCKET_NAME=your-bucket"
 echo "  S3_REGION=your-region"
 echo "  S3_ACCESS_KEY_ID=your-access-key"
 echo "  S3_SECRET_ACCESS_KEY=your-secret-key"
-echo ""
-echo "🚀 Staging Configuration (for fast uploads):"
-echo "  MODELS_STAGING_BUCKET_NAME=your-staging-bucket"
-echo "  MODELS_STAGING_REGION=us-east-1"
-echo "  MODELS_STAGING_ACCESS_KEY_ID=your-staging-key"
-echo "  MODELS_STAGING_SECRET_ACCESS_KEY=your-staging-secret"
-echo "  # When configured, ALL uploads go to staging bucket for speed"
-echo "  # Backend automatically moves everything from staging to R2"
-echo "  # Downloads come directly from R2 for speed"

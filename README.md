@@ -98,7 +98,52 @@ The sync system will automatically detect and manage all venvs in the `/venv/` d
 - **ComfyUI Web Interface**: Port 3000
 - **JupyterLab**: Port 8888
 
-## 🤝 Contributing
+## � Connectivity Testing
+
+Having connectivity issues with your ComfyUI instances? Use the built-in testing tools:
+
+### Quick Test Instance
+```bash
+# Launch a test instance to verify network configuration
+./scripts/test_instance.sh launch my-test
+
+# Check status and get connection details
+./scripts/test_instance.sh status my-test
+./scripts/test_instance.sh connect my-test
+
+# Clean up when done
+./scripts/test_instance.sh stop my-test
+```
+
+### Connectivity Diagnosis
+```bash
+# Test connectivity to any public IP
+./scripts/test_connectivity.sh 1.2.3.4
+
+# Test specific port
+./scripts/test_connectivity.sh 1.2.3.4 8188
+```
+
+### Network Configuration Debug
+```bash
+# Debug VPC/subnet selection logic
+./scripts/debug_network.sh us-east-1
+
+# Test specific AWS CLI queries
+./scripts/test_network_queries.sh us-east-1
+```
+
+The test instance automatically sets up:
+- ✅ Web server on port 80 for basic connectivity testing
+- ✅ ComfyUI test service on port 8188 
+- ✅ Docker and system monitoring tools
+- ✅ Detailed logging and diagnostics
+
+### Documentation
+- [Connectivity Testing Guide](docs/CONNECTIVITY_TESTING.md) - Step-by-step troubleshooting
+- [Network Configuration Guide](docs/NETWORK_CONFIGURATION.md) - VPC/subnet selection logic
+
+## �🤝 Contributing
 
 We welcome contributions! Feel free to:
 - Submit bug reports
