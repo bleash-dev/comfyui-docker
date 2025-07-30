@@ -362,14 +362,14 @@ jobs:
         done
 
     - name: Wait for AMI preparation completion
-      timeout-minutes: 25
+      timeout-minutes: 35
       run: |
         INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
         
         # Wait for AMI preparation to complete (check for completion file)
         echo "🔧 Monitoring AMI preparation progress..."
-        for i in {1..30}; do
-          echo "🔍 Checking AMI preparation status... (attempt $i/30)"
+        for i in {1..50}; do
+          echo "🔍 Checking AMI preparation status... (attempt $i/50)"
           
           # Check current progress
           PROGRESS_CHECK_ID=$(aws ssm send-command \
@@ -385,14 +385,16 @@ jobs:
               "echo === Completion Check ===",
               "test -f /tmp/ami_ready.txt && echo READY || echo NOT_READY",
               "echo === Process Check ===",
-              "ps aux | grep prepare_ami.sh | grep -v grep || echo NO_PROCESS_RUNNING"
+              "ps aux | grep prepare_ami.sh | grep -v grep || echo NO_PROCESS_RUNNING",
+              "echo === Error Check ===",
+              "tail -10 /var/log/user-data.log 2>/dev/null | grep -i error || echo NO_RECENT_ERRORS"
             ]' \
             --region ${{ env.AWS_REGION }} \
             --query 'Command.CommandId' \
             --output text 2>/dev/null || echo "")
           
           if [ -n "$PROGRESS_CHECK_ID" ]; then
-            sleep 5
+            sleep 10
             
             RESULT=$(aws ssm get-command-invocation \
               --command-id $PROGRESS_CHECK_ID \
@@ -403,6 +405,13 @@ jobs:
             
             echo "Progress Status:"
             echo "$RESULT"
+            
+            # Check for errors in the logs
+            if [[ "$RESULT" == *"ERROR:"* || "$RESULT" == *"FAILED"* || "$RESULT" == *"error:"* ]]; then
+              echo "❌ Detected errors in AMI preparation logs"
+              echo "🔍 Getting detailed error information..."
+              break
+            fi
             
             if [[ "$RESULT" == *"READY"* ]]; then
               echo "✅ AMI preparation completed!"
@@ -418,10 +427,12 @@ jobs:
             # Check if process is still running
             if [[ "$RESULT" == *"NO_PROCESS_RUNNING"* ]]; then
               echo "⚠️ AMI preparation process is not running - may have failed"
+              echo "🔍 Getting detailed logs for debugging..."
+              break
             fi
           fi
           
-          if [ $i -eq 30 ]; then
+          if [ $i -eq 50 ]; then
             echo "❌ Timeout waiting for AMI preparation"
             echo "🔍 Checking instance logs for debugging..."
             
@@ -451,46 +462,80 @@ jobs:
         done
 
     - name: Verify ComfyUI setup
-      timeout-minutes: 5
+      timeout-minutes: 10
       run: |
         INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
         echo "🔍 Verifying ComfyUI setup and health..."
         
-        # Check if Docker is running
-        echo "🐳 Checking Docker status..."
-        DOCKER_CHECK_ID=$(aws ssm send-command \
-          --instance-ids $INSTANCE_ID \
-          --document-name "AWS-RunShellScript" \
-          --parameters 'commands=[
-            "echo === Docker Service Status ===",
-            "systemctl is-active docker && echo DOCKER_SERVICE_ACTIVE || echo DOCKER_SERVICE_INACTIVE",
-            "systemctl status docker --no-pager -l",
-            "echo === Docker Version Check ===",
-            "docker version || echo DOCKER_VERSION_FAILED",
-            "echo === Docker Info ===",
-            "docker info || echo DOCKER_INFO_FAILED",
-            "echo === Docker Images ===",
-            "docker images || echo DOCKER_IMAGES_FAILED",
-            "echo === Final Status ===",
-            "if systemctl is-active docker >/dev/null 2>&1 && docker version >/dev/null 2>&1; then echo DOCKER_OK; else echo DOCKER_FAIL; fi"
-          ]' \
-          --region ${{ env.AWS_REGION }} \
-          --query 'Command.CommandId' \
-          --output text)
+        # Check if Docker is running with proper wait and retry logic
+        echo "🐳 Checking Docker status (with patience for installation)..."
         
-        sleep 15
-        DOCKER_STATUS=$(aws ssm get-command-invocation \
-          --command-id $DOCKER_CHECK_ID \
-          --instance-id $INSTANCE_ID \
-          --region ${{ env.AWS_REGION }} \
-          --query 'StandardOutputContent' \
-          --output text)
+        DOCKER_READY=false
+        for attempt in {1..20}; do
+          echo "🔄 Docker check attempt $attempt/20..."
+          
+          DOCKER_CHECK_ID=$(aws ssm send-command \
+            --instance-ids $INSTANCE_ID \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "echo === Docker Service Status ===",
+              "systemctl is-active docker 2>/dev/null && echo DOCKER_SERVICE_ACTIVE || echo DOCKER_SERVICE_INACTIVE",
+              "echo === Docker Version Check ===",
+              "if command -v docker >/dev/null 2>&1; then",
+              "  docker version 2>/dev/null && echo DOCKER_VERSION_OK || echo DOCKER_VERSION_FAIL",
+              "else",
+              "  echo DOCKER_NOT_INSTALLED",
+              "fi",
+              "echo === Docker Info ===",
+              "if systemctl is-active docker >/dev/null 2>&1; then",
+              "  docker info 2>/dev/null && echo DOCKER_INFO_OK || echo DOCKER_INFO_FAIL",
+              "else",
+              "  echo DOCKER_SERVICE_NOT_RUNNING",
+              "fi",
+              "echo === Final Status ===",
+              "if systemctl is-active docker >/dev/null 2>&1 && docker version >/dev/null 2>&1; then",
+              "  echo DOCKER_OK",
+              "else",
+              "  echo DOCKER_FAIL",
+              "fi"
+            ]' \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Command.CommandId' \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -n "$DOCKER_CHECK_ID" ]; then
+            sleep 10
+            
+            DOCKER_STATUS=$(aws ssm get-command-invocation \
+              --command-id $DOCKER_CHECK_ID \
+              --instance-id $INSTANCE_ID \
+              --region ${{ env.AWS_REGION }} \
+              --query 'StandardOutputContent' \
+              --output text 2>/dev/null || echo "PENDING")
+            
+            echo "Docker Status Details (attempt $attempt):"
+            echo "$DOCKER_STATUS"
+            
+            if [[ "$DOCKER_STATUS" == *"DOCKER_OK"* ]]; then
+              echo "✅ Docker is ready!"
+              DOCKER_READY=true
+              break
+            elif [[ "$DOCKER_STATUS" == *"DOCKER_NOT_INSTALLED"* ]]; then
+              echo "⏳ Docker not yet installed, waiting..."
+            elif [[ "$DOCKER_STATUS" == *"DOCKER_SERVICE_INACTIVE"* ]]; then
+              echo "⏳ Docker service not yet active, waiting..."
+            else
+              echo "⏳ Docker not fully ready yet, waiting..."
+            fi
+          else
+            echo "⏳ SSM command failed, waiting..."
+          fi
+          
+          sleep 10
+        done
         
-        echo "Docker Status Details:"
-        echo "$DOCKER_STATUS"
-        
-        if [[ "$DOCKER_STATUS" != *"DOCKER_OK"* ]]; then
-          echo "❌ Docker is not running properly"
+        if [ "$DOCKER_READY" != "true" ]; then
+          echo "❌ Docker failed to become ready within timeout"
           
           # Get additional debugging info
           echo "🔍 Getting additional debugging information..."
@@ -503,11 +548,11 @@ jobs:
               "echo === User Data Log ===", 
               "tail -50 /var/log/user-data.log 2>/dev/null || echo No user data log found",
               "echo === Docker Service Logs ===",
-              "journalctl -u docker --no-pager -n 20 || echo No Docker logs found",
+              "journalctl -u docker --no-pager -n 20 2>/dev/null || echo No Docker logs found",
               "echo === System Status ===",
               "df -h",
               "free -m",
-              "ps aux | grep docker"
+              "ps aux | head -20"
             ]' \
             --region ${{ env.AWS_REGION }} \
             --query 'Command.CommandId' \
@@ -526,31 +571,58 @@ jobs:
           
           exit 1
         fi
-        echo "✅ Docker is running"
         
-        # Check if ComfyUI Docker image is available
-        echo "🖼️ Checking ComfyUI Docker image..."
-        IMAGE_CHECK_ID=$(aws ssm send-command \
-          --instance-ids $INSTANCE_ID \
-          --document-name "AWS-RunShellScript" \
-          --parameters 'commands=["docker images | grep comfyui && echo IMAGE_OK || echo IMAGE_FAIL"]' \
-          --region ${{ env.AWS_REGION }} \
-          --query 'Command.CommandId' \
-          --output text)
+        # Check if ComfyUI Docker image is available (with patience)
+        echo "🖼️ Checking ComfyUI Docker image availability..."
         
-        sleep 10
-        IMAGE_STATUS=$(aws ssm get-command-invocation \
-          --command-id $IMAGE_CHECK_ID \
-          --instance-id $INSTANCE_ID \
-          --region ${{ env.AWS_REGION }} \
-          --query 'StandardOutputContent' \
-          --output text)
+        IMAGE_READY=false
+        for attempt in {1..10}; do
+          echo "🔍 Image check attempt $attempt/10..."
+          
+          IMAGE_CHECK_ID=$(aws ssm send-command \
+            --instance-ids $INSTANCE_ID \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "echo === Docker Images Check ===",
+              "docker images 2>/dev/null || echo DOCKER_IMAGES_FAILED",
+              "echo === ComfyUI Image Check ===",
+              "if docker images | grep -q comfyui; then",
+              "  echo IMAGE_OK",
+              "else",
+              "  echo IMAGE_FAIL",
+              "fi"
+            ]' \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Command.CommandId' \
+            --output text)
+          
+          sleep 10
+          IMAGE_STATUS=$(aws ssm get-command-invocation \
+            --command-id $IMAGE_CHECK_ID \
+            --instance-id $INSTANCE_ID \
+            --region ${{ env.AWS_REGION }} \
+            --query 'StandardOutputContent' \
+            --output text)
+          
+          echo "Image Status (attempt $attempt):"
+          echo "$IMAGE_STATUS"
+          
+          if [[ "$IMAGE_STATUS" == *"IMAGE_OK"* ]]; then
+            echo "✅ ComfyUI Docker image is available"
+            IMAGE_READY=true
+            break
+          else
+            echo "⏳ ComfyUI Docker image not yet available, waiting..."
+            sleep 10
+          fi
+        done
         
-        if [[ "$IMAGE_STATUS" != *"IMAGE_OK"* ]]; then
-          echo "❌ ComfyUI Docker image not found"
+        if [ "$IMAGE_READY" != "true" ]; then
+          echo "❌ ComfyUI Docker image not found after timeout"
+          echo "🔍 Final image status:"
+          echo "$IMAGE_STATUS"
           exit 1
         fi
-        echo "✅ ComfyUI Docker image is available"
         
         # Test ComfyUI container functionality (without leaving it running)
         echo "🧪 Testing ComfyUI container functionality..."
