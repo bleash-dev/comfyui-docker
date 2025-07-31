@@ -108,6 +108,61 @@ jobs:
         echo "image-uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
         echo "📦 Image URI: ${IMAGE_URI}"
 
+    - name: Clean up old ECR images
+      run: |
+        echo "🧹 Cleaning up old ECR images..."
+        REPO_NAME="${{ env.IMAGE_NAME }}${{ github.ref == 'refs/heads/dev' && '-dev' || '' }}"
+        echo "Repository name: $REPO_NAME"
+        
+        # Keep the 5 most recent images (including latest/dev-latest tags)
+        KEEP_COUNT=5
+        
+        # Get all images in the repository, sorted by pushed date (newest first)
+        echo "📋 Getting list of images in repository..."
+        IMAGES=$(aws ecr-public describe-images \
+          --repository-name "$REPO_NAME" \
+          --region us-east-1 \
+          --query 'sort_by(imageDetails, &imagePushedAt)' \
+          --output json 2>/dev/null || echo '[]')
+        
+        if [ "$IMAGES" = "[]" ]; then
+          echo "⚠️ No images found or repository doesn't exist"
+          exit 0
+        fi
+        
+        # Count total images
+        TOTAL_IMAGES=$(echo "$IMAGES" | jq length)
+        echo "📊 Total images found: $TOTAL_IMAGES"
+        
+        if [ "$TOTAL_IMAGES" -le "$KEEP_COUNT" ]; then
+          echo "✅ Only $TOTAL_IMAGES images found, keeping all (threshold: $KEEP_COUNT)"
+          exit 0
+        fi
+        
+        # Calculate how many to delete
+        DELETE_COUNT=$((TOTAL_IMAGES - KEEP_COUNT))
+        echo "🗑️ Will delete $DELETE_COUNT old images, keeping newest $KEEP_COUNT"
+        
+        # Get the oldest images to delete (take first N from the sorted list)
+        IMAGES_TO_DELETE=$(echo "$IMAGES" | jq -r ".[0:$DELETE_COUNT][] | .imageDigest")
+        
+        if [ -z "$IMAGES_TO_DELETE" ]; then
+          echo "✅ No images to delete"
+          exit 0
+        fi
+        
+        # Delete old images
+        echo "🗑️ Deleting old images..."
+        for digest in $IMAGES_TO_DELETE; do
+          echo "  Deleting image with digest: $digest"
+          aws ecr-public batch-delete-image \
+            --repository-name "$REPO_NAME" \
+            --region us-east-1 \
+            --image-ids imageDigest="$digest" || echo "    ⚠️ Failed to delete $digest"
+        done
+        
+        echo "✅ ECR cleanup completed"
+
   create-ami:
     needs: build-and-push
     runs-on: ubuntu-latest

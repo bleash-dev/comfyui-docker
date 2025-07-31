@@ -2,7 +2,54 @@
 
 <div align="center">
 
-<img src="https://pbs.twimg.com/profile_images/1802828693888475136/yuNS4xXR_200x200.jpg" alt="ComfyUI Logo" style="width: 100px; height: 100px; border-radius: 50%;">
+<img src="https://pbs.twimg.com/profile_images/1802828693888475136/yuNS4xXR_20### Documentation
+- [Connectivity Testing Guide](docs/CONNECTIVITY_TESTING.md) - Step-by-step troubleshooting
+- [Network Configuration Guide](docs/NETWORK_CONFIGURATION.md) - VPC/subnet selection logic
+
+## 🐳 Docker & Deployment
+
+### ECR Image Management
+
+The project includes automated Docker image management for AWS ECR:
+
+#### Automatic Cleanup (GitHub Actions)
+- **Auto-cleanup**: Automatically removes old images after successful deployments
+- **Retention Policy**: Keeps the 5 most recent images by default
+- **Branch Support**: Separate cleanup for main (`comfyui-docker`) and dev (`comfyui-docker-dev`) repositories
+
+#### Manual ECR Cleanup
+
+Use the provided script for manual cleanup or advanced scenarios:
+
+```bash
+# Basic cleanup - keep 5 most recent images
+./scripts/cleanup_ecr.sh comfyui-docker
+
+# Keep more images
+./scripts/cleanup_ecr.sh --keep 10 comfyui-docker
+
+# Dry run to see what would be deleted
+./scripts/cleanup_ecr.sh --dry-run comfyui-docker
+
+# List all repositories
+./scripts/cleanup_ecr.sh --list
+
+# Get repository statistics
+./scripts/cleanup_ecr.sh --stats comfyui-docker
+```
+
+#### Configuration Options
+- `--region`: AWS region (default: us-east-1)
+- `--alias`: ECR public registry alias
+- `--keep`: Number of recent images to keep (default: 5)
+- `--dry-run`: Preview what would be deleted without actually deleting
+
+The script includes safety features:
+- Interactive confirmation (unless automated)
+- Comprehensive logging and error handling
+- Protects against accidental deletion of all images
+
+## 🤝 Contributing.jpg" alt="ComfyUI Logo" style="width: 100px; height: 100px; border-radius: 50%;">
 
 ### Seamless ComfyUI Deployment on RunPod
 
