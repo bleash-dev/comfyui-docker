@@ -279,6 +279,8 @@ class MetricsHandler(http.server.BaseHTTPRequestHandler):
             self.send_health_response()
         elif self.path == '/metrics':
             self.send_metrics_response()
+        elif self.path == '/tenants':
+            self.send_tenants_response()
         else:
             self.send_error(404)
     
@@ -321,6 +323,33 @@ class MetricsHandler(http.server.BaseHTTPRequestHandler):
             "tenants": self.get_tenant_info()
         }
         self.wfile.write(json.dumps(metrics_data).encode())
+    
+    def send_tenants_response(self):
+        """Send response with current tenant information including podIds"""
+        self.send_response(200)
+        self.send_header('Content-type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        
+        # Get tenant info directly from process manager
+        tenant_list = self.process_manager.get_tenant_info()
+        
+        tenants_data = {
+            "timestamp": time.time(),
+            "tenants": tenant_list,
+            "summary": {
+                "total_tenants": len(tenant_list),
+                "active_tenants": len([
+                    t for t in tenant_list
+                    if t['status'] == 'running'
+                ]),
+                "inactive_tenants": len([
+                    t for t in tenant_list
+                    if t['status'] != 'running'
+                ])
+            }
+        }
+        self.wfile.write(json.dumps(tenants_data).encode())
     
     def handle_start_request(self):
         try:

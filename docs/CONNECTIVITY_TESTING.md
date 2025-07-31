@@ -48,10 +48,18 @@ This guide helps you test and debug connectivity issues with ComfyUI instances u
 
 The test instance automatically sets up:
 
-1. **Web Server on Port 80**: Simple test page showing instance info
-2. **ComfyUI Test on Port 8188**: Mimics ComfyUI port for connectivity testing
-3. **Docker**: Pre-installed and configured
+1. **Tenant Manager on Port 80**: Multi-tenant ComfyUI management service with health, metrics, and tenant endpoints
+2. **ComfyUI on Port 8188**: Individual ComfyUI instances managed by the tenant manager
+3. **Docker**: Pre-installed and configured for running ComfyUI containers
 4. **System Monitoring**: Tools for debugging connectivity issues
+
+### Available Endpoints:
+- `GET /health` - Health check and basic system status
+- `GET /metrics` - Detailed system and performance metrics  
+- `GET /tenants` - List of current tenants (podIds) and their status
+- `POST /start` - Start a new ComfyUI tenant instance
+- `POST /stop` - Stop a ComfyUI tenant instance
+- `POST /execute` - Execute workflow on a tenant instance
 
 ## 🔍 Understanding Test Results
 
@@ -120,6 +128,28 @@ aws ec2 describe-subnets --subnet-ids subnet-xxxxxx
 
 # Check route table
 aws ec2 describe-route-tables --filters "Name=association.subnet-id,Values=subnet-xxxxxx"
+```
+
+### Test Tenant Manager Endpoints
+```bash
+# Get health status
+curl http://your-instance-ip/health
+
+# Get system metrics
+curl http://your-instance-ip/metrics
+
+# Get current tenants (podIds)
+curl http://your-instance-ip/tenants
+
+# Start a new tenant
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"pod_id":"test-pod","username":"testuser","port":8188}' \
+  http://your-instance-ip/start
+
+# Stop a tenant
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"pod_id":"test-pod"}' \
+  http://your-instance-ip/stop
 ```
 
 ### Connect via SSM (if SSH not available)
