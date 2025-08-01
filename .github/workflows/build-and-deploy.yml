@@ -144,21 +144,79 @@ jobs:
         echo "🗑️ Will delete $DELETE_COUNT old images, keeping newest $KEEP_COUNT"
         
         # Get the oldest images to delete (take first N from the sorted list)
-        IMAGES_TO_DELETE=$(echo "$IMAGES" | jq -r ".[0:$DELETE_COUNT][] | .imageDigest")
+        # Include mediaType to identify manifest lists vs regular images
+        IMAGES_TO_DELETE=$(echo "$IMAGES" | jq -r ".[0:$DELETE_COUNT][] | .imageDigest + \"|\" + (.imageManifest.mediaType // \"unknown\")")
         
         if [ -z "$IMAGES_TO_DELETE" ]; then
           echo "✅ No images to delete"
           exit 0
         fi
         
-        # Delete old images
+        # Delete old images, handling manifest lists properly
         echo "🗑️ Deleting old images..."
-        for digest in $IMAGES_TO_DELETE; do
-          echo "  Deleting image with digest: $digest"
-          aws ecr-public batch-delete-image \
+        for image_info in $IMAGES_TO_DELETE; do
+          digest=$(echo "$image_info" | cut -d'|' -f1)
+          media_type=$(echo "$image_info" | cut -d'|' -f2)
+          
+          echo "  Deleting image with digest: $digest (type: $media_type)"
+          
+          # Try to delete the image
+          if ! aws ecr-public batch-delete-image \
             --repository-name "$REPO_NAME" \
             --region us-east-1 \
-            --image-ids imageDigest="$digest" || echo "    ⚠️ Failed to delete $digest"
+            --image-ids imageDigest="$digest" 2>/dev/null; then
+            
+            echo "    ⚠️ Standard delete failed for $digest, checking for manifest list references..."
+            
+            # If deletion fails, it might be a manifest list with references
+            # Get detailed information about this manifest
+            MANIFEST_INFO=$(aws ecr-public get-download-url-for-layer \
+              --repository-name "$REPO_NAME" \
+              --region us-east-1 \
+              --layer-digest "$digest" 2>/dev/null || echo "")
+            
+            if [ -n "$MANIFEST_INFO" ]; then
+              echo "    📝 Found manifest list, attempting to delete referenced manifests first..."
+              
+              # Get the manifest content to find referenced digests
+              MANIFEST_CONTENT=$(aws ecr-public batch-get-image \
+                --repository-name "$REPO_NAME" \
+                --region us-east-1 \
+                --image-ids imageDigest="$digest" \
+                --accepted-media-types "application/vnd.docker.distribution.manifest.list.v2+json" \
+                --query 'images[0].imageManifest' \
+                --output text 2>/dev/null || echo "")
+              
+              if [ -n "$MANIFEST_CONTENT" ] && [ "$MANIFEST_CONTENT" != "None" ]; then
+                # Parse referenced digests from manifest list
+                REFERENCED_DIGESTS=$(echo "$MANIFEST_CONTENT" | jq -r '.manifests[]?.digest // empty' 2>/dev/null || echo "")
+                
+                # Delete referenced manifests first
+                for ref_digest in $REFERENCED_DIGESTS; do
+                  if [ -n "$ref_digest" ]; then
+                    echo "      Deleting referenced manifest: $ref_digest"
+                    aws ecr-public batch-delete-image \
+                      --repository-name "$REPO_NAME" \
+                      --region us-east-1 \
+                      --image-ids imageDigest="$ref_digest" 2>/dev/null || echo "        ⚠️ Failed to delete referenced manifest $ref_digest"
+                  fi
+                done
+                
+                # Now try to delete the manifest list again
+                echo "      Retrying deletion of manifest list: $digest"
+                aws ecr-public batch-delete-image \
+                  --repository-name "$REPO_NAME" \
+                  --region us-east-1 \
+                  --image-ids imageDigest="$digest" || echo "        ⚠️ Final deletion failed for $digest"
+              else
+                echo "        ⚠️ Could not retrieve manifest content for $digest"
+              fi
+            else
+              echo "        ⚠️ Could not retrieve manifest info for $digest, skipping"
+            fi
+          else
+            echo "    ✅ Successfully deleted $digest"
+          fi
         done
         
         echo "✅ ECR cleanup completed"

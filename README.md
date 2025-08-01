@@ -49,6 +49,25 @@ The script includes safety features:
 - Comprehensive logging and error handling
 - Protects against accidental deletion of all images
 
+#### ECR Lifecycle Policies
+
+For **private ECR repositories only**, you can set up automatic lifecycle policies:
+
+```bash
+# Set up lifecycle policy for private repository
+./scripts/system/setup_ecr_lifecycle.sh comfyui-docker
+
+# Keep more images (default is 5)
+./scripts/system/setup_ecr_lifecycle.sh --keep 10 comfyui-docker
+```
+
+**Important Limitations:**
+- 🚨 **ECR lifecycle policies only work for PRIVATE ECR repositories**
+- ❌ **Public ECR repositories do NOT support lifecycle policies**
+- ✅ **Use manual cleanup script for public repositories** (`cleanup_ecr.sh`)
+
+The lifecycle policy script will automatically detect repository type and provide appropriate guidance.
+
 ## 🤝 Contributing.jpg" alt="ComfyUI Logo" style="width: 100px; height: 100px; border-radius: 50%;">
 
 ### Seamless ComfyUI Deployment on RunPod
