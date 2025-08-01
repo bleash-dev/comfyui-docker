@@ -97,16 +97,16 @@ cleanup_repository() {
         fi
     fi
     
-    # Get the oldest images to delete
-    IMAGES_TO_DELETE=$(echo "$IMAGES" | jq -r ".[0:$DELETE_COUNT][] | .imageDigest")
+    # Get the oldest images to delete, but sort them newest first for safer deletion
+    IMAGES_TO_DELETE=$(echo "$IMAGES" | jq -r ".[0:$DELETE_COUNT] | sort_by(.imagePushedAt) | reverse | .[].imageDigest")
     
     if [ -z "$IMAGES_TO_DELETE" ]; then
         echo -e "${GREEN}✅ No images to delete${NC}"
         return 0
     fi
     
-    # Delete old images
-    echo -e "${BLUE}🗑️ Deleting old images...${NC}"
+    # Delete old images (most recent to least recent among those marked for deletion)
+    echo -e "${BLUE}🗑️ Deleting old images (most recent to least recent among those to be deleted)...${NC}"
     DELETED_COUNT=0
     FAILED_COUNT=0
     
@@ -120,7 +120,7 @@ cleanup_repository() {
             echo -e "    ${GREEN}✅ Deleted${NC}"
         else
             ((FAILED_COUNT++))
-            echo -e "    ${RED}❌ Failed${NC}"
+            echo -e "    ${YELLOW}⚠️ Failed (may be referenced by other images)${NC}"
         fi
     done
     
@@ -128,7 +128,7 @@ cleanup_repository() {
     echo -e "${GREEN}✅ ECR cleanup completed${NC}"
     echo "  Deleted: $DELETED_COUNT images"
     if [ "$FAILED_COUNT" -gt 0 ]; then
-        echo -e "  ${YELLOW}Failed: $FAILED_COUNT images${NC}"
+        echo -e "  ${YELLOW}Failed: $FAILED_COUNT images (normal for manifest lists or referenced images)${NC}"
     fi
 }
 

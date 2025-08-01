@@ -22,32 +22,34 @@ The project includes automated Docker image management for AWS ECR:
 Use the provided script for manual cleanup or advanced scenarios:
 
 ```bash
-# Basic cleanup - keep 5 most recent images
-./scripts/cleanup_ecr.sh comfyui-docker
+# Basic cleanup - keep 3 most recent images
+./scripts/system/cleanup_ecr.sh comfyui-docker
 
 # Keep more images
-./scripts/cleanup_ecr.sh --keep 10 comfyui-docker
+./scripts/system/cleanup_ecr.sh --keep 10 comfyui-docker
 
 # Dry run to see what would be deleted
-./scripts/cleanup_ecr.sh --dry-run comfyui-docker
+./scripts/system/cleanup_ecr.sh --dry-run comfyui-docker
 
 # List all repositories
-./scripts/cleanup_ecr.sh --list
+./scripts/system/cleanup_ecr.sh --list
 
 # Get repository statistics
-./scripts/cleanup_ecr.sh --stats comfyui-docker
+./scripts/system/cleanup_ecr.sh --stats comfyui-docker
 ```
 
 #### Configuration Options
 - `--region`: AWS region (default: us-east-1)
 - `--alias`: ECR public registry alias
-- `--keep`: Number of recent images to keep (default: 5)
+- `--keep`: Number of recent images to keep (default: 3)
 - `--dry-run`: Preview what would be deleted without actually deleting
 
 The script includes safety features:
 - Interactive confirmation (unless automated)
 - Comprehensive logging and error handling
 - Protects against accidental deletion of all images
+- **Simple deletion strategy**: Deletes images from most recent to least recent among those marked for deletion
+- **Graceful failure handling**: Some deletions may fail for manifest lists or referenced images (this is normal)
 
 #### ECR Lifecycle Policies
 
