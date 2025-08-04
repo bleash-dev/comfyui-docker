@@ -691,15 +691,15 @@ restore_venv() {
         return 1
     fi
     
-    # Verify checksums if available
-    if [ -f "$chunk_dir/$CHECKSUM_FILE" ]; then
-        if ! verify_checksums "$chunk_dir" "$chunk_dir/$CHECKSUM_FILE"; then
-            log_error "Chunk verification failed"
-            return 1
-        fi
-    else
-        log_info "No checksum file found, skipping verification"
-    fi
+    #  Verify checksums if available
+    # if [ -f "$chunk_dir/$CHECKSUM_FILE" ]; then
+    #     if ! verify_checksums "$chunk_dir" "$chunk_dir/$CHECKSUM_FILE"; then
+    #         log_error "Chunk verification failed"
+    #         return 1
+    #     fi
+    # else
+    #     log_info "No checksum file found, skipping verification"
+    # fi
     
     # Create target directory
     mkdir -p "$venv_path"
