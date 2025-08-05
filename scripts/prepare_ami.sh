@@ -112,75 +112,6 @@ rm -rf /var/lib/apt/lists/*
 
 checkpoint "SYSTEM_PACKAGES_INSTALLED"
 
-# --- 3.5. INSTALL NVIDIA GPU DRIVERS AND CUDA RUNTIME ---
-echo "🎮 Installing NVIDIA GPU drivers and CUDA runtime for optimal GPU utilization..."
-
-# Add NVIDIA package repositories
-echo "📦 Adding NVIDIA package repositories..."
-wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.0-1_all.deb
-dpkg -i cuda-keyring_1.0-1_all.deb
-rm cuda-keyring_1.0-1_all.deb
-
-# Update package list with NVIDIA repos
-apt-get update
-
-# Install NVIDIA driver (will install the latest compatible version)
-echo "🔧 Installing NVIDIA GPU drivers..."
-apt-get install -y --no-install-recommends \
-    nvidia-driver-535 \
-    nvidia-dkms-535
-
-# Install CUDA toolkit and runtime (11.8 to match original Docker setup)
-echo "🔧 Installing CUDA 11.8 runtime and toolkit..."
-apt-get install -y --no-install-recommends \
-    cuda-runtime-11-8 \
-    cuda-toolkit-11-8 \
-    libcudnn8 \
-    libcudnn8-dev
-
-# Install additional NVIDIA container runtime libraries for compatibility
-echo "🔧 Installing NVIDIA container runtime libraries..."
-apt-get install -y --no-install-recommends \
-    libnvidia-encode-535 \
-    libnvidia-decode-535 \
-    nvidia-utils-535
-
-# Set up CUDA environment variables
-echo "⚙️ Setting up CUDA environment variables..."
-echo 'export CUDA_VERSION=11.8' >> /etc/environment
-echo 'export CUDA_HOME=/usr/local/cuda-11.8' >> /etc/environment
-echo 'export PATH=/usr/local/cuda-11.8/bin:$PATH' >> /etc/environment
-echo 'export LD_LIBRARY_PATH=/usr/local/cuda-11.8/lib64:$LD_LIBRARY_PATH' >> /etc/environment
-echo 'export NVIDIA_VISIBLE_DEVICES=all' >> /etc/environment
-echo 'export NVIDIA_DRIVER_CAPABILITIES=compute,utility' >> /etc/environment
-
-# Create symbolic links for CUDA
-ln -sf /usr/local/cuda-11.8 /usr/local/cuda
-
-# Clean up package cache
-rm -rf /var/lib/apt/lists/*
-
-echo "✅ NVIDIA GPU drivers and CUDA runtime installed"
-
-# Verify GPU installation (non-blocking)
-echo "🔍 Verifying GPU installation..."
-if command -v nvidia-smi >/dev/null 2>&1; then
-    echo "✅ nvidia-smi is available"
-    # Don't run nvidia-smi on AMI build instance as it may not have GPU
-    echo "ℹ️ GPU verification will be completed on GPU-enabled instances"
-else
-    echo "⚠️ nvidia-smi not found - GPU drivers may not be properly installed"
-fi
-
-if [ -d "/usr/local/cuda-11.8" ]; then
-    echo "✅ CUDA 11.8 installation directory found"
-else
-    echo "⚠️ CUDA 11.8 installation directory not found"
-fi
-
-checkpoint "GPU_CUDA_INSTALLED"
-
-
 # --- 4. INSTALL PYTHON PACKAGES ---
 echo "� Installing Python packages..."
 
@@ -226,7 +157,6 @@ chmod 755 /var/log/comfyui /workspace /scripts /opt/venv
 echo 'export DEBIAN_FRONTEND=noninteractive' >> /etc/environment
 echo 'export PYTHONUNBUFFERED=1' >> /etc/environment
 echo 'export PYTHON_VERSION=3.10' >> /etc/environment
-echo 'export XPU_TARGET=NVIDIA_GPU' >> /etc/environment
 
 
 checkpoint "DIRECTORIES_CREATED"
@@ -366,7 +296,7 @@ echo "⚙️ Creating systemd services..."
 # Create a systemd service for ComfyUI Tenant Manager (Direct Python execution)
 cat > /etc/systemd/system/comfyui-multitenant.service << 'EOF'
 [Unit]
-Description=ComfyUI Multi-Tenant Manager (Direct)
+Description=ComfyUI Multi-Tenant Manager
 After=network.target
 
 [Service]
@@ -380,14 +310,6 @@ WorkingDirectory=/workspace
 Environment=DEBIAN_FRONTEND=noninteractive
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHON_VERSION=3.10
-Environment=XPU_TARGET=NVIDIA_GPU
-Environment=VENV_DIR=/opt/venv
-Environment=CUDA_VERSION=11.8
-Environment=CUDA_HOME=/usr/local/cuda-11.8
-Environment=PATH=/usr/local/cuda-11.8/bin:/usr/local/bin:/usr/bin:/bin
-Environment=LD_LIBRARY_PATH=/usr/local/cuda-11.8/lib64
-Environment=NVIDIA_VISIBLE_DEVICES=all
-Environment=NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 # The main command to run the tenant manager directly
 ExecStart=/usr/bin/python3 /usr/local/bin/tenant_manager.py
@@ -404,23 +326,9 @@ EOF
 # Create a monitoring script (updated for direct execution)
 cat > /usr/local/bin/comfyui-monitor << 'EOF'
 #!/bin/bash
-echo "--- ComfyUI System Status (Direct) ---"
+echo "--- ComfyUI System Status ---"
 echo; echo "--- ComfyUI Service Status ---"
 systemctl status comfyui-multitenant
-echo; echo "--- GPU Status ---"
-if command -v nvidia-smi >/dev/null 2>&1; then
-    nvidia-smi --query-gpu=index,name,driver_version,memory.total,memory.used,utilization.gpu,temperature.gpu --format=csv,noheader,nounits 2>/dev/null || echo "GPU not available or no NVIDIA driver loaded"
-else
-    echo "nvidia-smi not found"
-fi
-echo; echo "--- CUDA Version ---"
-if [ -f /usr/local/cuda/version.txt ]; then
-    cat /usr/local/cuda/version.txt
-elif command -v nvcc >/dev/null 2>&1; then
-    nvcc --version | grep "release"
-else
-    echo "CUDA not found"
-fi
 echo; echo "--- System Resources ---"
 df -h /; free -h
 echo; echo "--- Python Processes ---"

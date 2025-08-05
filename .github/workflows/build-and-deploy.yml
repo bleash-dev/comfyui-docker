@@ -1113,7 +1113,6 @@ jobs:
         if [ -n "$OLD_AMI" ]; then
           echo "  🗑️ Replaced old AMI: $OLD_AMI"
         fi
-        echo "  🎮 Full GPU optimization with NVIDIA drivers and CUDA 11.8"
         echo "  🐍 Direct Python installation (no Docker overhead)"
         echo ""
         echo "🔗 SSM Parameter Store:"
