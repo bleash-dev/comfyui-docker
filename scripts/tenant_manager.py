@@ -16,6 +16,8 @@ import signal
 import sys
 import logging
 import boto3
+import socket
+import requests
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, List
@@ -59,6 +61,57 @@ class ProcessManager:
         except Exception as e:
             logger.error(f"Error saving processes: {e}")
     
+    def _is_port_open(self, host: str, port: int, timeout: float = 3.0) -> bool:
+        """Check if a port is open and accepting connections"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            return result == 0
+        except Exception:
+            return False
+    
+    def _is_comfyui_healthy(self, port: int, timeout: float = 5.0) -> bool:
+        """Check if ComfyUI service is healthy on the given port"""
+        try:
+            # First check if port is open
+            if not self._is_port_open('localhost', port, timeout=2.0):
+                return False
+            
+            # Try to reach ComfyUI's health endpoint or main page
+            url = f"http://localhost:{port}"
+            response = requests.get(url, timeout=timeout)
+            # ComfyUI typically returns 200 for the main page
+            return response.status_code == 200
+        except Exception:
+            return False
+    
+    def _force_cleanup_tenant(self, pod_id: str, process_info: dict):
+        """Force cleanup of a tenant that's not responding properly"""
+        try:
+            pid = process_info.get('pid')
+            if pid and psutil.pid_exists(pid):
+                try:
+                    # Try graceful shutdown first
+                    os.killpg(os.getpgid(pid), signal.SIGTERM)
+                    time.sleep(2)
+                    
+                    # Force kill if still running
+                    if psutil.pid_exists(pid):
+                        os.killpg(os.getpgid(pid), signal.SIGKILL)
+                        time.sleep(1)
+                except ProcessLookupError:
+                    pass  # Process already dead
+            
+            # Remove from tracking
+            if pod_id in self.processes:
+                del self.processes[pod_id]
+                self.save_processes()
+                logger.info(f"Force cleaned up tenant {pod_id}")
+        except Exception as e:
+            logger.error(f"Error force cleaning tenant {pod_id}: {e}")
+    
     def _cleanup_dead_processes(self):
         """Remove dead processes from tracking"""
         dead_pods = []
@@ -74,21 +127,33 @@ class ProcessManager:
         if dead_pods:
             self.save_processes()
     
-    def start_tenant(self, pod_id: str, username: str, port: int, env_vars: dict) -> dict:
+    def start_tenant(self, pod_id: str, username: str, port: int,
+                     env_vars: dict) -> dict:
         """Start a ComfyUI instance for a tenant"""
         try:
-            # Check if already running
+            # Check if already running with proper health check
             if pod_id in self.processes:
                 existing_info = self.processes[pod_id]
-                if psutil.pid_exists(existing_info.get('pid', 0)):
+                existing_pid = existing_info.get('pid', 0)
+                existing_port = existing_info.get('port')
+                
+                # Check if process exists AND service is healthy on the port
+                if (psutil.pid_exists(existing_pid) and
+                        existing_port and
+                        self._is_comfyui_healthy(existing_port)):
+                    logger.info(f"Tenant {pod_id} already running healthy "
+                                f"on port {existing_port}")
                     return {
                         "status": "already_running",
-                        "port": existing_info.get('port'),
-                        "pid": existing_info.get('pid')
+                        "port": existing_port,
+                        "pid": existing_pid,
+                        "healthy": True
                     }
                 else:
-                    # Clean up dead process
-                    del self.processes[pod_id]
+                    # Process exists but service is not healthy, clean it up
+                    logger.warning(f"Tenant {pod_id} process exists but "
+                                   f"service unhealthy, cleaning up...")
+                    self._force_cleanup_tenant(pod_id, existing_info)
             
             # Setup environment
             network_volume = env_vars.get(
@@ -135,7 +200,8 @@ class ProcessManager:
             # Setup CloudWatch logging for this tenant
             self._setup_cloudwatch_logging(pod_id, network_volume)
             
-            logger.info(f"Started tenant {pod_id} for user {username} on port {port} with PID {process.pid}")
+            logger.info(f"Started tenant {pod_id} for user {username} "
+                        f"on port {port} with PID {process.pid}")
             
             return {
                 "status": "started",
@@ -197,14 +263,31 @@ class ProcessManager:
         
         tenants = []
         for pod_id, info in self.processes.items():
+            pid = info.get('pid', 0)
+            port = info.get('port')
+            is_process_alive = psutil.pid_exists(pid)
+            is_service_healthy = (port and
+                                  self._is_comfyui_healthy(port)
+                                  if is_process_alive else False)
+            
+            # Determine status based on both process and service health
+            if is_process_alive and is_service_healthy:
+                status = "healthy"
+            elif is_process_alive and not is_service_healthy:
+                status = "unhealthy"
+            else:
+                status = "dead"
+            
             tenant_info = {
                 "pod_id": pod_id,
                 "username": info.get('username'),
-                "port": info.get('port'),
-                "pid": info.get('pid'),
+                "port": port,
+                "pid": pid,
                 "uptime": time.time() - info.get('started_at', 0),
                 "network_volume": info.get('network_volume'),
-                "status": "running" if psutil.pid_exists(info.get('pid', 0)) else "dead"
+                "status": status,
+                "process_alive": is_process_alive,
+                "service_healthy": is_service_healthy
             }
             tenants.append(tenant_info)
         
@@ -248,19 +331,24 @@ class ProcessManager:
                     timeout=30
                 )
                 if result.returncode == 0:
-                    logger.info(f"CloudWatch logging configured for pod {pod_id}")
+                    logger.info(f"CloudWatch logging configured for "
+                                f"pod {pod_id}")
                 else:
-                    logger.warning(f"CloudWatch setup failed for pod {pod_id}: {result.stderr}")
+                    logger.warning(f"CloudWatch setup failed for "
+                                   f"pod {pod_id}: {result.stderr}")
             else:
-                logger.warning(f"CloudWatch setup script not found: {setup_script}")
+                logger.warning(f"CloudWatch setup script not found: "
+                               f"{setup_script}")
                 
         except Exception as e:
-            logger.error(f"Error setting up CloudWatch logging for pod {pod_id}: {e}")
+            logger.error(f"Error setting up CloudWatch logging for "
+                         f"pod {pod_id}: {e}")
             # 2. Configure log streams for different log files
             # 3. Set up log forwarding agents
             
         except Exception as e:
-            logger.error(f"Error setting up CloudWatch logging for {pod_id}: {e}")
+            logger.error(f"Error setting up CloudWatch logging for "
+                         f"{pod_id}: {e}")
 
 
 class MetricsHandler(http.server.BaseHTTPRequestHandler):
@@ -339,13 +427,17 @@ class MetricsHandler(http.server.BaseHTTPRequestHandler):
             "tenants": tenant_list,
             "summary": {
                 "total_tenants": len(tenant_list),
-                "active_tenants": len([
+                "healthy_tenants": len([
                     t for t in tenant_list
-                    if t['status'] == 'running'
+                    if t['status'] == 'healthy'
                 ]),
-                "inactive_tenants": len([
+                "unhealthy_tenants": len([
                     t for t in tenant_list
-                    if t['status'] != 'running'
+                    if t['status'] == 'unhealthy'
+                ]),
+                "dead_tenants": len([
+                    t for t in tenant_list
+                    if t['status'] == 'dead'
                 ])
             }
         }
@@ -367,7 +459,8 @@ class MetricsHandler(http.server.BaseHTTPRequestHandler):
                 return
             
             # Start the tenant
-            result = self.process_manager.start_tenant(pod_id, username, port, env_vars)
+            result = self.process_manager.start_tenant(
+                pod_id, username, port, env_vars)
             
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
@@ -447,7 +540,7 @@ class MetricsHandler(http.server.BaseHTTPRequestHandler):
             with open('/proc/uptime', 'r') as f:
                 uptime_seconds = float(f.readline().split()[0])
             return uptime_seconds
-        except:
+        except Exception:
             return 0
     
     def check_services_health(self):
@@ -460,7 +553,8 @@ class MetricsHandler(http.server.BaseHTTPRequestHandler):
             
             # Check tenant processes
             tenants = self.process_manager.get_tenant_info()
-            services['active_tenants'] = len([t for t in tenants if t['status'] == 'running'])
+            services['active_tenants'] = len([
+                t for t in tenants if t['status'] in ['healthy', 'running']])
             services['total_tenants'] = len(tenants)
             
         except Exception as e:
@@ -496,7 +590,7 @@ class MetricsHandler(http.server.BaseHTTPRequestHandler):
         try:
             # Try to get NVIDIA GPU metrics
             result = subprocess.run([
-                'nvidia-smi', 
+                'nvidia-smi',
                 '--query-gpu=index,name,utilization.gpu,utilization.memory,' +
                 'temperature.gpu,memory.total,memory.used,memory.free,' +
                 'power.draw,power.limit',
