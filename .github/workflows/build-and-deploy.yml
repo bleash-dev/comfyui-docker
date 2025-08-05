@@ -582,6 +582,9 @@ jobs:
                 "RUNNING_PREPARE_AMI")
                   echo "   → Running prepare_ami.sh (this may take several minutes)"
                   ;;
+                "SCRIPTS_DOWNLOADED_AND_VALIDATED")
+                  echo "   → Scripts downloaded from S3 and validated successfully"
+                  ;;
                 "SCRIPTS_SETUP")
                   echo "   → Setting up system scripts and configurations"
                   ;;
@@ -590,6 +593,9 @@ jobs:
                   ;;
                 "CLOUDWATCH_SKIPPED")
                   echo "   → CloudWatch setup skipped"
+                  ;;
+                "VALIDATION_COMPLETE")
+                  echo "   → Final validation completed - AMI is ready"
                   ;;
                 "AMI_SETUP_COMPLETE")
                   echo "   → AMI setup completed successfully"

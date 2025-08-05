@@ -197,6 +197,31 @@ if aws s3 sync "${S3_PREFIX}/" . --region "${AWS_REGION}"; then
     echo "✅ Downloaded all scripts from S3"
     echo "📋 Downloaded files:"
     ls -la
+    
+    # Count files downloaded
+    FILE_COUNT=$(find . -type f | wc -l)
+    echo "📊 Total files downloaded: $FILE_COUNT"
+    
+    # Verify we got the essential files
+    if [ "$FILE_COUNT" -eq 0 ]; then
+        echo "❌ No files were downloaded from S3"
+        echo "🔍 Attempting to list S3 bucket contents..."
+        aws s3 ls "${S3_PREFIX}/" --region "${AWS_REGION}" || echo "Cannot list S3 contents"
+        exit 1
+    fi
+    
+    # Check for specific required files
+    CRITICAL_FILES=("tenant_manager.py")
+    for file in "${CRITICAL_FILES[@]}"; do
+        if [ ! -f "$file" ]; then
+            echo "⚠️ Critical file $file not found after S3 sync"
+            echo "🔍 Checking if it exists in S3..."
+            aws s3 ls "${S3_PREFIX}/$file" --region "${AWS_REGION}" || echo "File not found in S3"
+        else
+            FILE_SIZE=$(stat -c%s "$file")
+            echo "✅ Found $file (size: $FILE_SIZE bytes)"
+        fi
+    done
 else
     echo "❌ Failed to download scripts from S3"
     echo "🔍 S3 access details:"
@@ -213,15 +238,37 @@ fi
 
 # Verify essential files are present and not empty
 echo "🔍 Verifying essential files are present and valid..."
+echo "📍 Current working directory: $(pwd)"
+echo "📋 All files in current directory:"
+ls -la . | head -20
+
 REQUIRED_FILES=("tenant_manager.py")
 MISSING_FILES=()
 EMPTY_FILES=()
+CORRUPTED_FILES=()
 
 for file in "${REQUIRED_FILES[@]}"; do
+    echo "🔍 Checking $file..."
     if [ ! -f "$file" ]; then
         MISSING_FILES+=("$file")
+        echo "❌ File $file is missing"
     elif [ ! -s "$file" ]; then
         EMPTY_FILES+=("$file")
+        echo "❌ File $file exists but is empty"
+    else
+        # Check if it's a valid Python file
+        if [[ "$file" == *.py ]]; then
+            if head -1 "$file" | grep -q "python"; then
+                FILE_SIZE=$(stat -c%s "$file")
+                echo "✅ File $file looks valid (size: $FILE_SIZE bytes)"
+            else
+                CORRUPTED_FILES+=("$file")
+                echo "❌ File $file doesn't look like a valid Python file"
+                echo "🔍 First line: $(head -1 "$file")"
+            fi
+        else
+            echo "✅ File $file exists and is not empty"
+        fi
     fi
 done
 
@@ -229,40 +276,128 @@ if [ ${#MISSING_FILES[@]} -gt 0 ]; then
     echo "❌ Missing required files: ${MISSING_FILES[*]}"
     echo "🔍 Available files:"
     ls -la
+    echo "🔍 Checking if files are in different location:"
+    find /scripts -name "tenant_manager.py" -ls 2>/dev/null || echo "No tenant_manager.py found anywhere"
     exit 1
 fi
 
 if [ ${#EMPTY_FILES[@]} -gt 0 ]; then
     echo "❌ Empty required files: ${EMPTY_FILES[*]}"
-    echo "🔍 File sizes:"
-    ls -la "${EMPTY_FILES[@]}"
+    echo "🔍 File details:"
+    for file in "${EMPTY_FILES[@]}"; do
+        ls -la "$file" 2>/dev/null || echo "Cannot stat $file"
+    done
+    exit 1
+fi
+
+if [ ${#CORRUPTED_FILES[@]} -gt 0 ]; then
+    echo "❌ Corrupted or invalid files: ${CORRUPTED_FILES[*]}"
+    echo "🔍 File details:"
+    for file in "${CORRUPTED_FILES[@]}"; do
+        echo "=== Content of $file (first 10 lines) ==="
+        head -10 "$file" 2>/dev/null || echo "Cannot read $file"
+        echo "=== End of $file preview ==="
+    done
     exit 1
 fi
 
 echo "✅ All essential files are present and valid"
 
+# Add checkpoint after successful script validation
+checkpoint "SCRIPTS_DOWNLOADED_AND_VALIDATED"
+
 # Install tenant manager
 echo "📦 Installing tenant manager..."
+echo "🔍 Current working directory: $(pwd)"
+echo "📋 Available files in current directory:"
+ls -la . | head -10
+
+# Check if tenant_manager.py exists before copying
+if [ ! -f "tenant_manager.py" ]; then
+    echo "❌ CRITICAL: tenant_manager.py not found in current directory"
+    echo "🔍 Listing all Python files in /scripts:"
+    find /scripts -name "*.py" -ls
+    exit 1
+fi
+
+echo "✅ Found tenant_manager.py, copying to /usr/local/bin/"
 cp tenant_manager.py /usr/local/bin/tenant_manager.py
 chmod +x /usr/local/bin/tenant_manager.py
 
-# Verify tenant manager installation
+# Verify tenant manager installation with detailed checks
+echo "🔍 Verifying tenant manager installation..."
 if [ -f "/usr/local/bin/tenant_manager.py" ] && [ -s "/usr/local/bin/tenant_manager.py" ]; then
-    echo "✅ Tenant manager installed successfully"
+    echo "✅ Tenant manager file exists and is not empty"
     echo "📊 Tenant manager file info:"
     ls -la /usr/local/bin/tenant_manager.py
     
+    # Check file size and content
+    FILE_SIZE=$(stat -c%s "/usr/local/bin/tenant_manager.py")
+    echo "📏 File size: $FILE_SIZE bytes"
+    
+    if [ "$FILE_SIZE" -lt 1000 ]; then
+        echo "⚠️ Warning: File seems too small (less than 1KB)"
+        echo "🔍 File content preview:"
+        head -5 /usr/local/bin/tenant_manager.py
+    fi
+    
+    # Test Python interpreter
+    echo "🐍 Testing Python interpreter..."
+    python3 --version || {
+        echo "❌ Python3 not working"
+        exit 1
+    }
+    
+    # Test required Python modules
+    echo "📦 Testing required Python modules..."
+    python3 -c "import psutil; print('psutil version:', psutil.__version__)" || {
+        echo "❌ psutil module not available"
+        exit 1
+    }
+    
+    python3 -c "import boto3; print('boto3 version:', boto3.__version__)" || {
+        echo "❌ boto3 module not available"
+        exit 1
+    }
+    
+    python3 -c "import requests; print('requests version:', requests.__version__)" || {
+        echo "❌ requests module not available"
+        exit 1
+    }
+    
     # Test that the tenant manager can be imported
     echo "🧪 Testing tenant manager import..."
-    if python3 -c "import sys; sys.path.append('/usr/local/bin'); import tenant_manager; print('Import successful')" 2>/dev/null; then
+    if python3 -c "import sys; sys.path.append('/usr/local/bin'); import tenant_manager; print('✅ Tenant manager import successful')" 2>&1; then
         echo "✅ Tenant manager import test passed"
     else
-        echo "⚠️ Tenant manager import test failed, but continuing..."
+        echo "❌ Tenant manager import test failed"
+        echo "🔍 Attempting detailed import debugging..."
+        python3 -c "
+import sys
+sys.path.append('/usr/local/bin')
+try:
+    import tenant_manager
+    print('Import worked unexpectedly')
+except Exception as e:
+    print(f'Import error: {e}')
+    print(f'Error type: {type(e).__name__}')
+" 2>&1
+        exit 1
     fi
 else
     echo "❌ Tenant manager installation failed"
-    echo "🔍 Checking installation..."
-    ls -la /usr/local/bin/tenant_manager.py 2>/dev/null || echo "File not found"
+    echo "🔍 Checking installation details..."
+    
+    if [ ! -f "/usr/local/bin/tenant_manager.py" ]; then
+        echo "❌ File does not exist: /usr/local/bin/tenant_manager.py"
+    elif [ ! -s "/usr/local/bin/tenant_manager.py" ]; then
+        echo "❌ File exists but is empty: /usr/local/bin/tenant_manager.py"
+        ls -la /usr/local/bin/tenant_manager.py
+    fi
+    
+    echo "🔍 Checking source file:"
+    ls -la tenant_manager.py 2>/dev/null || echo "Source file not found"
+    
     exit 1
 fi
 
@@ -362,7 +497,81 @@ systemctl daemon-reload
 systemctl enable comfyui-multitenant.service
 checkpoint "SERVICES_CREATED"
 
-# --- 11. FINAL AMI CLEANUP ---
+# --- 11. FINAL VALIDATION ---
+echo "🔍 Performing final validation before AMI completion..."
+
+VALIDATION_ERRORS=()
+
+# Check tenant manager installation
+if [ -f "/usr/local/bin/tenant_manager.py" ] && [ -s "/usr/local/bin/tenant_manager.py" ]; then
+    echo "✅ Tenant manager file exists"
+    
+    # Test import
+    if python3 -c "import sys; sys.path.append('/usr/local/bin'); import tenant_manager" 2>/dev/null; then
+        echo "✅ Tenant manager can be imported"
+    else
+        VALIDATION_ERRORS+=("Tenant manager cannot be imported")
+    fi
+else
+    VALIDATION_ERRORS+=("Tenant manager file missing or empty")
+fi
+
+# Check Python and required packages
+if command -v python3 >/dev/null 2>&1; then
+    echo "✅ Python3 is available"
+    
+    # Check required packages
+    for package in psutil boto3 requests; do
+        if python3 -c "import $package" 2>/dev/null; then
+            echo "✅ Python package $package is available"
+        else
+            VALIDATION_ERRORS+=("Python package $package is missing")
+        fi
+    done
+else
+    VALIDATION_ERRORS+=("Python3 is not available")
+fi
+
+# Check systemd service
+if [ -f "/etc/systemd/system/comfyui-multitenant.service" ]; then
+    echo "✅ Systemd service file exists"
+else
+    VALIDATION_ERRORS+=("Systemd service file is missing")
+fi
+
+# Check required directories
+for dir in "/workspace" "/var/log/comfyui" "/scripts"; do
+    if [ -d "$dir" ]; then
+        echo "✅ Directory $dir exists"
+    else
+        VALIDATION_ERRORS+=("Directory $dir is missing")
+    fi
+done
+
+# Report validation results
+if [ ${#VALIDATION_ERRORS[@]} -gt 0 ]; then
+    echo "❌ VALIDATION FAILED - Cannot proceed with AMI creation"
+    echo "Validation errors found:"
+    for error in "${VALIDATION_ERRORS[@]}"; do
+        echo "  ❌ $error"
+    done
+    
+    echo ""
+    echo "🔍 System debugging information:"
+    echo "Python version: $(python3 --version 2>&1 || echo 'Not available')"
+    echo "Pip packages: $(python3 -m pip list 2>/dev/null | head -10 || echo 'Cannot list packages')"
+    echo "Tenant manager file: $(ls -la /usr/local/bin/tenant_manager.py 2>/dev/null || echo 'Not found')"
+    echo "Available Python modules:"
+    python3 -c "import sys; print('Python path:', sys.path)" 2>/dev/null || echo "Cannot check Python path"
+    
+    exit 1
+else
+    echo "🎉 All validation checks passed!"
+fi
+
+checkpoint "VALIDATION_COMPLETE"
+
+# --- 12. FINAL AMI CLEANUP ---
 echo "🧹 Finalizing and cleaning up for AMI creation..."
 
 # Stop services that shouldn't be running in the AMI
