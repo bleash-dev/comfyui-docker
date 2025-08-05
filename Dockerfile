@@ -20,8 +20,7 @@ ENV VENV_DIR=/opt/venv
 ENV COMFYUI_VENV=$VENV_DIR/comfyui
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
-    git \
+RUN apt-get update && apt-get install -y git \
     python${PYTHON_VERSION} \
     python${PYTHON_VERSION}-venv \
     python3-pip \
