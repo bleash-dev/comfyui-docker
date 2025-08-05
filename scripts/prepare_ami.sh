@@ -283,8 +283,13 @@ checkpoint "SCRIPTS_SETUP"
 echo "📡 Configuring CloudWatch..."
 if [ -f "/scripts/setup_cloudwatch.sh" ]; then
     echo "🔧 Running CloudWatch setup script..."
-    bash /scripts/setup_cloudwatch.sh
-    checkpoint "CLOUDWATCH_CONFIGURED"
+    if bash /scripts/setup_cloudwatch.sh; then
+        echo "✅ CloudWatch setup completed successfully"
+        checkpoint "CLOUDWATCH_CONFIGURED"
+    else
+        echo "⚠️ CloudWatch setup encountered issues but continuing (non-fatal)"
+        checkpoint "CLOUDWATCH_CONFIGURED_WITH_WARNINGS"
+    fi
 else
     echo "⚠️ CloudWatch setup script not found, skipping..."
     checkpoint "CLOUDWATCH_SKIPPED"

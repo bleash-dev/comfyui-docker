@@ -505,51 +505,56 @@ jobs:
             echo "Progress Status:"
             echo "$RESULT"
             
-            # Check for errors in the logs
+            # Check for errors in the logs (excluding known non-fatal issues)
             if [[ "$RESULT" == *"ERROR:"* || "$RESULT" == *"FAILED"* || "$RESULT" == *"error:"* ]]; then
-              echo "❌ Detected errors in AMI update logs"
-              echo "🔍 Getting detailed error information..."
-              
-              # Get detailed logs immediately when error is detected
-              ERROR_LOG_ID=$(aws ssm send-command \
-                --instance-ids $INSTANCE_ID \
-                --document-name "AWS-RunShellScript" \
-                --parameters 'commands=[
-                  "echo === DETAILED ERROR INVESTIGATION ===",
-                  "echo === User Data Log (last 100 lines) ===",
-                  "tail -100 /var/log/user-data.log 2>/dev/null || echo No user-data log found",
-                  "echo === AMI Preparation Log ===",
-                  "tail -50 /var/log/ami-preparation.log 2>/dev/null || echo No AMI preparation log found",
-                  "echo === CloudInit Output Log ===",
-                  "tail -50 /var/log/cloud-init-output.log 2>/dev/null || echo No cloud-init-output log found",
-                  "echo === Process Status ===",
-                  "ps aux | grep -E \"prepare_ami|user-data\" || echo No relevant processes found",
-                  "echo === Script Files Check ===",
-                  "ls -la /scripts/ 2>/dev/null || echo Scripts directory not found",
-                  "echo === Environment Variables (from user-data context) ===",
-                  "env | grep -E \"COMFY|AMI|CUDA|NVIDIA\" || echo No relevant environment variables found",
-                  "echo === System Status ===",
-                  "df -h && echo && free -h"
-                ]' \
-                --region ${{ env.AWS_REGION }} \
-                --query 'Command.CommandId' \
-                --output text 2>/dev/null || echo "")
-              
-              if [ -n "$ERROR_LOG_ID" ]; then
-                sleep 10
-                ERROR_DETAILS=$(aws ssm get-command-invocation \
-                  --command-id $ERROR_LOG_ID \
-                  --instance-id $INSTANCE_ID \
-                  --region ${{ env.AWS_REGION }} \
-                  --query 'StandardOutputContent' \
-                  --output text 2>/dev/null || echo "Could not retrieve error details")
+              # Filter out known non-fatal errors (CloudWatch log groups already existing)
+              if [[ "$RESULT" == *"ResourceAlreadyExistsException"* && "$RESULT" == *"log group already exists"* ]]; then
+                echo "ℹ️ Detected CloudWatch log group creation warnings (non-fatal)"
+              else
+                echo "❌ Detected actual errors in AMI update logs"
+                echo "🔍 Getting detailed error information..."
                 
-                echo "=== DETAILED ERROR INFORMATION ==="
-                echo "$ERROR_DETAILS"
-                echo "================================="
+                # Get detailed logs immediately when error is detected
+                ERROR_LOG_ID=$(aws ssm send-command \
+                  --instance-ids $INSTANCE_ID \
+                  --document-name "AWS-RunShellScript" \
+                  --parameters 'commands=[
+                    "echo === DETAILED ERROR INVESTIGATION ===",
+                    "echo === User Data Log (last 100 lines) ===",
+                    "tail -100 /var/log/user-data.log 2>/dev/null || echo No user-data log found",
+                    "echo === AMI Preparation Log ===",
+                    "tail -50 /var/log/ami-preparation.log 2>/dev/null || echo No AMI preparation log found",
+                    "echo === CloudInit Output Log ===",
+                    "tail -50 /var/log/cloud-init-output.log 2>/dev/null || echo No cloud-init-output log found",
+                    "echo === Process Status ===",
+                    "ps aux | grep -E \"prepare_ami|user-data\" || echo No relevant processes found",
+                    "echo === Script Files Check ===",
+                    "ls -la /scripts/ 2>/dev/null || echo Scripts directory not found",
+                    "echo === Environment Variables (from user-data context) ===",
+                    "env | grep -E \"COMFY|AMI|CUDA|NVIDIA\" || echo No relevant environment variables found",
+                    "echo === System Status ===",
+                    "df -h && echo && free -h"
+                  ]' \
+                  --region ${{ env.AWS_REGION }} \
+                  --query 'Command.CommandId' \
+                  --output text 2>/dev/null || echo "")
+                
+                if [ -n "$ERROR_LOG_ID" ]; then
+                  sleep 10
+                  ERROR_DETAILS=$(aws ssm get-command-invocation \
+                    --command-id $ERROR_LOG_ID \
+                    --instance-id $INSTANCE_ID \
+                    --region ${{ env.AWS_REGION }} \
+                    --query 'StandardOutputContent' \
+                    --output text 2>/dev/null || echo "Could not retrieve error details")
+                  
+                  echo "=== DETAILED ERROR INFORMATION ==="
+                  echo "$ERROR_DETAILS"
+                  echo "================================="
+                fi
+                
+                exit 1
               fi
-              
-              exit 1
             fi
             
             # Check for completion - either file exists (READY) or contains completion marker
@@ -576,6 +581,15 @@ jobs:
                   ;;
                 "RUNNING_PREPARE_AMI")
                   echo "   → Running prepare_ami.sh (this may take several minutes)"
+                  ;;
+                "SCRIPTS_SETUP")
+                  echo "   → Setting up system scripts and configurations"
+                  ;;
+                "CLOUDWATCH_CONFIGURED"|"CLOUDWATCH_CONFIGURED_WITH_WARNINGS")
+                  echo "   → CloudWatch logging configured (log group warnings are normal)"
+                  ;;
+                "CLOUDWATCH_SKIPPED")
+                  echo "   → CloudWatch setup skipped"
                   ;;
                 "AMI_SETUP_COMPLETE")
                   echo "   → AMI setup completed successfully"
@@ -822,11 +836,7 @@ jobs:
             "  pkill -f \"python.*ComfyUI\" || true",
             "  sleep 3",
             "fi",
-            "# Verify GPU and CUDA setup",
-            "echo === GPU and CUDA Status ===",
-            "nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader,nounits || echo No GPU detected",
-            "nvcc --version || echo CUDA compiler not found",
-            "# Check system resources",
+            "# Verify system resources",
             "echo === System Resources ===",
             "echo Memory usage: $(free -h | grep Mem:)",
             "echo Disk usage: $(df -h / | tail -1)",

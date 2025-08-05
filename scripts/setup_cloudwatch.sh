@@ -30,7 +30,11 @@ fi
 CONFIG_DIR="/opt/aws/amazon-cloudwatch-agent/etc"
 CONFIG_FILE="$CONFIG_DIR/amazon-cloudwatch-agent.json"
 SCRIPTS_DIR="/scripts" # Define a single location for helper scripts
-REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+
+# Get region with fallback
+echo "🌍 [CW] Detecting AWS region..."
+REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "us-east-1")
+echo "📍 [CW] Using region: $REGION"
 
 # Ensure directories exist
 mkdir -p "$CONFIG_DIR"
@@ -88,15 +92,36 @@ LOG_GROUPS=(
 
 for group in "${LOG_GROUPS[@]}"; do
     echo "   - Ensuring log group '$group' exists..."
-    aws logs create-log-group --log-group-name "$group" --region "$REGION" || true
+    # Check if log group already exists first to avoid error noise
+    # This prevents AWS CLI from showing "ResourceAlreadyExistsException" errors
+    if aws logs describe-log-groups --log-group-name-prefix "$group" --region "$REGION" --query "logGroups[?logGroupName=='$group']" --output text 2>/dev/null | grep -q "$group"; then
+        echo "     ✓ Log group '$group' already exists"
+    else
+        # Create the log group only if it doesn't exist
+        if aws logs create-log-group --log-group-name "$group" --region "$REGION" 2>/dev/null; then
+            echo "     ✓ Created log group '$group'"
+        else
+            echo "     ⚠️  Failed to create log group '$group' (may already exist or insufficient permissions)"
+        fi
+    fi
 done
 echo "✅ [CW] Log groups are ready."
 
 echo "🚀 [CW] Applying configuration and starting agent..."
 # This command validates the config, applies it, and starts/restarts the service.
-/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:"$CONFIG_FILE" -s
-
-echo "✅ [CW] CloudWatch agent is configured and running."
+if /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:"$CONFIG_FILE" -s; then
+    echo "✅ [CW] CloudWatch agent is configured and running."
+    
+    # Verify the agent is actually running
+    if systemctl is-active --quiet amazon-cloudwatch-agent; then
+        echo "✅ [CW] CloudWatch agent service is active"
+    else
+        echo "⚠️ [CW] CloudWatch agent service may not be fully active yet"
+    fi
+else
+    echo "❌ [CW] Failed to configure CloudWatch agent"
+    exit 1
+fi
 
 
 # ---- Create the helper script for dynamic pod logging ----
