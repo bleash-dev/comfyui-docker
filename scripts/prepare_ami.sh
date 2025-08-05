@@ -634,8 +634,7 @@ checkpoint "VALIDATION_COMPLETE"
 # --- 12. FINAL AMI CLEANUP ---
 echo "🧹 Finalizing and cleaning up for AMI creation..."
 
-# Stop services that shouldn't be running in the AMI
-systemctl stop comfyui-multitenant.service || true
+# NOTE: We do NOT stop the service here because the GitHub Actions workflow
 
 # Clean apt cache
 apt-get autoremove -y
@@ -655,4 +654,5 @@ echo ""
 echo "🚀🚀🚀 AMI preparation completed successfully! 🚀🚀🚀"
 echo ""
 echo "Ready to create AMI."
+echo "🎯 Service is still running for verification by the deployment workflow."
 echo "Use 'comfyui-monitor' command on new instances to check status."
