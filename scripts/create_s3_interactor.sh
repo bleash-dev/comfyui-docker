@@ -343,6 +343,11 @@ show_s3_usage() {
     echo "Advanced Operations:"
     echo "  s3_object_exists s3://bucket/path/file.txt"
     echo "  s3_get_object_size s3://bucket/path/file.txt"
+    echo ""
+    echo "Testing:"
+    echo "  s3_test_connectivity"
+    echo "  s3_get_config"
+}
 
 # Allow script to be sourced or called directly
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
