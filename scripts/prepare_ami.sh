@@ -11,11 +11,6 @@ set -ex
 # --- 1. INITIAL SETUP ---
 echo "🏗️ Preparing EC2 instance for ComfyUI AMI creation (Docker-Free)..."
 
-# Docker image parameter is now optional (we're not using Docker)
-DOCKER_IMAGE="$1"
-if [ -n "$DOCKER_IMAGE" ]; then
-    echo "📝 Note: Docker image parameter provided but not used in Docker-free setup: $DOCKER_IMAGE"
-fi
 
 # Set up unified logging
 LOG_FILE="/var/log/ami-preparation.log"
@@ -220,17 +215,7 @@ rm -f "$CW_AGENT_DEB"
 
 checkpoint "CLOUDWATCH_AGENT_INSTALLED"
 
-# --- 7. CONFIGURE CLOUDWATCH ---
-echo "📡 Configuring CloudWatch..."
-if [ -f "/scripts/setup_cloudwatch.sh" ]; then
-    bash /scripts/setup_cloudwatch.sh
-    checkpoint "CLOUDWATCH_CONFIGURED"
-else
-    echo "⚠️ CloudWatch setup script not found, skipping..."
-    checkpoint "CLOUDWATCH_SKIPPED"
-fi
-
-# --- 8. SETUP APPLICATION DIRECTORIES ---
+# --- 7. SETUP APPLICATION DIRECTORIES ---
 echo "📁 Setting up application directories..."
 
 # Create required directories
@@ -242,73 +227,138 @@ echo 'export DEBIAN_FRONTEND=noninteractive' >> /etc/environment
 echo 'export PYTHONUNBUFFERED=1' >> /etc/environment
 echo 'export PYTHON_VERSION=3.10' >> /etc/environment
 echo 'export XPU_TARGET=NVIDIA_GPU' >> /etc/environment
-echo 'export VENV_DIR=/opt/venv' >> /etc/environment
-echo 'export COMFYUI_VENV=/opt/venv/comfyui' >> /etc/environment
+
 
 checkpoint "DIRECTORIES_CREATED"
 
-# --- 9. DOWNLOAD AND SETUP SCRIPTS ---
+# --- 8. DOWNLOAD AND SETUP SCRIPTS ---
 echo "📋 Downloading and setting up scripts..."
 
 # Determine environment and S3 path based on available information
 ENVIRONMENT="${ENVIRONMENT:-dev}"  # Default to dev if not set
-S3_PREFIX="${S3_PREFIX:-s3://viral-comm-api-ec2-deployments-dev/comfy-docker/${ENVIRONMENT}}"
+AWS_REGION="${AWS_REGION:-us-east-1}"  # Use environment variable or default
+S3_PREFIX="${S3_PREFIX:-s3://viral-comm-api-ec2-deployments-dev/comfyui-ami/${ENVIRONMENT}}"
 
 echo "🌍 Environment: $ENVIRONMENT"
+echo "🌎 AWS Region: $AWS_REGION"
 echo "📦 S3 Path: $S3_PREFIX"
 
 # Create scripts directory
-mkdir -p /scripts /tmp/downloaded_scripts
-cd /tmp/downloaded_scripts
+mkdir -p /scripts
+cd /scripts
 
-# Download all required scripts from S3
-echo "📥 Downloading scripts from S3..."
-if aws s3 cp "${S3_PREFIX}/tenant_manager.py" tenant_manager.py --region us-east-1; then
-    echo "✅ Downloaded tenant_manager.py"
-else
-    echo "⚠️ Failed to download tenant_manager.py from S3, checking if it exists locally..."
-    if [ -f "/scripts/tenant_manager.py" ]; then
-        cp /scripts/tenant_manager.py tenant_manager.py
-        echo "✅ Using local tenant_manager.py"
-    else
-        echo "❌ tenant_manager.py not found in S3 or locally"
-        exit 1
-    fi
-fi
-
-# Download other scripts
-for script in "setup_cloudwatch.sh" "create_s3_interactor.sh"; do
-    if aws s3 cp "${S3_PREFIX}/${script}" "${script}" --region us-east-1; then
-        echo "✅ Downloaded ${script}"
-    else
-        echo "⚠️ Failed to download ${script} from S3, checking locally..."
-        if [ -f "/scripts/${script}" ]; then
-            cp "/scripts/${script}" "${script}"
-            echo "✅ Using local ${script}"
-        else
-            echo "⚠️ ${script} not found in S3 or locally, skipping..."
-        fi
-    fi
-done
-
-# Install tenant manager
-if [ -f "tenant_manager.py" ]; then
-    cp tenant_manager.py /usr/local/bin/tenant_manager.py
-    chmod +x /usr/local/bin/tenant_manager.py
-    echo "✅ Tenant manager installed"
-else
-    echo "❌ tenant_manager.py not available"
+# Download all scripts from S3
+echo "📥 Downloading all scripts from S3..."
+echo "🔍 Testing AWS CLI access first..."
+if ! aws sts get-caller-identity --region "${AWS_REGION}" >/dev/null 2>&1; then
+    echo "❌ AWS CLI access test failed"
+    echo "🔍 Checking AWS credentials and permissions..."
+    echo "Current user: $(whoami)"
+    echo "AWS CLI version: $(aws --version 2>&1 || echo 'AWS CLI not found')"
+    echo "Environment variables:"
+    env | grep -E "AWS|EC2" || echo "No AWS environment variables found"
     exit 1
 fi
 
-# Copy all other scripts to /scripts directory
-cp -f * /scripts/ 2>/dev/null || true
-find /scripts -name "*.sh" -exec chmod +x {} \;
-find /scripts -name "*.py" -exec chmod +x {} \;
+echo "✅ AWS CLI access confirmed"
+echo "🔄 Syncing scripts from S3..."
+
+if aws s3 sync "${S3_PREFIX}/" . --region "${AWS_REGION}"; then
+    echo "✅ Downloaded all scripts from S3"
+    echo "📋 Downloaded files:"
+    ls -la
+else
+    echo "❌ Failed to download scripts from S3"
+    echo "🔍 S3 access details:"
+    echo "  S3 Path: ${S3_PREFIX}"
+    echo "  AWS Region: ${AWS_REGION}"
+    echo "  Current directory: $(pwd)"
+    echo "🔍 Checking what we have locally..."
+    ls -la . || echo "No files found"
+    echo "🔍 Attempting to list S3 bucket contents..."
+    aws s3 ls "${S3_PREFIX}/" --region "${AWS_REGION}" || echo "Cannot list S3 contents"
+    echo "⚠️ This is a critical error - AMI preparation cannot continue without scripts"
+    exit 1
+fi
+
+# Verify essential files are present and not empty
+echo "🔍 Verifying essential files are present and valid..."
+REQUIRED_FILES=("tenant_manager.py")
+MISSING_FILES=()
+EMPTY_FILES=()
+
+for file in "${REQUIRED_FILES[@]}"; do
+    if [ ! -f "$file" ]; then
+        MISSING_FILES+=("$file")
+    elif [ ! -s "$file" ]; then
+        EMPTY_FILES+=("$file")
+    fi
+done
+
+if [ ${#MISSING_FILES[@]} -gt 0 ]; then
+    echo "❌ Missing required files: ${MISSING_FILES[*]}"
+    echo "🔍 Available files:"
+    ls -la
+    exit 1
+fi
+
+if [ ${#EMPTY_FILES[@]} -gt 0 ]; then
+    echo "❌ Empty required files: ${EMPTY_FILES[*]}"
+    echo "🔍 File sizes:"
+    ls -la "${EMPTY_FILES[@]}"
+    exit 1
+fi
+
+echo "✅ All essential files are present and valid"
+
+# Install tenant manager
+echo "📦 Installing tenant manager..."
+cp tenant_manager.py /usr/local/bin/tenant_manager.py
+chmod +x /usr/local/bin/tenant_manager.py
+
+# Verify tenant manager installation
+if [ -f "/usr/local/bin/tenant_manager.py" ] && [ -s "/usr/local/bin/tenant_manager.py" ]; then
+    echo "✅ Tenant manager installed successfully"
+    echo "📊 Tenant manager file info:"
+    ls -la /usr/local/bin/tenant_manager.py
+    
+    # Test that the tenant manager can be imported
+    echo "🧪 Testing tenant manager import..."
+    if python3 -c "import sys; sys.path.append('/usr/local/bin'); import tenant_manager; print('Import successful')" 2>/dev/null; then
+        echo "✅ Tenant manager import test passed"
+    else
+        echo "⚠️ Tenant manager import test failed, but continuing..."
+    fi
+else
+    echo "❌ Tenant manager installation failed"
+    echo "🔍 Checking installation..."
+    ls -la /usr/local/bin/tenant_manager.py 2>/dev/null || echo "File not found"
+    exit 1
+fi
+
+# Make all scripts executable
+echo "🔧 Making all scripts executable..."
+find /scripts -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
+find /scripts -name "*.py" -exec chmod +x {} \; 2>/dev/null || true
+
+# Verify permissions
+echo "📋 Script permissions:"
+ls -la /scripts/*.sh /scripts/*.py 2>/dev/null || echo "No shell/python scripts found"
 
 echo "✅ Scripts setup completed"
 
 checkpoint "SCRIPTS_SETUP"
+
+# --- 9. CONFIGURE CLOUDWATCH ---
+echo "📡 Configuring CloudWatch..."
+if [ -f "/scripts/setup_cloudwatch.sh" ]; then
+    echo "🔧 Running CloudWatch setup script..."
+    bash /scripts/setup_cloudwatch.sh
+    checkpoint "CLOUDWATCH_CONFIGURED"
+else
+    echo "⚠️ CloudWatch setup script not found, skipping..."
+    checkpoint "CLOUDWATCH_SKIPPED"
+fi
 
 # --- 10. CREATE SYSTEM SERVICES (Docker-Free) ---
 echo "⚙️ Creating systemd services..."
@@ -332,7 +382,6 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PYTHON_VERSION=3.10
 Environment=XPU_TARGET=NVIDIA_GPU
 Environment=VENV_DIR=/opt/venv
-Environment=COMFYUI_VENV=/opt/venv/comfyui
 Environment=CUDA_VERSION=11.8
 Environment=CUDA_HOME=/usr/local/cuda-11.8
 Environment=PATH=/usr/local/cuda-11.8/bin:/usr/local/bin:/usr/bin:/bin
@@ -417,8 +466,8 @@ history -c
 > ~/.bash_history
 
 # Signal completion
-echo "AMI_PREPARATION_COMPLETE" > /tmp/ami_ready.txt
-checkpoint "AMI_PREPARATION_COMPLETE"
+echo "AMI_SETUP_COMPLETE" > /tmp/ami_ready.txt
+checkpoint "AMI_SETUP_COMPLETE"
 
 echo ""
 echo "🚀🚀🚀 AMI preparation completed successfully! 🚀🚀🚀"

@@ -28,91 +28,50 @@ jobs:
         role-to-assume: ${{ secrets.GH_ROLE_ARN }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Get base AMI (existing ComfyUI AMI or Ubuntu)
+    - name: Get base Ubuntu AMI (Always Fresh)
       id: base-ami
       run: |
         ENVIRONMENT="${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}"
-        echo "🔍 Looking for existing ComfyUI AMI for environment: $ENVIRONMENT"
+        echo "🆕 Always using fresh Ubuntu base for consistent AMI builds"
         
-        # First, try to get the latest ComfyUI AMI for this environment
-        # Try multiple search patterns to catch different naming conventions
-        EXISTING_AMI=""
-        
-        # Pattern 1: Exact name match (comfyui-multitenant-dev)
-        EXISTING_AMI=$(aws ec2 describe-images \
-          --owners self \
-          --filters "Name=name,Values=comfyui-multitenant-$ENVIRONMENT" \
-          --query 'Images[0].ImageId' \
+        # Get latest Ubuntu 22.04 LTS AMI
+        UBUNTU_AMI=$(aws ec2 describe-images \
+          --owners 099720109477 \
+          --filters "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*" \
+              "Name=state,Values=available" \
+          --query "Images | sort_by(@, &CreationDate) | [-1].ImageId" \
           --output text \
-          --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+          --region ${{ env.AWS_REGION }})
         
-        # Pattern 2: Name with wildcard (comfyui-multitenant-dev-*)
-        if [ -z "$EXISTING_AMI" ] || [ "$EXISTING_AMI" = "None" ]; then
-          EXISTING_AMI=$(aws ec2 describe-images \
-            --owners self \
-            --filters "Name=name,Values=comfyui-multitenant-$ENVIRONMENT-*" \
-            --query 'Images | sort_by(@, &CreationDate) | [-1].ImageId' \
-            --output text \
-            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
-        fi
+        echo "🖥️ Using base Ubuntu AMI: $UBUNTU_AMI"
+        echo "ami-id=$UBUNTU_AMI" >> $GITHUB_OUTPUT
+        echo "ami-type=ubuntu" >> $GITHUB_OUTPUT
         
-        # Pattern 3: Tag-based search for Environment
-        if [ -z "$EXISTING_AMI" ] || [ "$EXISTING_AMI" = "None" ]; then
-          EXISTING_AMI=$(aws ec2 describe-images \
-            --owners self \
-            --filters "Name=tag:Environment,Values=$ENVIRONMENT" \
-            --query 'Images | sort_by(@, &CreationDate) | [-1].ImageId' \
-            --output text \
-            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
-        fi
-        
-        if [ -n "$EXISTING_AMI" ] && [ "$EXISTING_AMI" != "None" ]; then
-          echo "✅ Found existing ComfyUI AMI: $EXISTING_AMI"
-          echo "🔄 Will update existing AMI instead of creating from scratch"
-          echo "ami-id=$EXISTING_AMI" >> $GITHUB_OUTPUT
-          echo "ami-type=existing" >> $GITHUB_OUTPUT
-          
-          # Get existing AMI details for reference
-          aws ec2 describe-images \
-            --image-ids $EXISTING_AMI \
-            --query 'Images[0].[Name,Description,CreationDate]' \
-            --output table \
-            --region ${{ env.AWS_REGION }}
-        else
-          echo "📝 No existing ComfyUI AMI found, using fresh Ubuntu base"
-          # Get latest Ubuntu AMI
-          UBUNTU_AMI=$(aws ec2 describe-images \
-            --owners 099720109477 \
-            --filters "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*" \
-                "Name=state,Values=available" \
-            --query "Images | sort_by(@, &CreationDate) | [-1].ImageId" \
-            --output text \
-            --region ${{ env.AWS_REGION }})
-          
-          echo "🖥️ Using base Ubuntu AMI: $UBUNTU_AMI"
-          echo "ami-id=$UBUNTU_AMI" >> $GITHUB_OUTPUT
-          echo "ami-type=ubuntu" >> $GITHUB_OUTPUT
-        fi
+        # Get Ubuntu AMI details for reference
+        aws ec2 describe-images \
+          --image-ids $UBUNTU_AMI \
+          --query 'Images[0].[Name,Description,CreationDate]' \
+          --output table \
+          --region ${{ env.AWS_REGION }}
 
     - name: Upload scripts to S3
       run: |
         ENVIRONMENT="${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}"
-        S3_PREFIX="s3://viral-comm-api-ec2-deployments-dev/comfy-docker/${ENVIRONMENT}"
+        S3_PREFIX="s3://viral-comm-api-ec2-deployments-dev/comfyui-ami/${ENVIRONMENT}"
         
-        echo "📤 Uploading all required scripts to S3..."
+        echo "📤 Uploading all scripts to S3..."
         echo "S3 path: ${S3_PREFIX}"
         
-        # Upload all preparation and management scripts
-        aws s3 cp scripts/prepare_ami.sh "${S3_PREFIX}/prepare_ami.sh" --region ${{ env.AWS_REGION }}
-        aws s3 cp scripts/setup_cloudwatch.sh "${S3_PREFIX}/setup_cloudwatch.sh" --region ${{ env.AWS_REGION }}
-        aws s3 cp scripts/tenant_manager.py "${S3_PREFIX}/tenant_manager.py" --region ${{ env.AWS_REGION }}
-        aws s3 cp scripts/create_s3_interactor.sh "${S3_PREFIX}/create_s3_interactor.sh" --region ${{ env.AWS_REGION }}
+        # Simple sync of entire scripts directory
+        echo "🔄 Syncing entire scripts directory to S3..."
+        aws s3 sync scripts/ "${S3_PREFIX}/" --region ${{ env.AWS_REGION }} --delete
         
-        # Upload any other scripts that exist
-        find scripts/ -name "*.sh" -not -path "scripts/prepare_ami.sh" -not -path "scripts/setup_cloudwatch.sh" -not -path "scripts/create_s3_interactor.sh" -exec aws s3 cp {} "${S3_PREFIX}/$(basename {})" --region ${{ env.AWS_REGION }} \;
-        find scripts/ -name "*.py" -not -path "scripts/tenant_manager.py" -exec aws s3 cp {} "${S3_PREFIX}/$(basename {})" --region ${{ env.AWS_REGION }} \;
+        # Verify uploads by listing what was uploaded
+        echo "🔍 Verifying uploads..."
+        echo "Scripts uploaded to S3:"
+        aws s3 ls "${S3_PREFIX}/" --recursive --human-readable --summarize --region ${{ env.AWS_REGION }}
         
-        echo "✅ All scripts uploaded to S3"
+        echo "✅ All scripts uploaded to S3 successfully"
         echo "s3-prefix=${S3_PREFIX}" >> $GITHUB_OUTPUT
 
     - name: Launch EC2 instance for AMI creation
@@ -128,8 +87,7 @@ jobs:
         
         # Create user data script
         ENVIRONMENT="${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}"
-        S3_PREFIX="s3://viral-comm-api-ec2-deployments-dev/comfy-docker/${ENVIRONMENT}"
-        AMI_TYPE="${{ steps.base-ami.outputs.ami-type }}"
+        S3_PREFIX="s3://viral-comm-api-ec2-deployments-dev/comfyui-ami/${ENVIRONMENT}"
         
         cat > user-data.sh << EOF
         #!/bin/bash
@@ -137,110 +95,40 @@ jobs:
         
         # Set environment variables
         export DEBIAN_FRONTEND=noninteractive
-        export AMI_TYPE="$AMI_TYPE"
         export ENVIRONMENT="$ENVIRONMENT"
         export S3_PREFIX="$S3_PREFIX"
         
         # Log everything
         exec > >(tee /var/log/user-data.log) 2>&1
-        echo "Starting AMI update at \$(date)"
-        echo "AMI Type: \$AMI_TYPE"
+        echo "🚀 Starting ComfyUI AMI setup at \$(date)"
+        echo "Environment: \$ENVIRONMENT"
+        echo "S3 Prefix: \$S3_PREFIX"
+        echo "SETUP_STARTING" > /tmp/ami_progress.txt
         
-        if [ "\$AMI_TYPE" = "existing" ]; then
-          echo "🔄 Updating existing ComfyUI AMI (Docker-Free)"
-          echo "UPDATING_EXISTING_AMI" > /tmp/ami_progress.txt
-          
-          # Stop the tenant manager service for clean AMI state
-          echo "� Stopping ComfyUI services for clean AMI state..."
-          systemctl stop comfyui-multitenant.service || true
-          
-          # Clean up any running ComfyUI processes
-          echo "🧹 Cleaning up any running ComfyUI processes..."
-          pkill -f "python.*ComfyUI" || true
-          pkill -f "python.*tenant_manager" || true
-          
-          # Download and update scripts from S3
-          echo "📥 Downloading updated scripts from S3..."
-          mkdir -p /tmp/scripts
-          cd /tmp/scripts
-          
-          # Download all scripts
-          aws s3 cp "${S3_PREFIX}/tenant_manager.py" tenant_manager.py --region ${{ env.AWS_REGION }}
-          aws s3 cp "${S3_PREFIX}/setup_cloudwatch.sh" setup_cloudwatch.sh --region ${{ env.AWS_REGION }}
-          aws s3 cp "${S3_PREFIX}/create_s3_interactor.sh" create_s3_interactor.sh --region ${{ env.AWS_REGION }}
-          
-          # Update tenant manager
-          cp tenant_manager.py /usr/local/bin/tenant_manager.py
-          chmod +x /usr/local/bin/tenant_manager.py
-          
-          # Update other scripts
-          cp setup_cloudwatch.sh /scripts/setup_cloudwatch.sh || mkdir -p /scripts && cp setup_cloudwatch.sh /scripts/
-          cp create_s3_interactor.sh /scripts/create_s3_interactor.sh
-          chmod +x /scripts/*.sh
-          
-          echo "✅ Scripts updated successfully"
-          echo "EXISTING_AMI_UPDATED" > /tmp/ami_progress.txt
-          
-        else
-          echo "🆕 Setting up fresh ComfyUI AMI from Ubuntu base (Docker-Free)"
-          echo "FRESH_SETUP_STARTING" > /tmp/ami_progress.txt
-          
-          # Update system
-          apt-get update -y
-          
-          # Install required packages
-          apt-get install -y awscli curl wget jq
-          
-          # Download scripts from S3
-          echo "📥 Downloading setup scripts from S3..."
-          mkdir -p /scripts
-          cd /scripts
-          
-          # Download all required scripts
-          aws s3 cp "${S3_PREFIX}/prepare_ami.sh" prepare_ami.sh --region ${{ env.AWS_REGION }}
-          aws s3 cp "${S3_PREFIX}/setup_cloudwatch.sh" setup_cloudwatch.sh --region ${{ env.AWS_REGION }}
-          aws s3 cp "${S3_PREFIX}/tenant_manager.py" tenant_manager.py --region ${{ env.AWS_REGION }}
-          aws s3 cp "${S3_PREFIX}/create_s3_interactor.sh" create_s3_interactor.sh --region ${{ env.AWS_REGION }}
-          
-          # Make all scripts executable
-          chmod +x /scripts/*.sh
-          chmod +x /scripts/*.py
-          
-          # Run the full AMI preparation (Docker-free)
-          echo "🔧 Running full AMI preparation (Docker-Free)..."
-          echo "RUNNING_FULL_SETUP" > /tmp/ami_progress.txt
-          
-          # Run with timeout to prevent infinite hangs
-          timeout 1800 /scripts/prepare_ami.sh || {
-              echo "❌ AMI preparation script timed out or failed"
-              echo "Exit code: \$?"
-              echo "Last checkpoint:"
-              cat /tmp/ami_progress.txt 2>/dev/null || echo "No progress file found"
-              exit 1
-          }
-          
-          echo "FRESH_SETUP_COMPLETED" > /tmp/ami_progress.txt
-        fi
+        # Update system and install minimal requirements
+        apt-get update -y
+        apt-get install -y awscli
         
-        # Common final steps for both scenarios
-        echo "🔍 Verifying system setup..."
-        if ! command -v python3 >/dev/null; then
-          echo "❌ Python3 not found after setup"
-          exit 1
-        fi
+        # Download all scripts from S3
+        echo "📥 Downloading scripts from S3..."
+        mkdir -p /scripts
+        cd /scripts
+        aws s3 sync "\${S3_PREFIX}/" . --region ${{ env.AWS_REGION }}
+        chmod +x *.sh 2>/dev/null || true
+        chmod +x *.py 2>/dev/null || true
         
-        if [ ! -f "/usr/local/bin/tenant_manager.py" ]; then
-          echo "❌ Tenant manager not found after setup"
-          exit 1
-        fi
-        
-        echo "🧹 Final cleanup..."
-        # Clean up temporary files
-        rm -rf /tmp/scripts || true
+        # Run prepare_ami.sh which handles everything else
+        echo "🔧 Running prepare_ami.sh..."
+        echo "RUNNING_PREPARE_AMI" > /tmp/ami_progress.txt
+        timeout 3600 /scripts/prepare_ami.sh || {
+            echo "❌ prepare_ami.sh failed with exit code: \$?"
+            echo "Last checkpoint: \$(cat /tmp/ami_progress.txt 2>/dev/null || echo 'UNKNOWN')"
+            exit 1
+        }
         
         # Signal completion
-        echo "AMI_UPDATE_COMPLETE" > /tmp/ami_ready.txt
-        echo "AMI update completed at \$(date)"
+        echo "AMI_SETUP_COMPLETE" > /tmp/ami_ready.txt
+        echo "✅ AMI setup completed at \$(date)"
         EOF
         
         # Get VPC and subnet with specific preference
@@ -568,18 +456,10 @@ jobs:
       timeout-minutes: 10
       run: |
         INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
-        AMI_TYPE="${{ steps.base-ami.outputs.ami-type }}"
         
-        # Adjust monitoring based on AMI type
-        if [ "$AMI_TYPE" = "existing" ]; then
-          MAX_ATTEMPTS=20  # Existing AMI updates should be fast (5-10 minutes max)
-          echo "🔧 Monitoring AMI update progress (fast track for existing AMI)..."
-        else
-          MAX_ATTEMPTS=50  # Fresh setup takes longer (15-25 minutes)
-          echo "🔧 Monitoring AMI setup progress (full setup from Ubuntu)..."
-        fi
-        
-        echo "AMI Type: $AMI_TYPE"
+        # Always fresh setup - takes longer (15-25 minutes)
+        MAX_ATTEMPTS=20
+        echo "🔧 Monitoring AMI setup progress (fresh Ubuntu setup)..."
         echo "Max attempts: $MAX_ATTEMPTS"
         
         for i in $(seq 1 $MAX_ATTEMPTS); do
@@ -647,7 +527,7 @@ jobs:
                   "echo === Script Files Check ===",
                   "ls -la /scripts/ 2>/dev/null || echo Scripts directory not found",
                   "echo === Environment Variables (from user-data context) ===",
-                  "env | grep -E \"DOCKER|COMFY|AMI\" || echo No relevant environment variables found",
+                  "env | grep -E \"COMFY|AMI|CUDA|NVIDIA\" || echo No relevant environment variables found",
                   "echo === System Status ===",
                   "df -h && echo && free -h"
                 ]' \
@@ -673,12 +553,12 @@ jobs:
             fi
             
             # Check for completion - either file exists (READY) or contains completion marker
-            if [[ "$RESULT" == *"FILE_EXISTS: READY"* ]] || [[ "$RESULT" == *"AMI_UPDATE_COMPLETE"* ]]; then
+            if [[ "$RESULT" == *"FILE_EXISTS: READY"* ]] || [[ "$RESULT" == *"AMI_SETUP_COMPLETE"* ]]; then
               echo "✅ AMI update completed!"
               if [[ "$RESULT" == *"FILE_EXISTS: READY"* ]]; then
                 echo "   → Detected completion file exists"
               fi
-              if [[ "$RESULT" == *"AMI_UPDATE_COMPLETE"* ]]; then
+              if [[ "$RESULT" == *"AMI_SETUP_COMPLETE"* ]]; then
                 echo "   → Detected completion marker in file content"
               fi
               break
@@ -691,20 +571,17 @@ jobs:
               
               # Provide context for different steps
               case "$CURRENT_STEP" in
-                "UPDATING_EXISTING_AMI")
-                  echo "   → Updating existing ComfyUI AMI with latest scripts"
+                "SETUP_STARTING")
+                  echo "   → Starting AMI setup process"
                   ;;
-                "EXISTING_AMI_UPDATED")
-                  echo "   → Existing AMI successfully updated"
+                "RUNNING_PREPARE_AMI")
+                  echo "   → Running prepare_ami.sh (this may take several minutes)"
                   ;;
-                "FRESH_SETUP_STARTING")
-                  echo "   → Setting up ComfyUI on fresh Ubuntu AMI"
+                "AMI_SETUP_COMPLETE")
+                  echo "   → AMI setup completed successfully"
                   ;;
-                "RUNNING_FULL_SETUP")
-                  echo "   → Running full AMI preparation (this may take several minutes)"
-                  ;;
-                "FRESH_SETUP_COMPLETED")
-                  echo "   → Fresh setup completed successfully"
+                *)
+                  echo "   → Step: $CURRENT_STEP"
                   ;;
               esac
             fi
@@ -749,9 +626,8 @@ jobs:
       timeout-minutes: 5
       run: |
         INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
-        AMI_TYPE="${{ steps.base-ami.outputs.ami-type }}"
         echo "🔍 Verifying ComfyUI setup and health..."
-        echo "AMI Type: $AMI_TYPE"
+        echo "Setup Type: Fresh Ubuntu installation"
         
         # Check system and tenant manager status
         echo "� Checking system and tenant manager status..."
@@ -891,15 +767,10 @@ jobs:
           exit 1
         fi
         
-        # For existing AMI, we can skip the functionality test since we know the base works
-        # and we just need to verify the scripts were updated
-        if [ "$AMI_TYPE" = "existing" ]; then
-          echo "⚡ Skipping functionality test for existing AMI (script update verified)"
-          echo "✅ Existing AMI update verification complete"
-        else
-          echo "🧪 Testing tenant manager functionality for fresh AMI..."
-          # Test that we can import the tenant manager without errors
-          TEST_ID=$(aws ssm send-command \
+        # Always test functionality for fresh AMI builds
+        echo "🧪 Testing tenant manager functionality for fresh AMI..."
+        # Test that we can import the tenant manager without errors
+        TEST_ID=$(aws ssm send-command \
             --instance-ids $INSTANCE_ID \
             --document-name "AWS-RunShellScript" \
             --parameters 'commands=[
@@ -943,24 +814,24 @@ jobs:
             "# Stop the ComfyUI service if running",
             "systemctl stop comfyui-multitenant.service || true",
             "sleep 5",
-            "# Ensure no containers are running",
-            "RUNNING_CONTAINERS=$(docker ps -q | wc -l)",
-            "echo Running containers: $RUNNING_CONTAINERS",
-            "if [ $RUNNING_CONTAINERS -gt 0 ]; then",
-            "  echo Stopping running containers for AMI creation...",
-            "  docker stop $(docker ps -q) || true",
-            "  docker rm $(docker ps -aq) || true",
+            "# Check for any ComfyUI processes",
+            "COMFY_PROCESSES=$(pgrep -f \"python.*ComfyUI\" | wc -l)",
+            "echo Active ComfyUI processes: $COMFY_PROCESSES",
+            "if [ $COMFY_PROCESSES -gt 0 ]; then",
+            "  echo Stopping ComfyUI processes for AMI creation...",
+            "  pkill -f \"python.*ComfyUI\" || true",
             "  sleep 3",
             "fi",
-            "# Verify Docker images are available",
-            "echo === Available Docker Images ===",
-            "docker images | head -10",
+            "# Verify GPU and CUDA setup",
+            "echo === GPU and CUDA Status ===",
+            "nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader,nounits || echo No GPU detected",
+            "nvcc --version || echo CUDA compiler not found",
             "# Check system resources",
             "echo === System Resources ===",
             "echo Memory usage: $(free -h | grep Mem:)",
             "echo Disk usage: $(df -h / | tail -1)",
-            "echo === Final Container Check ===",
-            "echo Active containers: $(docker ps -q | wc -l)",
+            "echo === Final Process Check ===",
+            "echo Active ComfyUI processes: $(pgrep -f \"python.*ComfyUI\" | wc -l)",
             "echo CLEANUP_COMPLETE"
           ]' \
           --region ${{ env.AWS_REGION }} \
@@ -1033,20 +904,17 @@ jobs:
       run: |
         INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
         ENVIRONMENT="${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}"
-        AMI_TYPE="${{ steps.base-ami.outputs.ami-type }}"
         
         # Use consistent AMI naming (no timestamp for updates)
         AMI_NAME="comfyui-multitenant-${ENVIRONMENT}"
         
-        echo "📸 Creating/updating AMI from instance: $INSTANCE_ID"
+        echo "📸 Creating fresh AMI from instance: $INSTANCE_ID"
         echo "🏷️ AMI name: $AMI_NAME"
-        echo "🔄 AMI type: $AMI_TYPE"
         
         # Validate that the system is ready for AMI creation
         echo "✅ System validated and ready for AMI creation"
         
-        # If this was an update to an existing AMI, we need to deregister the old one first
-        # Also check for any existing AMI with the same name (regardless of AMI_TYPE)
+        # Check for any existing AMI with the same name and deregister it
         EXISTING_AMI_WITH_NAME=$(aws ec2 describe-images \
           --owners self \
           --filters "Name=name,Values=$AMI_NAME" \
@@ -1054,10 +922,8 @@ jobs:
           --output text \
           --region ${{ env.AWS_REGION }} 2>/dev/null || echo "None")
         
-        if [ "$AMI_TYPE" = "existing" ]; then
-          OLD_AMI_ID="${{ steps.base-ami.outputs.ami-id }}"
-          echo "🗑️ Preparing to replace existing AMI: $OLD_AMI_ID"
-        elif [ -n "$EXISTING_AMI_WITH_NAME" ] && [ "$EXISTING_AMI_WITH_NAME" != "None" ]; then
+        # Always fresh setup, but check for existing AMI with same name to replace
+        if [ -n "$EXISTING_AMI_WITH_NAME" ] && [ "$EXISTING_AMI_WITH_NAME" != "None" ]; then
           OLD_AMI_ID="$EXISTING_AMI_WITH_NAME"
           echo "🗑️ Found existing AMI with same name, will replace: $OLD_AMI_ID"
         else
@@ -1098,7 +964,7 @@ jobs:
           --name "$AMI_NAME" \
           --description "ComfyUI Multi-Tenant AMI for $ENVIRONMENT environment (Docker-Free) - updated $(date +%Y-%m-%d)" \
           --region ${{ env.AWS_REGION }} \
-          --tag-specifications 'ResourceType=image,Tags=[{Key=Name,Value='"$AMI_NAME"'},{Key=Environment,Value='"$ENVIRONMENT"'},{Key=DeploymentType,Value="Docker-Free"},{Key=Branch,Value=${{ github.ref_name }}},{Key=UpdateType,Value='"$AMI_TYPE"'},{Key=LastUpdated,Value='$(date -u +"%Y-%m-%dT%H:%M:%SZ")'}]' \
+          --tag-specifications 'ResourceType=image,Tags=[{Key=Name,Value='"$AMI_NAME"'},{Key=Environment,Value='"$ENVIRONMENT"'},{Key=DeploymentType,Value="Docker-Free"},{Key=Branch,Value=${{ github.ref_name }}},{Key=UpdateType,Value="fresh"},{Key=LastUpdated,Value='$(date -u +"%Y-%m-%dT%H:%M:%SZ")'}]' \
           --query 'ImageId' \
           --output text)
         
@@ -1158,7 +1024,6 @@ jobs:
         echo "📝 Storing AMI details in SSM Parameter Store..."
         echo "Environment: $ENVIRONMENT"
         echo "AMI ID: $AMI_ID"
-        echo "Docker Image: $DOCKER_IMAGE"
         
         # Store the latest AMI ID
         aws ssm put-parameter \
@@ -1175,7 +1040,7 @@ jobs:
         METADATA=$(cat << EOF
         {
           "ami_id": "$AMI_ID",
-          "docker_image": "$DOCKER_IMAGE",
+          "deployment_type": "direct-ami",
           "environment": "$ENVIRONMENT",
           "creation_date": "$CREATION_DATE",
           "branch": "$BRANCH_NAME",
@@ -1241,19 +1106,15 @@ jobs:
         echo "Environment: $ENVIRONMENT"
         echo "AMI ID: ${{ steps.create-ami.outputs.ami-id }}"
         echo "Instance ID: ${{ steps.launch-instance.outputs.instance-id }} (terminated)"
-        echo "S3 Scripts: s3://viral-comm-api-ec2-deployments-dev/comfy-docker/$ENVIRONMENT/"
+        echo "S3 Scripts: s3://viral-comm-api-ec2-deployments-dev/comfyui-ami/$ENVIRONMENT/"
         echo ""
         echo "📦 AMI Management:"
-        if [ "$AMI_TYPE" = "existing" ]; then
-          echo "  🔄 Updated existing AMI with latest scripts"
-          if [ -n "$OLD_AMI" ]; then
-            echo "  🗑️ Replaced old AMI: $OLD_AMI"
-          fi
-          echo "  ⚡ Faster deployment using incremental updates"
-        else
-          echo "  🆕 Created fresh AMI from Ubuntu base"
-          echo "  📋 First-time setup completed"
+        echo "  🆕 Created fresh AMI from Ubuntu base (Docker-Free)"
+        if [ -n "$OLD_AMI" ]; then
+          echo "  🗑️ Replaced old AMI: $OLD_AMI"
         fi
+        echo "  🎮 Full GPU optimization with NVIDIA drivers and CUDA 11.8"
+        echo "  🐍 Direct Python installation (no Docker overhead)"
         echo ""
         echo "🔗 SSM Parameter Store:"
         echo "  📍 Latest AMI: /comfyui/ami/$ENVIRONMENT/latest"
@@ -1265,17 +1126,13 @@ jobs:
         echo "🚀 Next Steps:"
         echo "1. Retrieve AMI ID: aws ssm get-parameter --name '/comfyui/ami/$ENVIRONMENT/latest'"
         echo "2. Use the AMI ID to launch instances"
-        echo "3. ComfyUI will start automatically on port 8188"
-        echo "4. Custom nodes and models are pre-installed"
-        echo "5. Instance will auto-configure on first boot"
+        echo "3. Tenant manager starts automatically as systemd service"
+        echo "4. ComfyUI instances managed via HTTP API on port 8000"
+        echo "5. Custom nodes and models are pre-installed"
         echo ""
-        echo "💡 Optimization Benefits:"
-        if [ "$AMI_TYPE" = "existing" ]; then
-          echo "  • Faster builds using existing AMI base"
-          echo "  • Only Docker image gets updated"
-          echo "  • Consistent environment across updates"
-        else
-          echo "  • Fresh environment with latest Ubuntu base"
-          echo "  • Full system setup completed"
-          echo "  • Future updates will be incremental"
-        fi
+        echo "💡 Architecture Benefits:"
+        echo "  • Multi-tenant ComfyUI instances (Docker-Free)"
+        echo "  • HTTP API for tenant management"
+        echo "  • Direct Python execution (better performance)"
+        echo "  • Automatic scaling and resource management"
+        echo "  • Systemd service management"
