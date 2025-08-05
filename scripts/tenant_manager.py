@@ -778,20 +778,24 @@ def signal_handler(signum, frame):
 
 def main():
     """Main entry point"""
+    logger.info("Starting ComfyUI Multi-Tenant Manager")
+    
     # Setup signal handlers
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
     
-    # Initialize process manager
-    process_manager = ProcessManager()
-    
-    # Create HTTP server
-    PORT = 80
-    Handler = create_handler_class(process_manager)
-    
-    logger.info(f"Attempting to start server on port {PORT}")
-    
     try:
+        # Initialize process manager
+        logger.info("Initializing process manager...")
+        process_manager = ProcessManager()
+        logger.info("Process manager initialized successfully")
+        
+        # Create HTTP server
+        PORT = 80
+        Handler = create_handler_class(process_manager)
+        
+        logger.info(f"Attempting to start server on port {PORT}")
+        
         # Check if port is already in use
         import socket as sock
         test_sock = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
@@ -800,8 +804,8 @@ def main():
             test_sock.bind(("", PORT))
             test_sock.close()
             logger.info(f"Port {PORT} is available for binding")
-        except OSError as e:
-            logger.error(f"Port {PORT} binding test failed: {e}")
+        except OSError as port_error:
+            logger.error(f"Port {PORT} binding test failed: {port_error}")
             # Check what's using the port
             try:
                 import subprocess
@@ -818,19 +822,21 @@ def main():
                                  f"in netstat output")
             except Exception as ne:
                 logger.error(f"Could not check port usage: {ne}")
-            raise
+            raise port_error
         
+        logger.info(f"Creating TCP server on port {PORT}")
         with socketserver.TCPServer(("", PORT), Handler) as httpd:
             logger.info(f"Multi-tenant ComfyUI management server "
                         f"successfully started on port {PORT}")
             logger.info("Server is ready to accept connections")
             
             try:
+                logger.info("Starting server event loop")
                 httpd.serve_forever()
             except KeyboardInterrupt:
                 logger.info("Server interrupted by user")
-            except Exception as e:
-                logger.error(f"Server error during operation: {e}")
+            except Exception as server_error:
+                logger.error(f"Server error during operation: {server_error}")
                 raise
             finally:
                 logger.info("Server shutting down")
@@ -841,10 +847,13 @@ def main():
         logger.error("1. Port is already in use by another service")
         logger.error("2. Insufficient permissions (port 80 requires root)")
         logger.error("3. Network interface is not available")
-        raise
+        sys.exit(1)
     except Exception as e:
         logger.error(f"Unexpected error starting server: {e}")
-        raise
+        logger.error(f"Error type: {type(e).__name__}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

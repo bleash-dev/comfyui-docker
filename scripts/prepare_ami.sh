@@ -152,11 +152,14 @@ checkpoint "CLOUDWATCH_AGENT_INSTALLED"
 # --- 7. SETUP APPLICATION DIRECTORIES ---
 echo "📁 Setting up application directories..."
 
+# Create required directories
+mkdir -p /var/log/comfyui /workspace /scripts /opt/venv
+chmod 755 /var/log/comfyui /workspace /scripts /opt/venv
+
 # Set environment variables for ComfyUI
 echo 'export DEBIAN_FRONTEND=noninteractive' >> /etc/environment
 echo 'export PYTHONUNBUFFERED=1' >> /etc/environment
 echo 'export PYTHON_VERSION=3.10' >> /etc/environment
-
 
 checkpoint "DIRECTORIES_CREATED"
 
@@ -567,6 +570,32 @@ done
 # Test the health endpoint since service should be running
 echo "🏥 Testing health endpoint..."
 sleep 3  # Give service a moment to be fully ready
+
+# Check service status first
+SERVICE_STATUS=$(systemctl is-active comfyui-multitenant.service 2>/dev/null || echo 'unknown')
+echo "Initial service status: $SERVICE_STATUS"
+
+# If service is activating, give it more time and check logs
+if [ "$SERVICE_STATUS" = "activating" ]; then
+    echo "⏳ Service is still activating, waiting additional 10 seconds..."
+    sleep 10
+    SERVICE_STATUS=$(systemctl is-active comfyui-multitenant.service 2>/dev/null || echo 'unknown')
+    echo "Service status after wait: $SERVICE_STATUS"
+    
+    # Check service logs to understand what's happening
+    echo "🔍 Checking service logs for activation issues..."
+    journalctl -u comfyui-multitenant.service --no-pager -n 10 --since "2 minutes ago" || echo "No recent service logs"
+fi
+
+# If still not active, check for errors
+if [ "$SERVICE_STATUS" != "active" ]; then
+    echo "⚠️ Service not active, checking for errors..."
+    echo "Full service status:"
+    systemctl status comfyui-multitenant.service --no-pager || echo "Cannot get service status"
+    echo "Recent logs:"
+    journalctl -u comfyui-multitenant.service --no-pager -n 20 || echo "Cannot get service logs"
+fi
+
 HEALTH_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/health 2>/dev/null || echo "CURL_FAILED")
 echo "Health endpoint HTTP status: $HEALTH_RESPONSE"
 
