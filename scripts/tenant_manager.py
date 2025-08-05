@@ -789,18 +789,62 @@ def main():
     PORT = 80
     Handler = create_handler_class(process_manager)
     
-    with socketserver.TCPServer(("", PORT), Handler) as httpd:
-        logger.info(
-            f"Multi-tenant ComfyUI management server running on port {PORT}")
-        
+    logger.info(f"Attempting to start server on port {PORT}")
+    
+    try:
+        # Check if port is already in use
+        import socket as sock
+        test_sock = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
+        test_sock.setsockopt(sock.SOL_SOCKET, sock.SO_REUSEADDR, 1)
         try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            logger.info("Server interrupted by user")
-        except Exception as e:
-            logger.error(f"Server error: {e}")
-        finally:
-            logger.info("Server shutting down")
+            test_sock.bind(("", PORT))
+            test_sock.close()
+            logger.info(f"Port {PORT} is available for binding")
+        except OSError as e:
+            logger.error(f"Port {PORT} binding test failed: {e}")
+            # Check what's using the port
+            try:
+                import subprocess
+                result = subprocess.run(['netstat', '-tlnp'],
+                                        capture_output=True, text=True)
+                port_lines = [line for line in result.stdout.split('\n')
+                              if f':{PORT}' in line]
+                if port_lines:
+                    logger.error(f"Processes using port {PORT}:")
+                    for line in port_lines:
+                        logger.error(f"  {line}")
+                else:
+                    logger.error(f"No processes found using port {PORT} "
+                                 f"in netstat output")
+            except Exception as ne:
+                logger.error(f"Could not check port usage: {ne}")
+            raise
+        
+        with socketserver.TCPServer(("", PORT), Handler) as httpd:
+            logger.info(f"Multi-tenant ComfyUI management server "
+                        f"successfully started on port {PORT}")
+            logger.info("Server is ready to accept connections")
+            
+            try:
+                httpd.serve_forever()
+            except KeyboardInterrupt:
+                logger.info("Server interrupted by user")
+            except Exception as e:
+                logger.error(f"Server error during operation: {e}")
+                raise
+            finally:
+                logger.info("Server shutting down")
+                
+    except OSError as e:
+        logger.error(f"Failed to bind to port {PORT}: {e}")
+        logger.error("This usually means:")
+        logger.error("1. Port is already in use by another service")
+        logger.error("2. Insufficient permissions (port 80 requires root)")
+        logger.error("3. Network interface is not available")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error starting server: {e}")
+        raise
 
 
 if __name__ == "__main__":

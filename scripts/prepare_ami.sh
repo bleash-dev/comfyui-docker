@@ -437,6 +437,8 @@ cat > /etc/systemd/system/comfyui-multitenant.service << 'EOF'
 [Unit]
 Description=ComfyUI Multi-Tenant Manager
 After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple
@@ -450,6 +452,10 @@ Environment=DEBIAN_FRONTEND=noninteractive
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHON_VERSION=3.10
 
+# Allow binding to privileged ports
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
 # The main command to run the tenant manager directly
 ExecStart=/usr/bin/python3 /usr/local/bin/tenant_manager.py
 
@@ -457,6 +463,9 @@ ExecStart=/usr/bin/python3 /usr/local/bin/tenant_manager.py
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=comfyui-multitenant
+
+# Give the service more time to start (port 80 binding might take time)
+TimeoutStartSec=60
 
 [Install]
 WantedBy=multi-user.target
