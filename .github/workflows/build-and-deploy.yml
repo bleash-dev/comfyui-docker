@@ -471,6 +471,12 @@ jobs:
             --document-name "AWS-RunShellScript" \
             --parameters 'commands=[
               "echo === Progress Check ===",
+              "if [ -f /tmp/ami_checkpoints.txt ]; then",
+              "  echo ALL_CHECKPOINTS_COMPLETED:",
+              "  cat /tmp/ami_checkpoints.txt | tr '\n' ',' | sed 's/,$//'",
+              "else",
+              "  echo ALL_CHECKPOINTS_COMPLETED: NONE",
+              "fi",
               "if [ -f /tmp/ami_progress.txt ]; then",
               "  echo CURRENT_PROGRESS: $(cat /tmp/ami_progress.txt)",
               "else",
@@ -570,6 +576,11 @@ jobs:
             fi
             
             # Extract current progress for better monitoring
+            if [[ "$RESULT" == *"ALL_CHECKPOINTS_COMPLETED:"* ]]; then
+              ALL_CHECKPOINTS=$(echo "$RESULT" | grep "ALL_CHECKPOINTS_COMPLETED:" | cut -d: -f2 | xargs)
+              echo "🏁 All completed checkpoints: $ALL_CHECKPOINTS"
+            fi
+            
             if [[ "$RESULT" == *"CURRENT_PROGRESS:"* ]]; then
               CURRENT_STEP=$(echo "$RESULT" | grep "CURRENT_PROGRESS:" | cut -d: -f2 | xargs)
               echo "📍 Current step: $CURRENT_STEP"
@@ -646,117 +657,72 @@ jobs:
       timeout-minutes: 5
       run: |
         INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
-        echo "🔍 Verifying ComfyUI setup and health..."
-        echo "Setup Type: Fresh Ubuntu installation"
+        echo "🔍 Verifying ComfyUI setup via health endpoint..."
         
-        # Check system and tenant manager status
-        echo "� Checking system and tenant manager status..."
-        
-        SYSTEM_CHECK_ID=$(aws ssm send-command \
+        # Test the health endpoint (service should already be running from prepare_ami.sh)
+        echo "🏥 Testing health endpoint..."
+        HEALTH_CHECK_ID=$(aws ssm send-command \
           --instance-ids $INSTANCE_ID \
           --document-name "AWS-RunShellScript" \
           --parameters 'commands=[
-            "echo === ComfyUI System Health Check (Docker-Free) ===",
-            "# Check if tenant manager is installed",
-            "if [ -f \"/usr/local/bin/tenant_manager.py\" ]; then",
-            "  echo TENANT_MANAGER: installed",
-            "  ls -la /usr/local/bin/tenant_manager.py",
+            "echo Testing health endpoint...",
+            "# Check if service is running",
+            "SERVICE_STATUS=$(systemctl is-active comfyui-multitenant.service 2>/dev/null || echo \"inactive\")",
+            "echo \"Service status: $SERVICE_STATUS\"",
+            "# Test health endpoint",
+            "HEALTH_RESPONSE=$(curl -s -o /dev/null -w \"%{http_code}\" http://localhost/health 2>/dev/null || echo \"CURL_FAILED\")",
+            "echo \"Health endpoint HTTP status: $HEALTH_RESPONSE\"",
+            "if [ \"$HEALTH_RESPONSE\" = \"200\" ]; then",
+            "  echo \"HEALTH_CHECK: SUCCESS\"",
+            "  # Get the actual response body",
+            "  curl -s http://localhost/health 2>/dev/null || echo \"Could not get response body\"",
             "else",
-            "  echo TENANT_MANAGER: missing",
-            "fi",
-            "# Check Python installation",
-            "if command -v python3 >/dev/null; then",
-            "  echo PYTHON: $(python3 --version)",
-            "else",
-            "  echo PYTHON: missing",
-            "fi",
-            "# Check required Python packages",
-            "echo === Python Package Check ===",
-            "python3 -c \"import psutil; print(f\\\"psutil: {psutil.__version__}\\\")\" 2>/dev/null || echo \"psutil: missing\"",
-            "python3 -c \"import boto3; print(f\\\"boto3: {boto3.__version__}\\\")\" 2>/dev/null || echo \"boto3: missing\"",
-            "python3 -c \"import requests; print(f\\\"requests: {requests.__version__}\\\")\" 2>/dev/null || echo \"requests: missing\"",
-            "# Check systemd service setup",
-            "if systemctl list-units --type=service | grep -q comfyui-multitenant; then",
-            "  echo SYSTEMD_SERVICE: configured",
-            "  systemctl status comfyui-multitenant --no-pager -l || true",
-            "else",
-            "  echo SYSTEMD_SERVICE: not configured",
-            "fi",
-            "# Check directories",
-            "echo === Directory Structure ===",
-            "ls -la /workspace/ || echo \"/workspace not found\"",
-            "ls -la /var/log/comfyui/ || echo \"/var/log/comfyui not found\"",
-            "ls -la /scripts/ || echo \"/scripts not found\"",
-            "# Overall health assessment",
-            "if [ -f \"/usr/local/bin/tenant_manager.py\" ] && command -v python3 >/dev/null; then",
-            "  echo SYSTEM_HEALTH: HEALTHY",
-            "else",
-            "  echo SYSTEM_HEALTH: UNHEALTHY",
+            "  echo \"HEALTH_CHECK: FAILED\"",
+            "  echo \"Debugging information:\"",
+            "  echo \"Service status: $SERVICE_STATUS\"",
+            "  # Check if port is listening",
+            "  netstat -tlnp | grep :80 || echo \"Port 80 not listening\"",
+            "  # Check recent logs",
+            "  journalctl -u comfyui-multitenant.service --no-pager -n 20 || echo \"No service logs\"",
             "fi"
           ]' \
           --region ${{ env.AWS_REGION }} \
           --query 'Command.CommandId' \
           --output text)
         
-        sleep 15
-        SYSTEM_STATUS=$(aws ssm get-command-invocation \
-          --command-id $SYSTEM_CHECK_ID \
+        sleep 10
+        HEALTH_RESULT=$(aws ssm get-command-invocation \
+          --command-id $HEALTH_CHECK_ID \
           --instance-id $INSTANCE_ID \
           --region ${{ env.AWS_REGION }} \
           --query 'StandardOutputContent' \
           --output text)
         
-        echo "System Status Details:"
-        echo "$SYSTEM_STATUS"
+        echo "Health check result:"
+        echo "$HEALTH_RESULT"
         
-        # Check for multiple reliable indicators
-        TENANT_MANAGER_OK=false
-        PYTHON_OK=false
-        SYSTEM_HEALTH_OK=false
-        
-        if [[ "$SYSTEM_STATUS" == *"TENANT_MANAGER: installed"* ]]; then
-          TENANT_MANAGER_OK=true
-          echo "✅ Tenant manager is installed"
+        # Check if health endpoint responded successfully
+        if [[ "$HEALTH_RESULT" == *"HEALTH_CHECK: SUCCESS"* ]]; then
+          echo "✅ Health endpoint test passed - ComfyUI system is working!"
+          echo "🎉 Service was already running from AMI preparation - no need to manage it manually"
         else
-          echo "❌ Tenant manager is not installed"
-        fi
-        
-        if [[ "$SYSTEM_STATUS" == *"PYTHON: Python 3"* ]]; then
-          PYTHON_OK=true
-          echo "✅ Python is installed and working"
-        else
-          echo "❌ Python is not working properly"
-        fi
-        
-        if [[ "$SYSTEM_STATUS" == *"SYSTEM_HEALTH: HEALTHY"* ]]; then
-          SYSTEM_HEALTH_OK=true
-          echo "✅ Overall system health check passed"
-        else
-          echo "❌ Overall system health check failed"
-        fi
-        
-        # System is considered ready if tenant manager is installed AND Python is working
-        if [ "$TENANT_MANAGER_OK" = true ] && [ "$PYTHON_OK" = true ]; then
-          echo "🎉 ComfyUI system is ready!"
-        else
-          echo "❌ ComfyUI system is not ready"
+          echo "❌ Health endpoint test failed - ComfyUI system is not working properly"
           
-          # Get additional debugging info
-          echo "🔍 Getting additional debugging information..."
+          # Get additional debugging info only on failure
+          echo "🔍 Getting debugging information..."
           DEBUG_ID=$(aws ssm send-command \
             --instance-ids $INSTANCE_ID \
             --document-name "AWS-RunShellScript" \
             --parameters 'commands=[
-              "echo === User Data Log ===", 
-              "tail -50 /var/log/user-data.log 2>/dev/null || echo No user data log found",
-              "echo === AMI Preparation Log ===",
-              "tail -50 /var/log/ami-preparation.log 2>/dev/null || echo No AMI preparation log found",
-              "echo === System Status ===",
-              "df -h",
-              "free -m",
-              "ps aux | grep python",
-              "echo === Environment Variables ===",
-              "env | grep -E \"PYTHON|COMFY|AMI\" || echo No relevant environment variables found"
+              "echo === System Debugging ===",
+              "echo \"Tenant manager file:\"",
+              "ls -la /usr/local/bin/tenant_manager.py 2>/dev/null || echo \"File not found\"",
+              "echo \"Python version:\"",
+              "python3 --version 2>/dev/null || echo \"Python not found\"",
+              "echo \"Service logs (last 30 lines):\"",
+              "journalctl -u comfyui-multitenant.service --no-pager -n 30 2>/dev/null || echo \"No service logs\"",
+              "echo \"AMI preparation log (last 20 lines):\"",
+              "tail -20 /var/log/ami-preparation.log 2>/dev/null || echo \"No AMI prep log\""
             ]' \
             --region ${{ env.AWS_REGION }} \
             --query 'Command.CommandId' \
@@ -775,144 +741,8 @@ jobs:
           
           exit 1
         fi
-        echo "✅ ComfyUI system is ready"
         
-        # Verify required Python packages are available
-        if [[ "$SYSTEM_STATUS" == *"psutil:"* ]] && [[ "$SYSTEM_STATUS" == *"boto3:"* ]] && [[ "$SYSTEM_STATUS" == *"requests:"* ]]; then
-          echo "✅ Required Python packages are installed"
-        else
-          echo "❌ Some required Python packages are missing"
-          echo "Package status from health check:"
-          echo "$SYSTEM_STATUS" | grep -E "(psutil|boto3|requests):" || echo "No package info in output"
-          exit 1
-        fi
-        
-        # Always test functionality for fresh AMI builds
-        echo "🧪 Testing tenant manager functionality for fresh AMI..."
-        # Test that we can import the tenant manager without errors
-        TEST_ID=$(aws ssm send-command \
-            --instance-ids $INSTANCE_ID \
-            --document-name "AWS-RunShellScript" \
-            --parameters 'commands=[
-              "echo === Testing Tenant Manager Import ===",
-              "cd /usr/local/bin",
-              "python3 -c \"import sys; sys.path.append('\'.'\''); import tenant_manager; print('\''Tenant manager import successful'\'')\" 2>&1 || echo \"Import failed\"",
-              "echo === Testing Basic Python Functionality ===",
-              "python3 -c \"import psutil, boto3, requests; print('\''All required packages imported successfully'\'')\" 2>&1 || echo \"Package import failed\""
-            ]' \
-            --region ${{ env.AWS_REGION }} \
-            --query 'Command.CommandId' \
-            --output text)
-          
-          sleep 10
-          TEST_OUTPUT=$(aws ssm get-command-invocation \
-            --command-id $TEST_ID \
-            --instance-id $INSTANCE_ID \
-            --region ${{ env.AWS_REGION }} \
-            --query 'StandardOutputContent' \
-            --output text)
-          
-          echo "Test Results:"
-          echo "$TEST_OUTPUT"
-          
-          if [[ "$TEST_OUTPUT" == *"Tenant manager import successful"* ]] && [[ "$TEST_OUTPUT" == *"All required packages imported successfully"* ]]; then
-            echo "✅ Fresh AMI functionality test passed"
-          else
-            echo "❌ Fresh AMI functionality test failed"
-            exit 1
-          fi
-          echo "✅ Fresh AMI setup verification complete"
-        fi
-        
-        # Verify system is clean for AMI creation
-        echo "🧹 Verifying system is clean for AMI creation..."
-        CLEANUP_CHECK_ID=$(aws ssm send-command \
-          --instance-ids $INSTANCE_ID \
-          --document-name "AWS-RunShellScript" \
-          --parameters 'commands=[
-            "echo Checking system cleanliness...",
-            "# Stop the ComfyUI service if running",
-            "systemctl stop comfyui-multitenant.service || true",
-            "sleep 5",
-            "# Check for any ComfyUI processes",
-            "COMFY_PROCESSES=$(pgrep -f \"python.*ComfyUI\" | wc -l)",
-            "echo Active ComfyUI processes: $COMFY_PROCESSES",
-            "if [ $COMFY_PROCESSES -gt 0 ]; then",
-            "  echo Stopping ComfyUI processes for AMI creation...",
-            "  pkill -f \"python.*ComfyUI\" || true",
-            "  sleep 3",
-            "fi",
-            "# Verify system resources",
-            "echo === System Resources ===",
-            "echo Memory usage: $(free -h | grep Mem:)",
-            "echo Disk usage: $(df -h / | tail -1)",
-            "echo === Final Process Check ===",
-            "echo Active ComfyUI processes: $(pgrep -f \"python.*ComfyUI\" | wc -l)",
-            "echo CLEANUP_COMPLETE"
-          ]' \
-          --region ${{ env.AWS_REGION }} \
-          --query 'Command.CommandId' \
-          --output text)
-        
-        sleep 15
-        CLEANUP_STATUS=$(aws ssm get-command-invocation \
-          --command-id $CLEANUP_CHECK_ID \
-          --instance-id $INSTANCE_ID \
-          --region ${{ env.AWS_REGION }} \
-          --query 'StandardOutputContent' \
-          --output text)
-        
-        echo "System Cleanup Results:"
-        echo "$CLEANUP_STATUS"
-        
-        echo "🎉 All health checks passed! AMI is ready for creation."
-
-    - name: Test network connectivity
-      timeout-minutes: 3
-      run: |
-        INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
-        PUBLIC_IP="${{ steps.launch-instance.outputs.public-ip }}"
-        
-        echo "🌐 Testing network connectivity to instance..."
-        echo "Public IP: $PUBLIC_IP"
-        
-        # Check security group allows outbound traffic
-        echo "🔒 Checking security group configuration..."
-        SG_ID=$(aws ec2 describe-instances \
-          --instance-ids $INSTANCE_ID \
-          --region ${{ env.AWS_REGION }} \
-          --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' \
-          --output text)
-        
-        echo "Security Group: $SG_ID"
-        
-        # Get security group rules
-        aws ec2 describe-security-groups \
-          --group-ids $SG_ID \
-          --region ${{ env.AWS_REGION }} \
-          --query 'SecurityGroups[0].IpPermissions[*].[IpProtocol,FromPort,ToPort,IpRanges[0].CidrIp]' \
-          --output table || true
-        
-        # Test basic connectivity from GitHub Actions runner
-        echo "🏓 Testing ICMP ping from GitHub Actions runner..."
-        if ping -c 3 -W 5 $PUBLIC_IP; then
-          echo "✅ Ping successful from GitHub Actions"
-        else
-          echo "⚠️ Ping failed from GitHub Actions (this might be normal due to security groups)"
-        fi
-        
-        # Test if we can reach common ports (this will fail but shows if security group is too restrictive)
-        echo "🔌 Testing port connectivity..."
-        for port in 22 80 8188; do
-          if timeout 5 nc -z $PUBLIC_IP $port; then
-            echo "✅ Port $port is accessible"
-          else
-            echo "❌ Port $port is not accessible (expected for AMI building)"
-          fi
-        done
-        
-        echo "ℹ️ Note: For security, the instance should NOT be accessible from the internet during AMI creation"
-        echo "ℹ️ When instances are launched from the AMI, proper security groups should be applied"
+        echo "🎉 ComfyUI verification complete - AMI is ready for creation!"
 
     - name: Create or update AMI
       id: create-ami
@@ -1142,7 +972,7 @@ jobs:
         echo "1. Retrieve AMI ID: aws ssm get-parameter --name '/comfyui/ami/$ENVIRONMENT/latest'"
         echo "2. Use the AMI ID to launch instances"
         echo "3. Tenant manager starts automatically as systemd service"
-        echo "4. ComfyUI instances managed via HTTP API on port 8000"
+        echo "4. ComfyUI instances managed via HTTP API on port 80"
         echo "5. Custom nodes and models are pre-installed"
         echo ""
         echo "💡 Architecture Benefits:"

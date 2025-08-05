@@ -21,6 +21,9 @@ echo "=== AMI Preparation Started (Docker-Free) - $(date) ==="
 # Checkpoint function for progress tracking
 checkpoint() {
     echo "✅ CHECKPOINT: $1 completed at $(date)"
+    # Append to checkpoint history instead of overwriting
+    echo "$1" >> /tmp/ami_checkpoints.txt
+    # Keep the current checkpoint for compatibility
     echo "$1" > /tmp/ami_progress.txt
 }
 checkpoint "AMI_PREP_STARTED"
@@ -148,10 +151,6 @@ checkpoint "CLOUDWATCH_AGENT_INSTALLED"
 
 # --- 7. SETUP APPLICATION DIRECTORIES ---
 echo "📁 Setting up application directories..."
-
-# Create required directories
-mkdir -p /var/log/comfyui /workspace /scripts /opt/venv
-chmod 755 /var/log/comfyui /workspace /scripts /opt/venv
 
 # Set environment variables for ComfyUI
 echo 'export DEBIAN_FRONTEND=noninteractive' >> /etc/environment
@@ -492,9 +491,17 @@ cat > /etc/logrotate.d/comfyui << 'EOF'
 }
 EOF
 
+
+
 # Enable the ComfyUI service
 systemctl daemon-reload
 systemctl enable comfyui-multitenant.service
+
+# Start the service temporarily for validation testing
+echo "🚀 Starting tenant manager service for validation testing..."
+systemctl start comfyui-multitenant.service
+sleep 5  # Give it a moment to start
+
 checkpoint "SERVICES_CREATED"
 
 # --- 11. FINAL VALIDATION ---
@@ -547,6 +554,21 @@ for dir in "/workspace" "/var/log/comfyui" "/scripts"; do
         VALIDATION_ERRORS+=("Directory $dir is missing")
     fi
 done
+
+# Test the health endpoint since service should be running
+echo "🏥 Testing health endpoint..."
+sleep 3  # Give service a moment to be fully ready
+HEALTH_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/health 2>/dev/null || echo "CURL_FAILED")
+echo "Health endpoint HTTP status: $HEALTH_RESPONSE"
+
+if [ "$HEALTH_RESPONSE" = "200" ]; then
+    echo "✅ Health endpoint test passed"
+else
+    VALIDATION_ERRORS+=("Health endpoint test failed (status: $HEALTH_RESPONSE)")
+    echo "🔍 Service debugging:"
+    echo "Service status: $(systemctl is-active comfyui-multitenant.service 2>/dev/null || echo 'unknown')"
+    echo "Port 80 listening: $(netstat -tlnp | grep :80 2>/dev/null || echo 'not found')"
+fi
 
 # Report validation results
 if [ ${#VALIDATION_ERRORS[@]} -gt 0 ]; then
