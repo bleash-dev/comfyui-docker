@@ -57,9 +57,9 @@ cat > "$CONFIG_FILE" << 'EOF'
                         "log_stream_name": "{instance_id}-user-data"
                     },
                     {
-                        "file_path": "/var/log/docker.log",
-                        "log_group_name": "/aws/ec2/comfyui/docker",
-                        "log_stream_name": "{instance_id}-docker"
+                        "file_path": "/var/log/tenant_manager.log",
+                        "log_group_name": "/aws/ec2/comfyui/system",
+                        "log_stream_name": "{instance_id}-system"
                     },
                     {
                         "file_path": "/var/log/comfyui/*.log",
@@ -78,7 +78,7 @@ echo "🔧 [CW] Creating required log groups..."
 LOG_GROUPS=(
     "/aws/ec2/comfyui/ami-preparation"
     "/aws/ec2/comfyui/user-data"
-    "/aws/ec2/comfyui/docker"
+    "/aws/ec2/comfyui/system"
     "/aws/ec2/comfyui/tenant-manager"
     # Add pod-specific groups here too so they are ready
     "/aws/ec2/comfyui/tenant-startup"
