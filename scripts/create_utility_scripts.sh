@@ -59,7 +59,7 @@ cd "\$NETWORK_VOLUME/ComfyUI"
 # Ensure logs directory exists
 mkdir -p "\$(dirname "\$COMFYUI_LOG")"
 
-echo "🏁 Executing: \$PYTHON_CMD main.py --listen 0.0.0.0 --port 8080 --enable-cors-header \"*\""
+echo "🏁 Executing: \$PYTHON_CMD main.py --listen 0.0.0.0 --port \$COMFYUI_PORT --enable-cors-header \"*\""
 
 PYTORCH_ENABLE_INDUCTOR=0 xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
 \$PYTHON_CMD main.py --listen 0.0.0.0 --port 8080 --enable-cors-header "*" \\

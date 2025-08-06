@@ -293,7 +293,47 @@ echo "🧪 Testing ephemeral storage mounting during AMI creation..."
 
 checkpoint "EPHEMERAL_STORAGE_SETUP"
 
-# --- 7. SETUP APPLICATION DIRECTORIES ---
+# --- 7. INSTALL BASE COMFYUI ENVIRONMENT ---
+echo "🎨 Installing base ComfyUI environment for shared use..."
+
+# Set up environment variables for ComfyUI installation
+export NETWORK_VOLUME="/base"
+export PYTORCH_VERSION="2.4.0"
+export GIT_BRANCH="${GIT_BRANCH:-main}"
+
+# Create base directories
+echo "📁 Creating base directories..."
+mkdir -p /base/venv
+mkdir -p /base
+chmod 755 /base /base/venv
+
+# Run the setup_components script to install ComfyUI and dependencies
+echo "� Running setup_components.sh to install ComfyUI base environment..."
+if [ -f "/scripts/setup_components.sh" ]; then
+    # Make sure the script is executable
+    chmod +x /scripts/setup_components.sh
+    
+    # Run the setup script
+    bash /scripts/setup_components.sh || {
+        echo "❌ setup_components.sh failed during AMI creation"
+        exit 1
+    }
+    
+    echo "✅ Base ComfyUI environment installed successfully"
+    echo "   📍 Virtual environment: /base/venv/comfyui"
+    echo "   📍 ComfyUI installation: /base/ComfyUI"
+    echo "   🎯 Ready for tenant copying at runtime"
+    
+else
+    echo "❌ setup_components.sh not found in /scripts/"
+    echo "Available scripts:"
+    ls -la /scripts/ || echo "Scripts directory not accessible"
+    exit 1
+fi
+
+checkpoint "COMFYUI_BASE_INSTALLED"
+
+# --- 8. SETUP APPLICATION DIRECTORIES ---
 echo "📁 Setting up application directories..."
 
 # Create required directories
@@ -307,7 +347,7 @@ echo 'export PYTHON_VERSION=3.10' >> /etc/environment
 
 checkpoint "DIRECTORIES_CREATED"
 
-# --- 8. DOWNLOAD AND SETUP SCRIPTS ---
+# --- 9. DOWNLOAD AND SETUP SCRIPTS ---
 echo "📋 Downloading and setting up scripts..."
 
 # Determine environment and S3 path based on available information
@@ -378,7 +418,7 @@ else
     ls -la . || echo "No files found"
     echo "🔍 Attempting to list S3 bucket contents..."
     aws s3 ls "${S3_PREFIX}/" --region "${AWS_REGION}" || echo "Cannot list S3 contents"
-    echo "⚠️ This is a critical error - AMI preparation cannot continue without scripts"
+    "⚠️ This is a critical error - AMI preparation cannot continue without scripts"
     exit 1
 fi
 
@@ -560,7 +600,7 @@ echo "✅ Scripts setup completed"
 
 checkpoint "SCRIPTS_SETUP"
 
-# --- 9. CONFIGURE CLOUDWATCH ---
+# --- 10. CONFIGURE CLOUDWATCH ---
 echo "📡 Configuring CloudWatch..."
 if [ -f "/scripts/setup_cloudwatch.sh" ]; then
     echo "🔧 Running CloudWatch setup script..."
@@ -576,7 +616,7 @@ else
     checkpoint "CLOUDWATCH_SKIPPED"
 fi
 
-# --- 10. CREATE SYSTEM SERVICES (Docker-Free) ---
+# --- 11. CREATE SYSTEM SERVICES (Docker-Free) ---
 echo "⚙️ Creating systemd services..."
 
 # Create a systemd service for ComfyUI Tenant Manager (Direct Python execution)
@@ -671,7 +711,7 @@ sleep 5  # Give it a moment to start
 
 checkpoint "SERVICES_CREATED"
 
-# --- 11. FINAL VALIDATION ---
+# --- 12. FINAL VALIDATION ---
 echo "🔍 Performing final validation before AMI completion..."
 
 VALIDATION_ERRORS=()
@@ -735,7 +775,7 @@ else
 fi
 
 # Check required directories
-for dir in "/workspace" "/var/log/comfyui" "/scripts"; do
+for dir in "/workspace" "/var/log/comfyui" "/scripts" "/base" "/base/venv/comfyui" "/base/ComfyUI"; do
     if [ -d "$dir" ]; then
         echo "✅ Directory $dir exists"
     else
@@ -807,7 +847,7 @@ fi
 
 checkpoint "VALIDATION_COMPLETE"
 
-# --- 12. FINAL AMI CLEANUP ---
+# --- 13. FINAL AMI CLEANUP ---
 echo "🧹 Finalizing and cleaning up for AMI creation..."
 
 # NOTE: We do NOT stop the service here because the GitHub Actions workflow

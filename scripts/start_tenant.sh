@@ -18,6 +18,16 @@ echo "  Pod ID: $POD_ID"
 echo "  User: $POD_USER_NAME"
 echo "  Port: $COMFYUI_PORT"
 
+# Set centralized virtual environment paths
+export BASE_VENV_PATH="${BASE_VENV_PATH:-/base/venv/comfyui}"
+export BASE_COMFYUI_PATH="${BASE_COMFYUI_PATH:-/base/ComfyUI}"
+export TENANT_COMFYUI_PATH="$NETWORK_VOLUME/ComfyUI"
+
+echo "📍 Virtual Environment Paths:"
+echo "  Base venv: $BASE_VENV_PATH"
+echo "  Base ComfyUI: $BASE_COMFYUI_PATH" 
+echo "  Tenant ComfyUI: $TENANT_COMFYUI_PATH"
+
 # Set default Python version and config root
 export PYTHON_VERSION="${PYTHON_VERSION:-3.10}"
 export PYTHON_CMD="${PYTHON_CMD:-python${PYTHON_VERSION}}"
@@ -41,19 +51,6 @@ if [ ! -d "$NETWORK_VOLUME" ] || [ ! -w "$NETWORK_VOLUME" ]; then
 fi
 
 echo "📁 Network Volume: $NETWORK_VOLUME"
-
-# Check for additional network volume optimization (_NETWORK_VOLUME)
-if [ -n "${_NETWORK_VOLUME:-}" ]; then
-    if [ -d "$_NETWORK_VOLUME" ] && [ -w "$_NETWORK_VOLUME" ]; then
-        echo "🔗 Additional network volume detected at $_NETWORK_VOLUME for shared data optimization"
-        export _NETWORK_VOLUME
-    else
-        echo "⚠️ WARNING: _NETWORK_VOLUME set to $_NETWORK_VOLUME but path is not accessible, disabling optimization"
-        unset _NETWORK_VOLUME
-    fi
-else
-    echo "📁 No additional network volume configured for shared data optimization"
-fi
 
 # Setup tenant-specific logging
 TENANT_LOG_DIR="$NETWORK_VOLUME/logs"
@@ -157,8 +154,8 @@ if ! bash "$SCRIPT_DIR/setup_rclone.sh"; then
 fi
 echo "✅ S3 storage setup script completed."
 
-# Update environment variables to use the tenant network volume paths
-export COMFYUI_VENV="$NETWORK_VOLUME/venv/comfyui"
+# Update environment variables to use the centralized base venv
+export COMFYUI_VENV="$BASE_VENV_PATH"
 export PATH="$COMFYUI_VENV/bin:$PATH"
 
 # Verify that required scripts exist
@@ -187,8 +184,8 @@ fi
 echo "✅ All required scripts on $NETWORK_VOLUME/scripts/ verified."
 
 # Setup all components (ComfyUI, models, etc.)
-echo "🔧 Setting up all components via $SCRIPT_DIR/setup_components.sh..."
-if ! bash "$SCRIPT_DIR/setup_components.sh"; then
+echo "🔧 Setting up all components via $SCRIPT_DIR/setup_tenant_components.sh..."
+if ! bash "$SCRIPT_DIR/setup_tenant_components.sh"; then
     echo "❌ CRITICAL: Component setup failed for tenant."
     exit 1
 fi
@@ -224,13 +221,10 @@ source "$COMFYUI_VENV/bin/activate"
 cd "$NETWORK_VOLUME/ComfyUI"
 
 # Start ComfyUI with tenant-specific configuration
-exec python main.py \\
+exec PYTORCH_ENABLE_INDUCTOR=0 xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python main.py \\
     --listen 0.0.0.0 \\
     --port $COMFYUI_PORT \\
-    --enable-cors-header \\
-    --output-directory "$NETWORK_VOLUME/ComfyUI/output" \\
-    --input-directory "$NETWORK_VOLUME/ComfyUI/input" \\
-    --extra-model-paths-config "$NETWORK_VOLUME/ComfyUI/extra_model_paths.yaml" \\
+    --enable-cors-header "*" \\
     2>&1 | tee -a "$COMFYUI_LOG"
 EOF
 

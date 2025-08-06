@@ -397,7 +397,7 @@ jobs:
           --output table \
           --region ${{ env.AWS_REGION }} 2>/dev/null || echo "Could not retrieve security group rules"
         
-        # Launch instance with VPC configuration and IAM role
+        # Launch instance with VPC configuration, IAM role, and 20GB EBS volume
         INSTANCE_ID=$(aws ec2 run-instances \
           --image-id ${{ steps.base-ami.outputs.ami-id }} \
           --instance-type c5d.large \
@@ -405,6 +405,7 @@ jobs:
           --associate-public-ip-address \
           --iam-instance-profile Name="$ROLE_NAME" \
           --user-data file://user-data.sh \
+          --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":20,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
           --region ${{ env.AWS_REGION }} \
           --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${INSTANCE_NAME}},{Key=Environment,Value=${ENVIRONMENT}},{Key=Purpose,Value=AMI-Builder},{Key=AutoTerminate,Value=true},{Key=IAMRole,Value=${ROLE_NAME}}]" \
           --query 'Instances[0].InstanceId' \

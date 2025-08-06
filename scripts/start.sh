@@ -68,39 +68,11 @@ else
     echo "ℹ️ No user-specified APT packages to install (APT_PACKAGES not set)" | tee -a "$USER_SCRIPT_LOG"
 fi
 
-# Detect network volume location EARLY - only if NETWORK_VOLUME is not already set
 if [ -z "$NETWORK_VOLUME" ]; then
     echo "🔧 Detecting network volume location..."
-    if [ -d "/runpod-volume" ]; then
-        NETWORK_VOLUME="/runpod-volume"
-        echo "Network volume detected at /runpod-volume"
-    elif mountpoint -q /workspace 2>/dev/null; then
-        NETWORK_VOLUME="/workspace"
-        echo "Network volume detected at /workspace (mounted)"
-    elif [ -f "/workspace/.runpod_volume" ] || [ -w "/workspace" ]; then
-        NETWORK_VOLUME="/workspace"
-        echo "Using /workspace as persistent storage"
-    else
-        echo "❌ CRITICAL: No network volume detected or usable!"
-        echo "This container requires persistent storage at /workspace or /runpod-volume."
-        exit 1
-    fi
+    NETWORK_VOLUME="/workspace"
 else
     echo "📁 Using pre-configured NETWORK_VOLUME: $NETWORK_VOLUME"
-fi
-
-# Check for additional network volume optimization (_NETWORK_VOLUME)
-# This is a separate volume mount for shared data optimization
-if [ -n "${_NETWORK_VOLUME:-}" ]; then
-    if [ -d "$_NETWORK_VOLUME" ] && [ -w "$_NETWORK_VOLUME" ]; then
-        echo "🔗 Additional network volume detected at $_NETWORK_VOLUME for shared data optimization"
-        export _NETWORK_VOLUME
-    else
-        echo "⚠️ WARNING: _NETWORK_VOLUME set to $_NETWORK_VOLUME but path is not accessible, disabling optimization"
-        unset _NETWORK_VOLUME
-    fi
-else
-    echo "📁 No additional network volume configured for shared data optimization"
 fi
 
 # Export NETWORK_VOLUME for all child processes

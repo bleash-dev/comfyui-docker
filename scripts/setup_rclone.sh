@@ -9,9 +9,9 @@ export CONFIG_ROOT="${CONFIG_ROOT:-/root}"
 
 echo "📁 Using Config Root: $CONFIG_ROOT"
 
-# Validate that NETWORK_VOLUME was set by start.sh
+# Validate that NETWORK_VOLUME was set by start_tenant.sh
 if [ -z "$NETWORK_VOLUME" ]; then
-    echo "❌ CRITICAL: NETWORK_VOLUME not set by start.sh. This script cannot proceed."
+    echo "❌ CRITICAL: NETWORK_VOLUME not set by start_tenant.sh. This script cannot proceed."
     exit 1
 fi
 echo "📁 Using Network Volume: $NETWORK_VOLUME"
@@ -20,18 +20,6 @@ echo "📁 Using Network Volume: $NETWORK_VOLUME"
 mkdir -p "$NETWORK_VOLUME/scripts"
 AWS_CACHE_DIR="$NETWORK_VOLUME/.cache/aws"
 mkdir -p "$AWS_CACHE_DIR"
-
-# Create virtual environment chunk manager early - needed by other scripts
-echo "🔧 Creating virtual environment chunk manager..."
-if [ -f "$SCRIPT_DIR/create_venv_chunk_manager.sh" ]; then
-    if ! bash "$SCRIPT_DIR/create_venv_chunk_manager.sh"; then
-        echo "❌ CRITICAL: Failed to create virtual environment chunk manager."
-        exit 1
-    fi
-    echo "  ✅ Virtual environment chunk manager created/configured."
-else
-    echo "⚠️ WARNING: create_venv_chunk_manager.sh not found in $SCRIPT_DIR"
-fi
 
 # Create S3 interactor script early - needed by other scripts
 echo "🔧 Creating S3 interactor..."
@@ -189,15 +177,6 @@ rm -f "$test_local_file"
 # Create all sync and utility scripts
 echo "📝 Creating/configuring dynamic scripts..."
 
-# Create venv chunk manager first, as it may be needed by other scripts
-if [ -f "$SCRIPT_DIR/create_venv_chunk_manager.sh" ]; then
-    if ! bash "$SCRIPT_DIR/create_venv_chunk_manager.sh"; then
-        echo "❌ CRITICAL: Failed to create venv chunk manager."
-        exit 1
-    fi
-    echo "  ✅ Venv chunk manager created/configured."
-fi
-
 if [ -f "$SCRIPT_DIR/create_sync_scripts.sh" ]; then
     if ! bash "$SCRIPT_DIR/create_sync_scripts.sh"; then
         echo "❌ CRITICAL: Failed to create sync scripts."
@@ -284,6 +263,25 @@ fi
 
 echo "✅ Dynamic script creation completed."
 
+# Sync user-specific data from S3
+USER_SYNC_SCRIPT_PATH=""
+if [ -f "$NETWORK_VOLUME/scripts/sync_user_data_from_s3.sh" ]; then
+    USER_SYNC_SCRIPT_PATH="$NETWORK_VOLUME/scripts/sync_user_data_from_s3.sh"
+elif [ -f "$SCRIPT_DIR/sync_user_data_from_s3.sh" ]; then
+    USER_SYNC_SCRIPT_PATH="$SCRIPT_DIR/sync_user_data_from_s3.sh"
+fi
+
+if [ -n "$USER_SYNC_SCRIPT_PATH" ]; then
+    echo "👤 Syncing user-specific data from S3 via $USER_SYNC_SCRIPT_PATH..."
+    if ! bash "$USER_SYNC_SCRIPT_PATH"; then
+        echo "⚠️ WARNING: User-specific data sync encountered issues. Startup will continue."
+    fi
+    echo "✅ User-specific data sync process completed."
+else
+    echo "⚠️ WARNING: User data sync script not found. Skipping user data sync."
+fi
+
+
 # Create global shared models directory structure (no mounting)
 echo "🌐 Setting up global shared models directory structure..."
 models_dir="$NETWORK_VOLUME/ComfyUI/models"
@@ -318,25 +316,6 @@ if s3_list "$s3_browser_sessions_base/" >/dev/null 2>&1; then
     fi
 else
     echo "  ℹ️ No existing browser sessions found in S3, starting with empty directory"
-fi
-
-
-# Sync user-specific data from S3
-USER_SYNC_SCRIPT_PATH=""
-if [ -f "$NETWORK_VOLUME/scripts/sync_user_data_from_s3.sh" ]; then
-    USER_SYNC_SCRIPT_PATH="$NETWORK_VOLUME/scripts/sync_user_data_from_s3.sh"
-elif [ -f "$SCRIPT_DIR/sync_user_data_from_s3.sh" ]; then
-    USER_SYNC_SCRIPT_PATH="$SCRIPT_DIR/sync_user_data_from_s3.sh"
-fi
-
-if [ -n "$USER_SYNC_SCRIPT_PATH" ]; then
-    echo "👤 Syncing user-specific data from S3 via $USER_SYNC_SCRIPT_PATH..."
-    if ! bash "$USER_SYNC_SCRIPT_PATH"; then
-        echo "⚠️ WARNING: User-specific data sync encountered issues. Startup will continue."
-    fi
-    echo "✅ User-specific data sync process completed."
-else
-    echo "⚠️ WARNING: User data sync script not found. Skipping user data sync."
 fi
 
 # Sync metadata (workflows and model config) from S3

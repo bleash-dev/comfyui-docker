@@ -11,7 +11,7 @@ for var in "${required_vars[@]}"; do
         if [ "$var" = "POD_ID" ]; then
             echo "POD_ID is required for pod-specific data isolation"
         elif [ "$var" = "NETWORK_VOLUME" ]; then
-            echo "NETWORK_VOLUME should have been set by start.sh"
+            echo "NETWORK_VOLUME should have been set by start_tenant.sh"
         fi
         # If any required var is missing, the script cannot function reliably.
         # Consider if this script should run at all if essential tracking vars are missing.
