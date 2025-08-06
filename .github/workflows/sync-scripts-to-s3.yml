@@ -36,7 +36,7 @@ jobs:
           - ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
     
     # Override matrix if manually triggered
-    environment: ${{ inputs.environment || matrix.environment }}
+    environment: "prod"
     
     permissions:
       id-token: write
@@ -57,13 +57,7 @@ jobs:
     - name: Determine environment and S3 paths
       id: env-config
       run: |
-        if [ "${{ inputs.environment }}" != "" ]; then
-          ENVIRONMENT="${{ inputs.environment }}"
-        elif [ "${{ github.ref }}" == "refs/heads/main" ]; then
-          ENVIRONMENT="prod"
-        else
-          ENVIRONMENT="dev"
-        fi
+        ENVIRONMENT="${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}"
         
         S3_BUCKET="viral-comm-api-ec2-deployments-${ENVIRONMENT}"
         S3_PREFIX="s3://${S3_BUCKET}/comfyui-ami/${ENVIRONMENT}"
