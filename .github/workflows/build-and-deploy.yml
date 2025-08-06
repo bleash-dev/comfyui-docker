@@ -37,7 +37,7 @@ jobs:
         
         # Try to get the latest ComfyUI AMI for this environment
         EXISTING_COMFYUI_AMI=$(aws ssm get-parameter \
-          --name "comfyui-multitenant-$ENVIRONMENT" \
+          --name "/comfyui/ami/$ENVIRONMENT/latest" \
           --region ${{ env.AWS_REGION }} \
           --query 'Parameter.Value' \
           --output text 2>/dev/null || echo "")
@@ -906,7 +906,7 @@ jobs:
         fi
 
     - name: Wait for AMI to be available
-      timeout-minutes: 30
+      timeout-minutes: 40
       run: |
         AMI_ID="${{ steps.create-ami.outputs.ami-id }}"
         echo "⏳ Waiting for AMI to be available..."
