@@ -30,13 +30,9 @@ env:
 jobs:
   sync-scripts:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        environment: 
-          - prod
     
     # Override matrix if manually triggered
-    environment: "prod"
+    environment: prod
     
     permissions:
       id-token: write
