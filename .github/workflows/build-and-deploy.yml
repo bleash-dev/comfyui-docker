@@ -400,7 +400,7 @@ jobs:
         # Launch instance with VPC configuration and IAM role
         INSTANCE_ID=$(aws ec2 run-instances \
           --image-id ${{ steps.base-ami.outputs.ami-id }} \
-          --instance-type c6gd.large \
+          --instance-type c5d.large \
           --subnet-id $SUBNET_ID \
           --associate-public-ip-address \
           --iam-instance-profile Name="$ROLE_NAME" \
