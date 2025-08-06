@@ -1,0 +1,352 @@
+name: Sync Scripts to S3
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+    paths:
+      - 'scripts/**'
+      - 'tenant_manager.py'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to sync to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - prod
+      force_sync:
+        description: 'Force sync all files (ignore git changes)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  sync-scripts:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: 
+          - ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+    
+    # Override matrix if manually triggered
+    environment: ${{ inputs.environment || matrix.environment }}
+    
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 2  # Need previous commit to detect changes
+
+    - name: Configure AWS credentials via OIDC
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        role-to-assume: ${{ secrets.GH_ROLE_ARN }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Determine environment and S3 paths
+      id: env-config
+      run: |
+        if [ "${{ inputs.environment }}" != "" ]; then
+          ENVIRONMENT="${{ inputs.environment }}"
+        elif [ "${{ github.ref }}" == "refs/heads/main" ]; then
+          ENVIRONMENT="prod"
+        else
+          ENVIRONMENT="dev"
+        fi
+        
+        S3_BUCKET="viral-comm-api-ec2-deployments-${ENVIRONMENT}"
+        S3_PREFIX="s3://${S3_BUCKET}/comfyui-ami/${ENVIRONMENT}"
+        
+        echo "environment=${ENVIRONMENT}" >> $GITHUB_OUTPUT
+        echo "s3_bucket=${S3_BUCKET}" >> $GITHUB_OUTPUT
+        echo "s3_prefix=${S3_PREFIX}" >> $GITHUB_OUTPUT
+        
+        echo "🌍 Environment: ${ENVIRONMENT}"
+        echo "🪣 S3 Bucket: ${S3_BUCKET}"
+        echo "📦 S3 Prefix: ${S3_PREFIX}"
+
+    - name: Detect changed files
+      id: changes
+      run: |
+        echo "🔍 Detecting changed script files..."
+        
+        FORCE_SYNC="${{ inputs.force_sync || 'false' }}"
+        
+        if [ "$FORCE_SYNC" == "true" ]; then
+          echo "🔄 Force sync enabled - syncing all script files"
+          CHANGED_FILES=$(find scripts/ -type f -name "*.sh" -o -name "*.py" | head -20)
+          if [ -f "tenant_manager.py" ]; then
+            CHANGED_FILES="${CHANGED_FILES}
+        tenant_manager.py"
+          fi
+        else
+          # Get changed files in the last commit
+          echo "📊 Checking git changes since last commit..."
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep -E '^(scripts/.*\.(sh|py)|tenant_manager\.py)$' | head -20 || echo "")
+        fi
+        
+        if [ -z "$CHANGED_FILES" ]; then
+          echo "ℹ️ No script files changed"
+          echo "changed_files=" >> $GITHUB_OUTPUT
+          echo "has_changes=false" >> $GITHUB_OUTPUT
+        else
+          echo "📝 Changed script files:"
+          echo "$CHANGED_FILES" | while read -r file; do
+            echo "  - $file"
+          done
+          
+          # Save to output (GitHub Actions format)
+          {
+            echo "changed_files<<EOF"
+            echo "$CHANGED_FILES"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Validate S3 bucket access
+      run: |
+        echo "🔍 Validating S3 bucket access..."
+        S3_BUCKET="${{ steps.env-config.outputs.s3_bucket }}"
+        S3_PREFIX="${{ steps.env-config.outputs.s3_prefix }}"
+        
+        # Test AWS credentials
+        echo "🔐 Testing AWS credentials..."
+        aws sts get-caller-identity
+        
+        # Test S3 bucket access
+        echo "🪣 Testing S3 bucket access..."
+        if aws s3 ls "s3://${S3_BUCKET}/" >/dev/null 2>&1; then
+          echo "✅ S3 bucket accessible: ${S3_BUCKET}"
+        else
+          echo "❌ Cannot access S3 bucket: ${S3_BUCKET}"
+          echo "🔍 Attempting to list buckets..."
+          aws s3 ls
+          exit 1
+        fi
+        
+        # Show current S3 contents
+        echo "📋 Current S3 contents at ${S3_PREFIX}/:"
+        aws s3 ls "${S3_PREFIX}/" --recursive || echo "No files found or path doesn't exist"
+
+    - name: Prepare scripts for upload
+      if: steps.changes.outputs.has_changes == 'true'
+      run: |
+        echo "📦 Preparing scripts for upload..."
+        
+        # Create temporary directory for staging
+        mkdir -p /tmp/scripts-staging
+        
+        # Copy all scripts to staging area
+        echo "📁 Copying scripts directory..."
+        if [ -d "scripts" ]; then
+          cp -r scripts/* /tmp/scripts-staging/
+          echo "✅ Scripts directory copied"
+        else
+          echo "⚠️ Scripts directory not found"
+        fi
+        
+        # Copy tenant manager if it exists
+        if [ -f "tenant_manager.py" ]; then
+          cp tenant_manager.py /tmp/scripts-staging/
+          echo "✅ tenant_manager.py copied"
+        else
+          echo "⚠️ tenant_manager.py not found"
+        fi
+        
+        # Make all scripts executable
+        find /tmp/scripts-staging -name "*.sh" -exec chmod +x {} \;
+        find /tmp/scripts-staging -name "*.py" -exec chmod +x {} \;
+        
+        # Show what we're uploading
+        echo "📋 Files prepared for upload:"
+        find /tmp/scripts-staging -type f | sort | while read -r file; do
+          size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null || echo "unknown")
+          echo "  - ${file#/tmp/scripts-staging/} (${size} bytes)"
+        done
+        
+        # Count total files
+        TOTAL_FILES=$(find /tmp/scripts-staging -type f | wc -l)
+        echo "📊 Total files to upload: $TOTAL_FILES"
+
+    - name: Sync scripts to S3
+      if: steps.changes.outputs.has_changes == 'true'
+      run: |
+        echo "☁️ Syncing scripts to S3..."
+        
+        S3_PREFIX="${{ steps.env-config.outputs.s3_prefix }}"
+        ENVIRONMENT="${{ steps.env-config.outputs.environment }}"
+        
+        echo "📤 Uploading to: $S3_PREFIX"
+        echo "🌍 Environment: $ENVIRONMENT"
+        
+        # Perform the sync
+        if aws s3 sync /tmp/scripts-staging/ "$S3_PREFIX/" \
+          --delete \
+          --exclude "*.log" \
+          --exclude "*.tmp" \
+          --exclude "__pycache__/*" \
+          --metadata "environment=$ENVIRONMENT,sync-time=$(date -u +%Y-%m-%dT%H:%M:%SZ),git-commit=${{ github.sha }}"; then
+          
+          echo "✅ Scripts synced successfully to S3"
+          
+          # Verify upload
+          echo "🔍 Verifying uploaded files..."
+          UPLOADED_COUNT=$(aws s3 ls "$S3_PREFIX/" --recursive | wc -l)
+          echo "📊 Files in S3 after sync: $UPLOADED_COUNT"
+          
+          # Show recent uploads
+          echo "📋 Recent files in S3:"
+          aws s3 ls "$S3_PREFIX/" --recursive --human-readable | head -10
+          
+        else
+          echo "❌ Failed to sync scripts to S3"
+          exit 1
+        fi
+
+    - name: Update deployment metadata
+      if: steps.changes.outputs.has_changes == 'true'
+      run: |
+        echo "📊 Updating deployment metadata..."
+        
+        S3_BUCKET="${{ steps.env-config.outputs.s3_bucket }}"
+        ENVIRONMENT="${{ steps.env-config.outputs.environment }}"
+        
+        # Create metadata file
+        cat > /tmp/deployment-metadata.json << 'EOF'
+        {
+          "lastSync": "TIMESTAMP_PLACEHOLDER",
+          "environment": "ENVIRONMENT_PLACEHOLDER",
+          "gitCommit": "COMMIT_PLACEHOLDER",
+          "gitRef": "REF_PLACEHOLDER",
+          "triggeredBy": "EVENT_PLACEHOLDER",
+          "actor": "ACTOR_PLACEHOLDER",
+          "workflowRun": "RUN_PLACEHOLDER",
+          "repository": "REPO_PLACEHOLDER",
+          "changedFiles": "FILES_PLACEHOLDER"
+        }
+        EOF
+        
+        # Replace placeholders
+        sed -i "s/TIMESTAMP_PLACEHOLDER/$(date -u +%Y-%m-%dT%H:%M:%SZ)/" /tmp/deployment-metadata.json
+        sed -i "s/ENVIRONMENT_PLACEHOLDER/$ENVIRONMENT/" /tmp/deployment-metadata.json
+        sed -i "s/COMMIT_PLACEHOLDER/${{ github.sha }}/" /tmp/deployment-metadata.json
+        sed -i "s/REF_PLACEHOLDER/${{ github.ref }}/" /tmp/deployment-metadata.json
+        sed -i "s/EVENT_PLACEHOLDER/${{ github.event_name }}/" /tmp/deployment-metadata.json
+        sed -i "s/ACTOR_PLACEHOLDER/${{ github.actor }}/" /tmp/deployment-metadata.json
+        sed -i "s/RUN_PLACEHOLDER/${{ github.run_id }}/" /tmp/deployment-metadata.json
+        sed -i "s/REPO_PLACEHOLDER/${{ github.repository }}/" /tmp/deployment-metadata.json
+        
+        # Handle changed files as JSON array
+        CHANGED_FILES_JSON=$(echo '${{ steps.changes.outputs.changed_files }}' | jq -R -s 'split("\n") | map(select(length > 0))')
+        
+        # Use jq to properly insert the array
+        jq --argjson files "$CHANGED_FILES_JSON" '.changedFiles = $files' /tmp/deployment-metadata.json > /tmp/deployment-metadata-final.json
+        
+        echo "📋 Deployment metadata:"
+        cat /tmp/deployment-metadata-final.json | jq .
+        
+        # Upload metadata
+        aws s3 cp /tmp/deployment-metadata-final.json "s3://${S3_BUCKET}/comfyui-ami/${ENVIRONMENT}/deployment-metadata.json" \
+          --content-type "application/json" \
+          --metadata "sync-time=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        
+        echo "✅ Deployment metadata updated"
+
+    - name: Test AMI script sync capability
+      if: steps.changes.outputs.has_changes == 'true'
+      run: |
+        echo "🧪 Testing AMI script sync capability..."
+        
+        S3_PREFIX="${{ steps.env-config.outputs.s3_prefix }}"
+        
+        # Create a test script similar to what the AMI would use
+        cat > /tmp/test-sync-script.sh << 'EOF'
+        #!/bin/bash
+        set -e
+        
+        SCRIPTS_DIR="/tmp/test-scripts"
+        S3_PREFIX="$1"
+        AWS_REGION="$2"
+        
+        echo "Testing script sync from: $S3_PREFIX"
+        echo "AWS Region: $AWS_REGION"
+        
+        # Create test directory
+        mkdir -p "$SCRIPTS_DIR"
+        cd "$SCRIPTS_DIR"
+        
+        # Test sync
+        if aws s3 sync "$S3_PREFIX/" . --region "$AWS_REGION"; then
+            echo "✅ Test sync successful"
+            FILE_COUNT=$(find . -type f | wc -l)
+            echo "📊 Files synced: $FILE_COUNT"
+            
+            # Verify key files
+            for key_file in tenant_manager.py; do
+                if [ -f "$key_file" ]; then
+                    echo "✅ Key file found: $key_file"
+                else
+                    echo "❌ Key file missing: $key_file"
+                    exit 1
+                fi
+            done
+            
+            echo "🎉 AMI sync test passed"
+        else
+            echo "❌ Test sync failed"
+            exit 1
+        fi
+        EOF
+        
+        chmod +x /tmp/test-sync-script.sh
+        
+        # Run the test
+        /tmp/test-sync-script.sh "$S3_PREFIX" "${{ env.AWS_REGION }}"
+        
+        echo "✅ AMI script sync test completed successfully"
+
+    - name: Notify about sync results
+      run: |
+        echo "📊 Script Sync Summary"
+        echo "===================="
+        echo "🌍 Environment: ${{ steps.env-config.outputs.environment }}"
+        echo "📦 S3 Location: ${{ steps.env-config.outputs.s3_prefix }}"
+        echo "🔄 Sync Status: ${{ steps.changes.outputs.has_changes == 'true' && 'Completed' || 'Skipped (no changes)' }}"
+        echo "📝 Git Commit: ${{ github.sha }}"
+        echo "🎭 Triggered by: ${{ github.actor }} (${{ github.event_name }})"
+        
+        if [ "${{ steps.changes.outputs.has_changes }}" == "true" ]; then
+          echo ""
+          echo "📋 Files synced:"
+          echo '${{ steps.changes.outputs.changed_files }}' | while IFS= read -r file; do
+            [ -n "$file" ] && echo "  ✅ $file"
+          done
+          
+          echo ""
+          echo "🎯 Next Steps:"
+          echo "  - AMI instances will automatically sync these scripts on service restart"
+          echo "  - Use 'update-scripts' command on running instances for immediate sync"
+          echo "  - Scripts are now available at: ${{ steps.env-config.outputs.s3_prefix }}"
+        else
+          echo ""
+          echo "ℹ️ No script changes detected - sync skipped"
+        fi
+
+    - name: Cleanup
+      if: always()
+      run: |
+        echo "🧹 Cleaning up temporary files..."
+        rm -rf /tmp/scripts-staging /tmp/test-scripts /tmp/deployment-metadata*.json /tmp/test-sync-script.sh
+        echo "✅ Cleanup completed"

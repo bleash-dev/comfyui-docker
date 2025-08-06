@@ -4,6 +4,45 @@ set -eo pipefail
 echo "=== ComfyUI Tenant Startup - $(date) ==="
 echo "🔍 Starting ComfyUI Setup for Tenant..."
 
+# Sync scripts from S3 to ensure we have the latest versions
+echo "📥 Syncing latest scripts from S3..."
+S3_ENVIRONMENT="${DEPLOYMENT_TARGET:-dev}"
+S3_SCRIPTS_PREFIX="s3://viral-comm-api-ec2-deployments-dev/comfyui-ami/${S3_ENVIRONMENT}"
+
+if command -v aws >/dev/null 2>&1; then
+    echo "🔧 Syncing scripts from S3: $S3_SCRIPTS_PREFIX"
+    
+    # Create script directory if it doesn't exist
+    mkdir -p /scripts
+    
+    # Sync all scripts from S3, overwriting existing ones
+    if aws s3 sync "$S3_SCRIPTS_PREFIX/" "/scripts/" --delete --quiet 2>/dev/null; then
+        echo "✅ Scripts synced successfully from S3"
+        
+        # Make scripts executable
+        chmod +x /scripts/*.sh 2>/dev/null || true
+        chmod +x /scripts/*.py 2>/dev/null || true
+        
+        echo "📊 Synced scripts:"
+        ls -la /scripts/ | head -10
+    else
+        echo "⚠️ Warning: Failed to sync scripts from S3, continuing with existing scripts"
+        echo "   This may indicate IAM permissions issues or network connectivity problems"
+        echo "   Checking if local scripts exist..."
+        
+        if [ "$(ls -A /scripts/ 2>/dev/null)" ]; then
+            echo "✅ Local scripts found, continuing with existing versions"
+        else
+            echo "❌ ERROR: No scripts available locally and S3 sync failed"
+            echo "   Please check IAM permissions and S3 bucket access"
+            exit 1
+        fi
+    fi
+else
+    echo "⚠️ Warning: AWS CLI not available, cannot sync scripts from S3"
+    echo "   Continuing with existing scripts in /scripts/"
+fi
+
 # Tenant-specific environment validation
 if [ -z "${POD_ID:-}" ] || [ -z "${POD_USER_NAME:-}" ] || [ -z "${COMFYUI_PORT:-}" ]; then
     echo "❌ ERROR: Required tenant environment variables not set:"

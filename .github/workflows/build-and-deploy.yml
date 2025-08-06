@@ -1,8 +1,6 @@
 name: Build and Deploy ComfyUI AMI
 
 on:
-  push:
-    branches: [ main, dev]
   workflow_dispatch:
 
 env:
@@ -899,12 +897,115 @@ jobs:
         fi
 
     - name: Wait for AMI to be available
-      timeout-minutes: 40
+      timeout-minutes: 60
       run: |
         AMI_ID="${{ steps.create-ami.outputs.ami-id }}"
         echo "⏳ Waiting for AMI to be available..."
-        aws ec2 wait image-available --image-ids $AMI_ID --region ${{ env.AWS_REGION }}
-        echo "✅ AMI is available: $AMI_ID"
+        echo "   This can take 10-30 minutes depending on AMI size and AWS load"
+        echo "   AMI ID: $AMI_ID"
+        
+        # Custom polling loop with longer timeout and progress reporting
+        MAX_WAIT_TIME=3600  # 60 minutes in seconds
+        CHECK_INTERVAL=30   # Check every 30 seconds
+        ELAPSED_TIME=0
+        
+        while [ $ELAPSED_TIME -lt $MAX_WAIT_TIME ]; do
+          # Get AMI state
+          AMI_STATE=$(aws ec2 describe-images \
+            --image-ids $AMI_ID \
+            --query 'Images[0].State' \
+            --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "unknown")
+          
+          # Get progress percentage if available
+          AMI_PROGRESS=$(aws ec2 describe-images \
+            --image-ids $AMI_ID \
+            --query 'Images[0].StateReason.Message' \
+            --output text \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+          
+          # Calculate elapsed time in minutes for display
+          ELAPSED_MINUTES=$((ELAPSED_TIME / 60))
+          REMAINING_MINUTES=$(((MAX_WAIT_TIME - ELAPSED_TIME) / 60))
+          
+          echo "🕐 Time elapsed: ${ELAPSED_MINUTES}m | Remaining: ${REMAINING_MINUTES}m | State: $AMI_STATE"
+          
+          # Show progress if available
+          if [[ "$AMI_PROGRESS" == *"%"* ]]; then
+            echo "   📊 Progress: $AMI_PROGRESS"
+          elif [ -n "$AMI_PROGRESS" ] && [ "$AMI_PROGRESS" != "None" ]; then
+            echo "   📝 Status: $AMI_PROGRESS"
+          fi
+          
+          # Check if AMI is available
+          case "$AMI_STATE" in
+            "available")
+              echo "✅ AMI is available: $AMI_ID"
+              echo "⏱️ Total wait time: ${ELAPSED_MINUTES} minutes"
+              
+              # Get final AMI details
+              echo "📋 Final AMI Details:"
+              aws ec2 describe-images \
+                --image-ids $AMI_ID \
+                --query 'Images[0].[Name,Description,CreationDate,Architecture,VirtualizationType,RootDeviceType]' \
+                --output table \
+                --region ${{ env.AWS_REGION }}
+              
+              exit 0
+              ;;
+            "failed")
+              echo "❌ AMI creation failed"
+              echo "🔍 Failure reason: $AMI_PROGRESS"
+              
+              # Get detailed failure information
+              aws ec2 describe-images \
+                --image-ids $AMI_ID \
+                --query 'Images[0].[State,StateReason]' \
+                --output table \
+                --region ${{ env.AWS_REGION }}
+              
+              exit 1
+              ;;
+            "pending")
+              echo "   ⚙️ AMI creation in progress..."
+              ;;
+            "unknown")
+              echo "   ⚠️ Could not determine AMI state (AWS API issue?)"
+              ;;
+            *)
+              echo "   📝 AMI state: $AMI_STATE"
+              ;;
+          esac
+          
+          # Wait before next check
+          sleep $CHECK_INTERVAL
+          ELAPSED_TIME=$((ELAPSED_TIME + CHECK_INTERVAL))
+          
+          # Show progress indicators at different intervals
+          if [ $((ELAPSED_TIME % 300)) -eq 0 ]; then  # Every 5 minutes
+            echo "💡 AMI creation typically takes 10-30 minutes. Large AMIs or high AWS load can take longer."
+            echo "   Current wait time: ${ELAPSED_MINUTES} minutes"
+          fi
+        done
+        
+        # Timeout reached
+        echo "⏰ Timeout reached after $((MAX_WAIT_TIME / 60)) minutes"
+        echo "❌ AMI creation is taking longer than expected"
+        echo "🔍 Current AMI state: $AMI_STATE"
+        echo "📝 Last known progress: $AMI_PROGRESS"
+        echo ""
+        echo "💡 Possible reasons for long AMI creation:"
+        echo "   • Large AMI size (ComfyUI with models can be several GB)"
+        echo "   • High AWS load in the region"
+        echo "   • Complex AMI with many files"
+        echo ""
+        echo "🔧 You can check AMI status manually with:"
+        echo "   aws ec2 describe-images --image-ids $AMI_ID --region ${{ env.AWS_REGION }}"
+        echo ""
+        echo "⚠️ The AMI creation process may still complete successfully."
+        echo "   Check the AWS Console or run the command above to verify."
+        
+        exit 1
 
     - name: Clean up old AMI snapshots
       if: steps.create-ami.outputs.old-snapshots != ''

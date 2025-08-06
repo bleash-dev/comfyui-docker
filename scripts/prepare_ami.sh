@@ -720,7 +720,85 @@ fi
 # --- 11. CREATE SYSTEM SERVICES (Docker-Free) ---
 echo "⚙️ Creating systemd services..."
 
-# Create a systemd service for ComfyUI Tenant Manager (Direct Python execution)
+# Create script sync helper that will be used by the service
+cat > /usr/local/bin/sync-scripts-from-s3 << 'EOF'
+#!/bin/bash
+# Script to sync latest scripts from S3 before starting tenant manager
+
+set -e
+
+SCRIPTS_DIR="/scripts"
+ENVIRONMENT="${ENVIRONMENT:-dev}"
+AWS_REGION="${AWS_REGION:-us-east-1}"
+S3_PREFIX="${S3_PREFIX:-s3://viral-comm-api-ec2-deployments-dev/comfyui-ami/${ENVIRONMENT}}"
+LOG_TAG="[SCRIPT-SYNC]"
+
+echo "$LOG_TAG Starting script sync from S3..."
+echo "$LOG_TAG Environment: $ENVIRONMENT"
+echo "$LOG_TAG AWS Region: $AWS_REGION" 
+echo "$LOG_TAG S3 Path: $S3_PREFIX"
+
+# Ensure scripts directory exists
+mkdir -p "$SCRIPTS_DIR"
+cd "$SCRIPTS_DIR"
+
+# Test AWS CLI access
+if ! aws sts get-caller-identity --region "$AWS_REGION" >/dev/null 2>&1; then
+    echo "$LOG_TAG ERROR: AWS CLI access failed"
+    echo "$LOG_TAG Current user: $(whoami)"
+    echo "$LOG_TAG AWS CLI version: $(aws --version 2>&1 || echo 'AWS CLI not found')"
+    exit 1
+fi
+
+echo "$LOG_TAG AWS CLI access confirmed"
+
+# Backup existing scripts if they exist
+if [ -d "$SCRIPTS_DIR" ] && [ "$(ls -A $SCRIPTS_DIR 2>/dev/null)" ]; then
+    BACKUP_DIR="/tmp/scripts-backup-$(date +%Y%m%d-%H%M%S)"
+    echo "$LOG_TAG Backing up existing scripts to $BACKUP_DIR"
+    cp -r "$SCRIPTS_DIR" "$BACKUP_DIR"
+fi
+
+# Sync scripts from S3
+echo "$LOG_TAG Syncing scripts from S3..."
+if aws s3 sync "$S3_PREFIX/" "$SCRIPTS_DIR" --region "$AWS_REGION" --delete; then
+    echo "$LOG_TAG Scripts synced successfully"
+    
+    # Count files synced
+    FILE_COUNT=$(find "$SCRIPTS_DIR" -type f | wc -l)
+    echo "$LOG_TAG Total files synced: $FILE_COUNT"
+    
+    # Make scripts executable
+    find "$SCRIPTS_DIR" -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
+    find "$SCRIPTS_DIR" -name "*.py" -exec chmod +x {} \; 2>/dev/null || true
+    
+    # Update tenant manager if it was synced
+    if [ -f "$SCRIPTS_DIR/tenant_manager.py" ]; then
+        echo "$LOG_TAG Updating tenant manager..."
+        cp "$SCRIPTS_DIR/tenant_manager.py" /usr/local/bin/tenant_manager.py
+        chmod +x /usr/local/bin/tenant_manager.py
+        echo "$LOG_TAG Tenant manager updated"
+    fi
+    
+    echo "$LOG_TAG Script sync completed successfully"
+else
+    echo "$LOG_TAG ERROR: Failed to sync scripts from S3"
+    echo "$LOG_TAG S3 Path: $S3_PREFIX"
+    echo "$LOG_TAG AWS Region: $AWS_REGION"
+    
+    # If backup exists, restore it
+    if [ -d "$BACKUP_DIR" ]; then
+        echo "$LOG_TAG Restoring from backup: $BACKUP_DIR"
+        cp -r "$BACKUP_DIR"/* "$SCRIPTS_DIR"/ 2>/dev/null || true
+    fi
+    
+    exit 1
+fi
+EOF
+
+chmod +x /usr/local/bin/sync-scripts-from-s3
+
+# Create a systemd service for ComfyUI Tenant Manager with script syncing
 cat > /etc/systemd/system/comfyui-multitenant.service << 'EOF'
 [Unit]
 Description=ComfyUI Multi-Tenant Manager
@@ -744,6 +822,9 @@ Environment=PYTHON_VERSION=3.10
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
+# Pre-start script to sync scripts from S3
+ExecStartPre=/usr/local/bin/sync-scripts-from-s3
+
 # The main command to run the tenant manager directly
 ExecStart=/usr/bin/python3 /usr/local/bin/tenant_manager.py
 
@@ -752,8 +833,8 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=comfyui-multitenant
 
-# Give the service more time to start (port 80 binding might take time)
-TimeoutStartSec=60
+# Give the service more time to start (script sync + port binding might take time)
+TimeoutStartSec=120
 
 [Install]
 WantedBy=multi-user.target
@@ -765,6 +846,15 @@ cat > /usr/local/bin/comfyui-monitor << 'EOF'
 echo "--- ComfyUI System Status ---"
 echo; echo "--- ComfyUI Service Status ---"
 systemctl status comfyui-multitenant
+echo; echo "--- Script Sync Status ---"
+if [ -f "/usr/local/bin/sync-scripts-from-s3" ]; then
+  echo "✅ Script sync utility available"
+  echo "Last scripts directory update:"
+  stat -c "Modified: %Y (%y)" /scripts 2>/dev/null || echo "Cannot stat /scripts"
+  echo "Scripts count: $(find /scripts -type f 2>/dev/null | wc -l)"
+else
+  echo "❌ Script sync utility not found"
+fi
 echo; echo "--- Ephemeral Storage Status ---"
 if mount | grep -q "/workspace"; then
   echo "✅ /workspace is mounted:"
@@ -786,6 +876,26 @@ echo; echo "--- Recent ComfyUI Logs ---"
 journalctl -u comfyui-multitenant --no-pager -n 20
 EOF
 chmod +x /usr/local/bin/comfyui-monitor
+
+# Create a manual script sync utility for troubleshooting
+cat > /usr/local/bin/update-scripts << 'EOF'
+#!/bin/bash
+# Manual script sync utility
+
+echo "🔄 Manually syncing scripts from S3..."
+
+if [ -x "/usr/local/bin/sync-scripts-from-s3" ]; then
+    /usr/local/bin/sync-scripts-from-s3
+    echo "✅ Script sync completed"
+    echo "🔄 Restarting ComfyUI service to use updated scripts..."
+    systemctl restart comfyui-multitenant.service
+    echo "✅ Service restarted"
+else
+    echo "❌ Script sync utility not found"
+    exit 1
+fi
+EOF
+chmod +x /usr/local/bin/update-scripts
 
 # Create log rotation
 cat > /etc/logrotate.d/comfyui << 'EOF'
