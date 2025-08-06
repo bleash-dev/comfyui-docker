@@ -510,19 +510,12 @@ jobs:
         done
 
     - name: Wait for AMI update completion
-      timeout-minutes: 20
+      timeout-minutes: 30
       run: |
         INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
         AMI_TYPE="${{ steps.base-ami.outputs.ami-type }}"
         
-        # Set timeout based on whether we're using existing ComfyUI AMI or fresh Ubuntu
-        if [ "$AMI_TYPE" = "existing-comfyui" ]; then
-          MAX_ATTEMPTS=20  # Incremental builds should be faster
-          echo "🔄 Monitoring incremental AMI update (should be faster)..."
-        else
-          MAX_ATTEMPTS=40  # Fresh builds take longer  
-          echo "🔧 Monitoring fresh AMI setup (15-25 minutes expected)..."
-        fi
+        MAX_ATTEMPTS=50  # Fresh builds take longer  
         
         echo "Max attempts: $MAX_ATTEMPTS"
         
