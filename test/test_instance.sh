@@ -7,7 +7,7 @@ set -e
 
 # Configuration
 AWS_REGION="us-east-1"
-INSTANCE_TYPE="t3.large"
+INSTANCE_TYPE="g4dn.xlarge"  # GPU instance with A10G (24GB GPU memory) + 250GB ephemeral NVMe SSD - ideal for ComfyUI
 IAM_ROLE_NAME="viral-comm-api-shared-instance-profile-dev"  # Will be auto-detected from available instance profiles
 KEY_PAIR_NAME=""  # Optional: Add your key pair name here for SSH access
 

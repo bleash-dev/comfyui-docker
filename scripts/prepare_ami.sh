@@ -149,6 +149,150 @@ rm -f "$CW_AGENT_DEB"
 
 checkpoint "CLOUDWATCH_AGENT_INSTALLED"
 
+# --- 6.5. SETUP EPHEMERAL DISK MOUNTING ---
+echo "💾 Setting up ephemeral disk mounting for /workspace..."
+
+# Create ephemeral disk mounting script
+cat > /usr/local/bin/mount-ephemeral-storage << 'EOF'
+#!/bin/bash
+# Ephemeral Storage Mounting Script for ComfyUI
+# Automatically detects and mounts NVMe ephemeral storage to /workspace
+
+set -e
+
+MOUNT_POINT="/workspace"
+LOG_FILE="/var/log/ephemeral-mount.log"
+
+# Function to log messages
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+}
+
+log_message "Starting ephemeral storage setup..."
+
+# Ensure mount point exists
+if [ ! -d "$MOUNT_POINT" ]; then
+    log_message "Creating mount point: $MOUNT_POINT"
+    mkdir -p "$MOUNT_POINT"
+fi
+
+# Check if already mounted
+if mount | grep -q "$MOUNT_POINT"; then
+    EXISTING_MOUNT=$(mount | grep "$MOUNT_POINT" | awk '{print $1}')
+    log_message "Mount point already in use by: $EXISTING_MOUNT"
+    exit 0
+fi
+
+# Find ephemeral NVMe devices (exclude root device)
+log_message "Detecting available NVMe ephemeral devices..."
+
+# Get the root device to exclude it
+ROOT_DEVICE=$(lsblk -no PKNAME $(findmnt -n -o SOURCE /))
+log_message "Root device to exclude: $ROOT_DEVICE"
+
+# Find available NVMe devices that are not the root device and not already mounted
+AVAILABLE_NVME_DEVICES=$(lsblk -ndo NAME,TYPE,MOUNTPOINT | grep 'disk' | grep 'nvme' | grep -v "$ROOT_DEVICE" | awk '$3=="" {print $1}')
+
+if [ -z "$AVAILABLE_NVME_DEVICES" ]; then
+    log_message "No available ephemeral NVMe devices found"
+    log_message "Available block devices:"
+    lsblk | tee -a "$LOG_FILE"
+    exit 0
+fi
+
+# Use the first available NVMe device
+NVME_DEVICE=$(echo "$AVAILABLE_NVME_DEVICES" | head -n1)
+DEVICE_PATH="/dev/$NVME_DEVICE"
+
+log_message "Selected ephemeral device: $DEVICE_PATH"
+
+# Get device info
+DEVICE_SIZE=$(lsblk -ndo SIZE "$DEVICE_PATH" 2>/dev/null || echo "unknown")
+log_message "Device size: $DEVICE_SIZE"
+
+# Check if device needs formatting
+if ! blkid "$DEVICE_PATH" >/dev/null 2>&1; then
+    log_message "Device $DEVICE_PATH is not formatted, formatting with ext4..."
+    mkfs.ext4 -F "$DEVICE_PATH" || {
+        log_message "ERROR: Failed to format $DEVICE_PATH"
+        exit 1
+    }
+    log_message "Formatting completed successfully"
+else
+    EXISTING_FS=$(blkid -o value -s TYPE "$DEVICE_PATH")
+    log_message "Device $DEVICE_PATH already formatted with: $EXISTING_FS"
+fi
+
+# Mount the device
+log_message "Mounting $DEVICE_PATH to $MOUNT_POINT..."
+mount "$DEVICE_PATH" "$MOUNT_POINT" || {
+    log_message "ERROR: Failed to mount $DEVICE_PATH to $MOUNT_POINT"
+    exit 1
+}
+
+# Set proper permissions
+chown root:root "$MOUNT_POINT"
+chmod 755 "$MOUNT_POINT"
+
+# Verify mount
+if mount | grep -q "$MOUNT_POINT"; then
+    MOUNTED_DEVICE=$(mount | grep "$MOUNT_POINT" | awk '{print $1}')
+    MOUNT_SIZE=$(df -h "$MOUNT_POINT" | tail -1 | awk '{print $2}')
+    log_message "SUCCESS: $MOUNTED_DEVICE mounted to $MOUNT_POINT (Size: $MOUNT_SIZE)"
+    
+    # Show mount details
+    log_message "Mount details:"
+    df -h "$MOUNT_POINT" | tee -a "$LOG_FILE"
+else
+    log_message "ERROR: Mount verification failed"
+    exit 1
+fi
+
+log_message "Ephemeral storage setup completed successfully"
+EOF
+
+# Make the script executable
+chmod +x /usr/local/bin/mount-ephemeral-storage
+
+# Create systemd service for ephemeral mounting
+cat > /etc/systemd/system/mount-ephemeral-storage.service << 'EOF'
+[Unit]
+Description=Mount Ephemeral Storage for ComfyUI
+DefaultDependencies=false
+After=local-fs-pre.target
+Before=local-fs.target
+Wants=local-fs-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mount-ephemeral-storage
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=local-fs.target
+EOF
+
+# Enable the service
+systemctl daemon-reload
+systemctl enable mount-ephemeral-storage.service
+
+echo "✅ Ephemeral disk mounting setup completed"
+echo "   🔧 Mount script: /usr/local/bin/mount-ephemeral-storage"
+echo "   ⚙️ Systemd service: mount-ephemeral-storage.service"
+echo "   📍 Mount point: /workspace"
+
+# Test the mounting script during AMI creation
+echo "🧪 Testing ephemeral storage mounting during AMI creation..."
+/usr/local/bin/mount-ephemeral-storage || {
+    echo "⚠️ Ephemeral storage mounting failed during AMI creation"
+    echo "   This is expected on instances without ephemeral storage"
+    echo "   The service will work on instances with NVMe ephemeral storage"
+}
+
+checkpoint "EPHEMERAL_STORAGE_SETUP"
+
 # --- 7. SETUP APPLICATION DIRECTORIES ---
 echo "📁 Setting up application directories..."
 
@@ -480,6 +624,17 @@ cat > /usr/local/bin/comfyui-monitor << 'EOF'
 echo "--- ComfyUI System Status ---"
 echo; echo "--- ComfyUI Service Status ---"
 systemctl status comfyui-multitenant
+echo; echo "--- Ephemeral Storage Status ---"
+if mount | grep -q "/workspace"; then
+  echo "✅ /workspace is mounted:"
+  df -h /workspace
+  echo "Mount details:"
+  mount | grep /workspace
+else
+  echo "❌ /workspace is not mounted"
+  echo "Available NVMe devices:"
+  lsblk | grep nvme || echo "No NVMe devices found"
+fi
 echo; echo "--- System Resources ---"
 df -h /; free -h
 echo; echo "--- Python Processes ---"
@@ -556,6 +711,27 @@ if [ -f "/etc/systemd/system/comfyui-multitenant.service" ]; then
     echo "✅ Systemd service file exists"
 else
     VALIDATION_ERRORS+=("Systemd service file is missing")
+fi
+
+# Check ephemeral storage service
+if [ -f "/etc/systemd/system/mount-ephemeral-storage.service" ]; then
+    echo "✅ Ephemeral storage service exists"
+    
+    # Check if service is enabled
+    if systemctl is-enabled mount-ephemeral-storage.service >/dev/null 2>&1; then
+        echo "✅ Ephemeral storage service is enabled"
+    else
+        VALIDATION_ERRORS+=("Ephemeral storage service is not enabled")
+    fi
+    
+    # Check if mount script exists
+    if [ -f "/usr/local/bin/mount-ephemeral-storage" ] && [ -x "/usr/local/bin/mount-ephemeral-storage" ]; then
+        echo "✅ Ephemeral storage mount script exists and is executable"
+    else
+        VALIDATION_ERRORS+=("Ephemeral storage mount script missing or not executable")
+    fi
+else
+    VALIDATION_ERRORS+=("Ephemeral storage service is missing")
 fi
 
 # Check required directories
