@@ -45,7 +45,7 @@ jobs:
       uses: aws-actions/configure-aws-credentials@v2
       with:
         role-to-assume: ${{ secrets.GH_ROLE_ARN }}
-        aws-region: ${{ env.AWS_REGION }}
+        aws-region: "us-east-1"
 
     - name: Determine environment and S3 paths
       id: env-config
