@@ -28,31 +28,85 @@ jobs:
         role-to-assume: ${{ secrets.GH_ROLE_ARN }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Get base Ubuntu AMI (Always Fresh)
+    - name: Get base AMI (Existing ComfyUI or Fresh Ubuntu)
       id: base-ami
       run: |
         ENVIRONMENT="${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}"
-        echo "🆕 Always using fresh Ubuntu base for consistent AMI builds"
         
-        # Get latest Ubuntu 22.04 LTS AMI
-        UBUNTU_AMI=$(aws ec2 describe-images \
-          --owners 099720109477 \
-          --filters "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*" \
-              "Name=state,Values=available" \
-          --query "Images | sort_by(@, &CreationDate) | [-1].ImageId" \
-          --output text \
-          --region ${{ env.AWS_REGION }})
+        echo "🔍 Looking for existing ComfyUI AMI to use as base..."
         
-        echo "🖥️ Using base Ubuntu AMI: $UBUNTU_AMI"
-        echo "ami-id=$UBUNTU_AMI" >> $GITHUB_OUTPUT
-        echo "ami-type=ubuntu" >> $GITHUB_OUTPUT
+        # Try to get the latest ComfyUI AMI for this environment
+        EXISTING_COMFYUI_AMI=$(aws ssm get-parameter \
+          --name "comfyui-multitenant-$ENVIRONMENT" \
+          --region ${{ env.AWS_REGION }} \
+          --query 'Parameter.Value' \
+          --output text 2>/dev/null || echo "")
         
-        # Get Ubuntu AMI details for reference
-        aws ec2 describe-images \
-          --image-ids $UBUNTU_AMI \
-          --query 'Images[0].[Name,Description,CreationDate]' \
-          --output table \
-          --region ${{ env.AWS_REGION }}
+        if [ -n "$EXISTING_COMFYUI_AMI" ] && [ "$EXISTING_COMFYUI_AMI" != "None" ]; then
+          # Verify the AMI still exists and is available
+          AMI_STATE=$(aws ec2 describe-images \
+            --image-ids "$EXISTING_COMFYUI_AMI" \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Images[0].State' \
+            --output text 2>/dev/null || echo "not-found")
+          
+          if [ "$AMI_STATE" = "available" ]; then
+            echo "🚀 Found existing ComfyUI AMI: $EXISTING_COMFYUI_AMI"
+            echo "✅ Using existing ComfyUI AMI as base for faster incremental builds"
+            
+            # Get AMI details
+            aws ec2 describe-images \
+              --image-ids "$EXISTING_COMFYUI_AMI" \
+              --query 'Images[0].[Name,Description,CreationDate]' \
+              --output table \
+              --region ${{ env.AWS_REGION }}
+            
+            echo "ami-id=$EXISTING_COMFYUI_AMI" >> $GITHUB_OUTPUT
+            echo "ami-type=existing-comfyui" >> $GITHUB_OUTPUT
+            
+            # Get creation date for logging
+            AMI_AGE=$(aws ec2 describe-images \
+              --image-ids "$EXISTING_COMFYUI_AMI" \
+              --query 'Images[0].CreationDate' \
+              --output text \
+              --region ${{ env.AWS_REGION }})
+            echo "📅 Base AMI created: $AMI_AGE"
+            echo "⚡ This will be a much faster incremental build!"
+            
+          else
+            echo "⚠️ Existing ComfyUI AMI found but not available (state: $AMI_STATE)"
+            echo "🔄 Falling back to fresh Ubuntu base"
+            EXISTING_COMFYUI_AMI=""
+          fi
+        else
+          echo "ℹ️ No existing ComfyUI AMI found in SSM Parameter Store"
+          echo "🔄 This will be a fresh installation"
+        fi
+        
+        # Fallback to Ubuntu base if no existing ComfyUI AMI
+        if [ -z "$EXISTING_COMFYUI_AMI" ]; then
+          echo "🆕 Using fresh Ubuntu base for initial AMI creation"
+          
+          # Get latest Ubuntu 22.04 LTS AMI
+          UBUNTU_AMI=$(aws ec2 describe-images \
+            --owners 099720109477 \
+            --filters "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*" \
+                "Name=state,Values=available" \
+            --query "Images | sort_by(@, &CreationDate) | [-1].ImageId" \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+          
+          echo "🖥️ Using base Ubuntu AMI: $UBUNTU_AMI"
+          echo "ami-id=$UBUNTU_AMI" >> $GITHUB_OUTPUT
+          echo "ami-type=ubuntu" >> $GITHUB_OUTPUT
+          
+          # Get Ubuntu AMI details for reference
+          aws ec2 describe-images \
+            --image-ids $UBUNTU_AMI \
+            --query 'Images[0].[Name,Description,CreationDate]' \
+            --output table \
+            --region ${{ env.AWS_REGION }}
+        fi
 
     - name: Upload scripts to S3
       run: |
@@ -88,6 +142,8 @@ jobs:
         # Create user data script
         ENVIRONMENT="${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}"
         S3_PREFIX="s3://viral-comm-api-ec2-deployments-dev/comfyui-ami/${ENVIRONMENT}"
+        BASE_AMI_TYPE="${{ steps.base-ami.outputs.ami-type }}"
+        BUILD_TYPE="${{ steps.base-ami.outputs.build-type }}"
         
         cat > user-data.sh << EOF
         #!/bin/bash
@@ -118,7 +174,7 @@ jobs:
         chmod +x *.py 2>/dev/null || true
         
         # Run prepare_ami.sh which handles everything else
-        echo "🔧 Running prepare_ami.sh..."
+        echo "� Running prepare_ami.sh..."
         echo "RUNNING_PREPARE_AMI" > /tmp/ami_progress.txt
         timeout 3600 /scripts/prepare_ami.sh || {
             echo "❌ prepare_ami.sh failed with exit code: \$?"
@@ -428,7 +484,7 @@ jobs:
         echo "💡 Using VPC: $VPC_ID, Subnet: $SUBNET_ID, IAM Role: $ROLE_NAME"
 
     - name: Wait for instance setup completion
-      timeout-minutes: 10
+      timeout-minutes: 20
       run: |
         INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
         echo "⏳ Waiting for instance setup to complete..."
@@ -454,13 +510,20 @@ jobs:
         done
 
     - name: Wait for AMI update completion
-      timeout-minutes: 10
+      timeout-minutes: 20
       run: |
         INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
+        AMI_TYPE="${{ steps.base-ami.outputs.ami-type }}"
         
-        # Always fresh setup - takes longer (15-25 minutes)
-        MAX_ATTEMPTS=20
-        echo "🔧 Monitoring AMI setup progress (fresh Ubuntu setup)..."
+        # Set timeout based on whether we're using existing ComfyUI AMI or fresh Ubuntu
+        if [ "$AMI_TYPE" = "existing-comfyui" ]; then
+          MAX_ATTEMPTS=20  # Incremental builds should be faster
+          echo "🔄 Monitoring incremental AMI update (should be faster)..."
+        else
+          MAX_ATTEMPTS=40  # Fresh builds take longer  
+          echo "🔧 Monitoring fresh AMI setup (15-25 minutes expected)..."
+        fi
+        
         echo "Max attempts: $MAX_ATTEMPTS"
         
         for i in $(seq 1 $MAX_ATTEMPTS); do
@@ -827,7 +890,7 @@ jobs:
           --name "$AMI_NAME" \
           --description "ComfyUI Multi-Tenant AMI for $ENVIRONMENT environment (Docker-Free) - updated $(date +%Y-%m-%d)" \
           --region ${{ env.AWS_REGION }} \
-          --tag-specifications 'ResourceType=image,Tags=[{Key=Name,Value='"$AMI_NAME"'},{Key=Environment,Value='"$ENVIRONMENT"'},{Key=DeploymentType,Value="Docker-Free"},{Key=Branch,Value=${{ github.ref_name }}},{Key=UpdateType,Value="fresh"},{Key=LastUpdated,Value='$(date -u +"%Y-%m-%dT%H:%M:%SZ")'}]' \
+          --tag-specifications 'ResourceType=image,Tags=[{Key=Name,Value='"$AMI_NAME"'},{Key=Environment,Value='"$ENVIRONMENT"'},{Key=DeploymentType,Value="Docker-Free"},{Key=Branch,Value=${{ github.ref_name }}},{Key=LastUpdated,Value='$(date -u +"%Y-%m-%dT%H:%M:%SZ")'}]' \
           --query 'ImageId' \
           --output text)
         
@@ -843,7 +906,7 @@ jobs:
         fi
 
     - name: Wait for AMI to be available
-      timeout-minutes: 15
+      timeout-minutes: 30
       run: |
         AMI_ID="${{ steps.create-ami.outputs.ami-id }}"
         echo "⏳ Waiting for AMI to be available..."
@@ -968,11 +1031,18 @@ jobs:
         echo "===================="
         echo "Environment: $ENVIRONMENT"
         echo "AMI ID: ${{ steps.create-ami.outputs.ami-id }}"
+        echo "Base AMI Type: $AMI_TYPE"
         echo "Instance ID: ${{ steps.launch-instance.outputs.instance-id }} (terminated)"
         echo "S3 Scripts: s3://viral-comm-api-ec2-deployments-dev/comfyui-ami/$ENVIRONMENT/"
         echo ""
         echo "📦 AMI Management:"
-        echo "  🆕 Created fresh AMI from Ubuntu base (Docker-Free)"
+        if [ "$AMI_TYPE" = "existing-comfyui" ]; then
+          echo "  🔄 Used existing ComfyUI AMI as base (faster incremental build)"
+          echo "  ⚡ Build was much faster by reusing existing installation"
+        else
+          echo "  🆕 Created fresh AMI from Ubuntu base (Docker-Free)"
+          echo "  � Next build will be faster using this as base"
+        fi
         if [ -n "$OLD_AMI" ]; then
           echo "  🗑️ Replaced old AMI: $OLD_AMI"
         fi
@@ -998,3 +1068,4 @@ jobs:
         echo "  • Direct Python execution (better performance)"
         echo "  • Automatic scaling and resource management"
         echo "  • Systemd service management"
+        echo "  • Incremental AMI builds for faster iterations"
