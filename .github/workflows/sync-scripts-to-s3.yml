@@ -30,9 +30,10 @@ env:
 jobs:
   sync-scripts:
     runs-on: ubuntu-latest
-    environment: "prod"
-    if: github.event_name != 'pull_request'
-
+    
+    # Always use prod environment for secrets/credentials
+    environment: prod
+    
     permissions:
       id-token: write
       contents: read
@@ -40,12 +41,14 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 2  # Need previous commit to detect changes
 
     - name: Configure AWS credentials via OIDC
       uses: aws-actions/configure-aws-credentials@v2
       with:
         role-to-assume: ${{ secrets.GH_ROLE_ARN }}
-        aws-region: "us-east-1"
+        aws-region: ${{ env.AWS_REGION }}
 
     - name: Determine environment and S3 paths
       id: env-config
