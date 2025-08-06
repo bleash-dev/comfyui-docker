@@ -221,7 +221,8 @@ source "$COMFYUI_VENV/bin/activate"
 cd "$NETWORK_VOLUME/ComfyUI"
 
 # Start ComfyUI with tenant-specific configuration
-exec PYTORCH_ENABLE_INDUCTOR=0 xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python main.py \\
+export PYTORCH_ENABLE_INDUCTOR=0
+exec xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python main.py \\
     --listen 0.0.0.0 \\
     --port $COMFYUI_PORT \\
     --enable-cors-header "*" \\
