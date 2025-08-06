@@ -11,33 +11,95 @@ set -ex
 # --- 1. INITIAL SETUP ---
 echo "🏗️ Preparing EC2 instance for ComfyUI AMI creation (Docker-Free)..."
 
-
-# Set up unified logging
+# Set up unified logging with CloudWatch integration
 LOG_FILE="/var/log/ami-preparation.log"
-exec &> >(tee -a "$LOG_FILE")
+CLOUDWATCH_LOG_GROUP="/comfyui/ami-preparation"
+CLOUDWATCH_LOG_STREAM="ami-build-$(date +%Y%m%d-%H%M%S)"
 
-echo "=== AMI Preparation Started (Docker-Free) - $(date) ==="
+# Ensure log directory exists
+mkdir -p /var/log
+
+# Function to setup logging with CloudWatch
+setup_logging() {
+    echo "📝 Setting up comprehensive logging with CloudWatch integration..."
+    
+    # Create log file with proper permissions
+    touch "$LOG_FILE"
+    chmod 644 "$LOG_FILE"
+    
+    # Setup logging to capture all output
+    exec 1> >(tee -a "$LOG_FILE")
+    exec 2> >(tee -a "$LOG_FILE" >&2)
+    
+    echo "=== AMI Preparation Started (Docker-Free) - $(date) ===" | tee -a "$LOG_FILE"
+    echo "📍 Log file: $LOG_FILE" | tee -a "$LOG_FILE"
+    echo "☁️ CloudWatch Log Group: $CLOUDWATCH_LOG_GROUP" | tee -a "$LOG_FILE"
+    echo "📊 CloudWatch Log Stream: $CLOUDWATCH_LOG_STREAM" | tee -a "$LOG_FILE"
+}
+
+# Initialize logging
+setup_logging
 
 # Checkpoint function for progress tracking
 checkpoint() {
-    echo "✅ CHECKPOINT: $1 completed at $(date)"
+    local checkpoint_name="$1"
+    local timestamp=$(date)
+    
+    echo "✅ CHECKPOINT: $checkpoint_name completed at $timestamp" | tee -a "$LOG_FILE"
+    
     # Append to checkpoint history instead of overwriting
-    echo "$1" >> /tmp/ami_checkpoints.txt
+    echo "$checkpoint_name" >> /tmp/ami_checkpoints.txt
+    
     # Keep the current checkpoint for compatibility
-    echo "$1" > /tmp/ami_progress.txt
+    echo "$checkpoint_name" > /tmp/ami_progress.txt
+    
+    # Sync logs to CloudWatch immediately after each checkpoint
+    sync_logs_to_cloudwatch || echo "⚠️ CloudWatch sync failed for checkpoint: $checkpoint_name" | tee -a "$LOG_FILE"
+}
+
+# Function to sync logs to CloudWatch
+sync_logs_to_cloudwatch() {
+    if command -v aws >/dev/null 2>&1; then
+        echo "☁️ Syncing logs to CloudWatch..." | tee -a "$LOG_FILE"
+        
+        # Create log group if it doesn't exist
+        aws logs create-log-group --log-group-name "$CLOUDWATCH_LOG_GROUP" 2>/dev/null || true
+        
+        # Create log stream if it doesn't exist
+        aws logs create-log-stream --log-group-name "$CLOUDWATCH_LOG_GROUP" --log-stream-name "$CLOUDWATCH_LOG_STREAM" 2>/dev/null || true
+        
+        # Send recent log entries to CloudWatch
+        if [ -f "$LOG_FILE" ]; then
+            # Get the last 100 lines and send to CloudWatch
+            tail -100 "$LOG_FILE" | while IFS= read -r line; do
+                local timestamp=$(date +%s%3N)
+                aws logs put-log-events \
+                    --log-group-name "$CLOUDWATCH_LOG_GROUP" \
+                    --log-stream-name "$CLOUDWATCH_LOG_STREAM" \
+                    --log-events timestamp="$timestamp",message="$line" \
+                    >/dev/null 2>&1 || true
+            done
+        fi
+        
+        echo "✅ Logs synced to CloudWatch" | tee -a "$LOG_FILE"
+        return 0
+    else
+        echo "⚠️ AWS CLI not available for CloudWatch sync" | tee -a "$LOG_FILE"
+        return 1
+    fi
 }
 checkpoint "AMI_PREP_STARTED"
 
 # --- 2. PACKAGE MANAGEMENT SETUP ---
-echo "📦 Preparing package manager (apt)..."
+echo "📦 Preparing package manager (apt)..." | tee -a "$LOG_FILE"
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
 # Aggressive APT lock handling - use timeout and force clear
-echo "🔧 Clearing APT locks aggressively..."
+echo "🔧 Clearing APT locks aggressively..." | tee -a "$LOG_FILE"
 
 # Force kill any apt/dpkg processes
-echo "🔪 Force killing any existing apt/dpkg processes..."
+echo "🔪 Force killing any existing apt/dpkg processes..." | tee -a "$LOG_FILE"
 timeout 10 pkill -9 -f apt-get || true
 timeout 10 pkill -9 -f dpkg || true
 timeout 10 pkill -9 -f unattended-upgrade || true
@@ -45,7 +107,7 @@ timeout 10 pkill -9 -f packagekit || true
 sleep 3
 
 # Remove lock files directly (will be recreated)
-echo "🗑️ Removing lock files..."
+echo "🗑️ Removing lock files..." | tee -a "$LOG_FILE"
 rm -f /var/lib/dpkg/lock-frontend
 rm -f /var/lib/apt/lists/lock 
 rm -f /var/cache/apt/archives/lock
@@ -308,26 +370,61 @@ mkdir -p /base
 chmod 755 /base /base/venv
 
 # Run the setup_components script to install ComfyUI and dependencies
-echo "� Running setup_components.sh to install ComfyUI base environment..."
+echo "🔧 Running setup_components.sh to install ComfyUI base environment..." | tee -a "$LOG_FILE"
 if [ -f "/scripts/setup_components.sh" ]; then
     # Make sure the script is executable
     chmod +x /scripts/setup_components.sh
     
-    # Run the setup script
-    bash /scripts/setup_components.sh || {
-        echo "❌ setup_components.sh failed during AMI creation"
-        exit 1
-    }
+    echo "📋 Starting setup_components.sh execution with full logging..." | tee -a "$LOG_FILE"
+    echo "=== SETUP_COMPONENTS.SH OUTPUT START ===" | tee -a "$LOG_FILE"
     
-    echo "✅ Base ComfyUI environment installed successfully"
-    echo "   📍 Virtual environment: /base/venv/comfyui"
-    echo "   📍 ComfyUI installation: /base/ComfyUI"
-    echo "   🎯 Ready for tenant copying at runtime"
+    # Run the setup script with all output captured to our log file
+    if bash /scripts/setup_components.sh 2>&1 | tee -a "$LOG_FILE"; then
+        echo "=== SETUP_COMPONENTS.SH OUTPUT END ===" | tee -a "$LOG_FILE"
+        echo "✅ Base ComfyUI environment installed successfully" | tee -a "$LOG_FILE"
+        echo "   📍 Virtual environment: /base/venv/comfyui" | tee -a "$LOG_FILE"
+        echo "   📍 ComfyUI installation: /base/ComfyUI" | tee -a "$LOG_FILE"
+        echo "   🎯 Ready for tenant copying at runtime" | tee -a "$LOG_FILE"
+        
+        # Verify installation was successful
+        echo "🔍 Verifying ComfyUI base installation..." | tee -a "$LOG_FILE"
+        if [ -d "/base/venv/comfyui" ] && [ -f "/base/venv/comfyui/bin/python" ]; then
+            echo "✅ Base virtual environment created successfully" | tee -a "$LOG_FILE"
+            echo "   📦 Python executable: /base/venv/comfyui/bin/python" | tee -a "$LOG_FILE"
+        else
+            echo "❌ Base virtual environment validation failed" | tee -a "$LOG_FILE"
+            echo "   🔍 Checking /base directory contents:" | tee -a "$LOG_FILE"
+            ls -la /base/ 2>&1 | tee -a "$LOG_FILE" || echo "Cannot list /base directory" | tee -a "$LOG_FILE"
+            exit 1
+        fi
+        
+        if [ -d "/base/ComfyUI" ] && [ -f "/base/ComfyUI/main.py" ]; then
+            echo "✅ Base ComfyUI installation validated successfully" | tee -a "$LOG_FILE"
+            echo "   🎨 ComfyUI main.py: /base/ComfyUI/main.py" | tee -a "$LOG_FILE"
+            
+            # Show installation size
+            COMFYUI_SIZE=$(du -sh /base/ComfyUI 2>/dev/null | cut -f1 || echo "unknown")
+            VENV_SIZE=$(du -sh /base/venv/comfyui 2>/dev/null | cut -f1 || echo "unknown")
+            echo "   � ComfyUI installation size: $COMFYUI_SIZE" | tee -a "$LOG_FILE"
+            echo "   📊 Virtual environment size: $VENV_SIZE" | tee -a "$LOG_FILE"
+        else
+            echo "❌ Base ComfyUI installation validation failed" | tee -a "$LOG_FILE"
+            echo "   🔍 Checking /base/ComfyUI directory:" | tee -a "$LOG_FILE"
+            ls -la /base/ComfyUI/ 2>&1 | tee -a "$LOG_FILE" || echo "Cannot list /base/ComfyUI directory" | tee -a "$LOG_FILE"
+            exit 1
+        fi
+        
+    else
+        echo "=== SETUP_COMPONENTS.SH OUTPUT END (FAILED) ===" | tee -a "$LOG_FILE"
+        echo "❌ setup_components.sh failed during AMI creation" | tee -a "$LOG_FILE"
+        echo "🔍 Exit code: $?" | tee -a "$LOG_FILE"
+        exit 1
+    fi
     
 else
-    echo "❌ setup_components.sh not found in /scripts/"
-    echo "Available scripts:"
-    ls -la /scripts/ || echo "Scripts directory not accessible"
+    echo "❌ setup_components.sh not found in /scripts/" | tee -a "$LOG_FILE"
+    echo "Available scripts:" | tee -a "$LOG_FILE"
+    ls -la /scripts/ 2>&1 | tee -a "$LOG_FILE" || echo "Scripts directory not accessible" | tee -a "$LOG_FILE"
     exit 1
 fi
 
@@ -601,18 +698,22 @@ echo "✅ Scripts setup completed"
 checkpoint "SCRIPTS_SETUP"
 
 # --- 10. CONFIGURE CLOUDWATCH ---
-echo "📡 Configuring CloudWatch..."
+echo "📡 Configuring CloudWatch..." | tee -a "$LOG_FILE"
 if [ -f "/scripts/setup_cloudwatch.sh" ]; then
-    echo "🔧 Running CloudWatch setup script..."
-    if bash /scripts/setup_cloudwatch.sh; then
-        echo "✅ CloudWatch setup completed successfully"
+    echo "🔧 Running CloudWatch setup script..." | tee -a "$LOG_FILE"
+    echo "=== SETUP_CLOUDWATCH.SH OUTPUT START ===" | tee -a "$LOG_FILE"
+    
+    if bash /scripts/setup_cloudwatch.sh 2>&1 | tee -a "$LOG_FILE"; then
+        echo "=== SETUP_CLOUDWATCH.SH OUTPUT END ===" | tee -a "$LOG_FILE"
+        echo "✅ CloudWatch setup completed successfully" | tee -a "$LOG_FILE"
         checkpoint "CLOUDWATCH_CONFIGURED"
     else
-        echo "⚠️ CloudWatch setup encountered issues but continuing (non-fatal)"
+        echo "=== SETUP_CLOUDWATCH.SH OUTPUT END (WITH WARNINGS) ===" | tee -a "$LOG_FILE"
+        echo "⚠️ CloudWatch setup encountered issues but continuing (non-fatal)" | tee -a "$LOG_FILE"
         checkpoint "CLOUDWATCH_CONFIGURED_WITH_WARNINGS"
     fi
 else
-    echo "⚠️ CloudWatch setup script not found, skipping..."
+    echo "⚠️ CloudWatch setup script not found, skipping..." | tee -a "$LOG_FILE"
     checkpoint "CLOUDWATCH_SKIPPED"
 fi
 
@@ -848,17 +949,66 @@ fi
 checkpoint "VALIDATION_COMPLETE"
 
 # --- 13. FINAL AMI CLEANUP ---
-echo "🧹 Finalizing and cleaning up for AMI creation..."
+echo "🧹 Finalizing and cleaning up for AMI creation..." | tee -a "$LOG_FILE"
 
 # NOTE: We do NOT stop the service here because the GitHub Actions workflow
 
 # Clean apt cache
-apt-get autoremove -y
-apt-get clean
-rm -rf /var/lib/apt/lists/*
+echo "🧹 Cleaning apt cache..." | tee -a "$LOG_FILE"
+apt-get autoremove -y 2>&1 | tee -a "$LOG_FILE"
+apt-get clean 2>&1 | tee -a "$LOG_FILE"
+rm -rf /var/lib/apt/lists/* 2>&1 | tee -a "$LOG_FILE"
 
-# Clear logs and shell history
-find /var/log -type f -name "*.log" -exec truncate -s 0 {} \;
+# Final log sync before cleanup
+echo "☁️ Performing final log sync to CloudWatch before cleanup..." | tee -a "$LOG_FILE"
+sync_logs_to_cloudwatch || echo "⚠️ Final CloudWatch sync failed" | tee -a "$LOG_FILE"
+
+# Create a comprehensive AMI preparation summary
+echo "📋 Creating AMI preparation summary..." | tee -a "$LOG_FILE"
+cat > /var/log/ami-summary.log << EOF
+=== ComfyUI AMI Preparation Summary ===
+Completion Time: $(date)
+AMI Build Type: Docker-Free Multi-Tenant
+Architecture: Shared Base Environment
+
+Installed Components:
+- Base ComfyUI: /base/ComfyUI
+- Shared Virtual Environment: /base/venv/comfyui
+- Tenant Manager: /usr/local/bin/tenant_manager.py
+- Ephemeral Storage Service: mount-ephemeral-storage.service
+- Multi-Tenant Service: comfyui-multitenant.service
+
+System Configuration:
+- Python Version: $(python3 --version 2>/dev/null || echo 'Not available')
+- AWS CLI Version: $(aws --version 2>/dev/null || echo 'Not available')
+- CloudWatch Agent: $(systemctl is-active amazon-cloudwatch-agent 2>/dev/null || echo 'Not configured')
+
+Services Status:
+- ComfyUI Multi-Tenant: $(systemctl is-enabled comfyui-multitenant.service 2>/dev/null || echo 'Not enabled')
+- Ephemeral Storage: $(systemctl is-enabled mount-ephemeral-storage.service 2>/dev/null || echo 'Not enabled')
+
+Checkpoints Completed:
+$(cat /tmp/ami_checkpoints.txt 2>/dev/null || echo 'No checkpoints recorded')
+
+Log Files:
+- Main Log: $LOG_FILE
+- Summary Log: /var/log/ami-summary.log
+- CloudWatch Group: $CLOUDWATCH_LOG_GROUP
+- CloudWatch Stream: $CLOUDWATCH_LOG_STREAM
+
+=== End Summary ===
+EOF
+
+# Copy the summary to our main log as well
+echo "📋 AMI Preparation Summary:" | tee -a "$LOG_FILE"
+cat /var/log/ami-summary.log | tee -a "$LOG_FILE"
+
+# Sync the final summary to CloudWatch
+sync_logs_to_cloudwatch || echo "⚠️ Failed to sync final summary to CloudWatch" | tee -a "$LOG_FILE"
+
+# Clear logs and shell history (but preserve our AMI logs)
+echo "🧹 Cleaning up temporary logs..." | tee -a "$LOG_FILE"
+find /var/log -type f -name "*.log" ! -name "ami-*.log" -exec truncate -s 0 {} \; 2>&1 | tee -a "$LOG_FILE"
 history -c
 > ~/.bash_history
 
@@ -866,9 +1016,16 @@ history -c
 echo "AMI_SETUP_COMPLETE" > /tmp/ami_ready.txt
 checkpoint "AMI_SETUP_COMPLETE"
 
-echo ""
-echo "🚀🚀🚀 AMI preparation completed successfully! 🚀🚀🚀"
-echo ""
-echo "Ready to create AMI."
-echo "🎯 Service is still running for verification by the deployment workflow."
-echo "Use 'comfyui-monitor' command on new instances to check status."
+echo "" | tee -a "$LOG_FILE"
+echo "🚀🚀🚀 AMI preparation completed successfully! 🚀🚀🚀" | tee -a "$LOG_FILE"
+echo "" | tee -a "$LOG_FILE"
+echo "Ready to create AMI." | tee -a "$LOG_FILE"
+echo "🎯 Service is still running for verification by the deployment workflow." | tee -a "$LOG_FILE"
+echo "Use 'comfyui-monitor' command on new instances to check status." | tee -a "$LOG_FILE"
+echo "📋 Complete logs available in CloudWatch: $CLOUDWATCH_LOG_GROUP/$CLOUDWATCH_LOG_STREAM" | tee -a "$LOG_FILE"
+
+# Final log sync
+echo "☁️ Performing final log synchronization..." | tee -a "$LOG_FILE"
+sync_logs_to_cloudwatch || echo "⚠️ Final sync failed - logs available locally at $LOG_FILE" | tee -a "$LOG_FILE"
+
+echo "✅ AMI preparation script completed." | tee -a "$LOG_FILE"
