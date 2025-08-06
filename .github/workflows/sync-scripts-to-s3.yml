@@ -33,7 +33,7 @@ jobs:
     strategy:
       matrix:
         environment: 
-          - ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+          - prod
     
     # Override matrix if manually triggered
     environment: "prod"
