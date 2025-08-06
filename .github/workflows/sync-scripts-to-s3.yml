@@ -30,9 +30,9 @@ env:
 jobs:
   sync-scripts:
     runs-on: ubuntu-latest
-    
     environment: "prod"
-    
+    if: github.event_name != 'pull_request'
+
     permissions:
       id-token: write
       contents: read
@@ -40,8 +40,6 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 2  # Need previous commit to detect changes
 
     - name: Configure AWS credentials via OIDC
       uses: aws-actions/configure-aws-credentials@v2
