@@ -145,11 +145,6 @@ download_and_extract \
     "$TENANT_COMFYUI_PATH" \
     "Custom nodes"
 
-# Install dependencies for synced custom nodes
-if [ -d "$TENANT_COMFYUI_PATH/custom_nodes" ]; then
-    install_custom_node_deps "$TENANT_COMFYUI_PATH/custom_nodes"
-fi
-
 # --- Step 6: Sync Pod-Specific Data ---
 echo "📂 Syncing pod-specific data..."
 download_and_extract \
