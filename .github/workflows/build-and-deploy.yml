@@ -311,66 +311,8 @@ jobs:
         else
           echo "⚠️ Using fallback subnet - preferred subnet not found"
         fi
+
         
-        # Create IAM role for EC2 instance to access S3
-        echo "🔐 Creating IAM role for EC2 instance..."
-        ROLE_NAME="comfyui-ami-builder-role-$(date +%s)"
-        
-        # Create trust policy
-        cat > trust-policy.json << 'TRUST_EOF'
-        {
-          "Version": "2012-10-17",
-          "Statement": [
-            {
-              "Effect": "Allow",
-              "Principal": {
-                "Service": "ec2.amazonaws.com"
-              },
-              "Action": "sts:AssumeRole"
-            }
-          ]
-        }
-        TRUST_EOF
-        
-        # Create IAM role
-        aws iam create-role \
-          --role-name "$ROLE_NAME" \
-          --assume-role-policy-document file://trust-policy.json \
-          --region ${{ env.AWS_REGION }}
-        
-        # Attach S3 read-only policy
-        aws iam attach-role-policy \
-          --role-name "$ROLE_NAME" \
-          --policy-arn "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess" \
-          --region ${{ env.AWS_REGION }}
-        
-        # Attach SSM policy for status checking
-        aws iam attach-role-policy \
-          --role-name "$ROLE_NAME" \
-          --policy-arn "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore" \
-          --region ${{ env.AWS_REGION }}
-        
-        # Attach CloudWatch logs policy for debugging
-        aws iam attach-role-policy \
-          --role-name "$ROLE_NAME" \
-          --policy-arn "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess" \
-          --region ${{ env.AWS_REGION }}
-        
-        # Create instance profile
-        aws iam create-instance-profile \
-          --instance-profile-name "$ROLE_NAME" \
-          --region ${{ env.AWS_REGION }}
-        
-        # Add role to instance profile
-        aws iam add-role-to-instance-profile \
-          --instance-profile-name "$ROLE_NAME" \
-          --role-name "$ROLE_NAME" \
-          --region ${{ env.AWS_REGION }}
-        
-        # Wait a moment for IAM to propagate
-        sleep 15
-        
-        echo "✅ IAM role created: $ROLE_NAME"
         
         # Find security group - prefer CDK-managed security group from viral-comm-api stack
         echo "🔒 Finding security group (preferred: viral-comm-api proxy security group)..."
@@ -444,7 +386,7 @@ jobs:
           --instance-type c5d.large \
           --subnet-id $SUBNET_ID \
           --associate-public-ip-address \
-          --iam-instance-profile Name="$ROLE_NAME" \
+          --iam-instance-profile Name=viral-comm-api-shared-instance-profile-dev \
           --user-data file://user-data.sh \
           --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":20,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
           --region ${{ env.AWS_REGION }} \
