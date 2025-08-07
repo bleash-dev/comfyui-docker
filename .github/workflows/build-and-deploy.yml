@@ -146,8 +146,7 @@ jobs:
         dnf install -y jq unzip
         # Set environment variables (safe fallback)
         export ENVIRONMENT="${ENVIRONMENT:-dev}"
-        export S3_PREFIX="${S3_PREFIX:-s3://my-default-bucket/scripts}"
-        REGION=us-east-1
+        export REGION=us-east-1
 
         echo "🚀 Starting ComfyUI AMI setup at $(date)"
         echo "Environment: $ENVIRONMENT"
@@ -158,7 +157,7 @@ jobs:
         echo "📥 Downloading scripts from S3..."
         mkdir -p /scripts
         cd /scripts
-        aws s3 sync "$S3_PREFIX/" . --region "$REGION"
+        aws s3 sync "$S3_PREFIX/" .
         chmod +x *.sh 2>/dev/null || true
         chmod +x *.py 2>/dev/null || true
 
