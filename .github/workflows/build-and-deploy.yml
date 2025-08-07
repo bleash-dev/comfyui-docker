@@ -86,13 +86,7 @@ jobs:
           echo "🆕 Using fresh Ubuntu base for initial AMI creation"
           
           # Get latest Ubuntu 22.04 LTS AMI
-          UBUNTU_AMI=$(aws ec2 describe-images \
-              --owners 898082745236 \
-              --filters "Name=name,Values=Deep Learning OSS Nvidia Driver AMI GPU PyTorch 2.7 (Amazon Linux 2023)*" \
-                        "Name=state,Values=available" \
-              --query "Images | sort_by(@, &CreationDate) | [-1].ImageId" \
-              --output text \
-              --region ${{ env.AWS_REGION }})
+          UBUNTU_AMI=ami-09ddf6b7d718bc247
           
           echo "🖥️ Using base Ubuntu AMI: $UBUNTU_AMI"
           echo "ami-id=$UBUNTU_AMI" >> $GITHUB_OUTPUT
