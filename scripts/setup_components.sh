@@ -3,6 +3,8 @@ set -eo pipefail
 
 echo "🔧 Setting up ComfyUI base components for AMI..."
 
+export TMPDIR=/workspace/tmp
+mkdir -p "$TMPDIR"
 # Set default script directory, Python version, and config root
 export SCRIPT_DIR="${SCRIPT_DIR:-/scripts}"
 export PYTHON_VERSION="${PYTHON_VERSION:-3.11}"

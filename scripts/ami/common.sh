@@ -13,7 +13,7 @@ PREFERRED_SUBNET_ID="subnet-028352ae3329680c0"  # Specific subnet for operations
 PREFERRED_SG_ID="sg-04fc7bbc5e0bb8362"          # Specific security group for operations
 
 # Default settings
-DEFAULT_VOLUME_SIZE=50  # GB
+DEFAULT_VOLUME_SIZE=20  # GB
 DEFAULT_KEY_PAIR_NAME=""  # Optional: Add your key pair name here for SSH access
 
 # AMI Configuration

@@ -174,7 +174,6 @@ LAUNCH_PARAMS=(
     --subnet-id "$PREFERRED_SUBNET_ID"
     --security-group-ids "$PREFERRED_SG_ID"
     --associate-public-ip-address
-    --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=${VOLUME_SIZE},VolumeType=gp3,DeleteOnTermination=true}"
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${INSTANCE_NAME}},{Key=Purpose,Value=AMI-Building},{Key=Environment,Value=${ENVIRONMENT}},{Key=BuildType,Value=manual},{Key=CreatedBy,Value=$(whoami)},{Key=CreatedAt,Value=$(date -u +%Y-%m-%dT%H:%M:%SZ)}]"
     --region "$AWS_REGION"
 )
