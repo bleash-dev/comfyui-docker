@@ -43,7 +43,7 @@ PYTORCH_VERSION="2.4.0"
 GIT_BRANCH="${GIT_BRANCH:-main}"
 
 # -- System --
-PYTHON_VERSION="3"
+PYTHON_VERSION="3.11"
 WORKSPACE_DIR="/workspace"
 
 # --- 2. HELPER FUNCTIONS ---
@@ -117,6 +117,8 @@ setup_system_deps() {
         net-tools \
         nss \
         openssh-server \
+        python${PYTHON_VERSION} \
+        python${PYTHON_VERSION}-pip \
         tree \
         unzip \
         vim-enhanced \

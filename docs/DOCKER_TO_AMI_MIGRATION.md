@@ -169,7 +169,7 @@ docker inspect container | jq '.[0].Config.Env'
 
 # Convert to AMI environment file
 echo 'export COMFYUI_VENV=/opt/venv/comfyui' >> /etc/environment
-echo 'export PYTHON_VERSION=3' >> /etc/environment
+echo 'export PYTHON_VERSION=3.11' >> /etc/environment
 ```
 
 ### Port Mapping Migration

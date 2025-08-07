@@ -60,7 +60,7 @@ The `prepare_ami.sh` script performs these actions:
 #### System Setup
 - Updates package manager and installs system dependencies
 - **Installs NVIDIA GPU drivers (535) and CUDA 11.8 runtime for optimal GPU utilization**
-- Installs Python 3 and required packages (psutil, boto3, requests)
+- Installs Python 3.11 and required packages (psutil, boto3, requests)
 - Installs AWS CLI v2 and CloudWatch agent
 - Configures non-interactive package management
 - Sets up CUDA environment variables and symbolic links
