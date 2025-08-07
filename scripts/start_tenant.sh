@@ -4,6 +4,12 @@ set -eo pipefail
 echo "=== ComfyUI Tenant Startup - $(date) ==="
 echo "🔍 Starting ComfyUI Setup for Tenant..."
 
+mkdir -p "$NETWORK_VOLUME/tmp"
+
+export TMPDIR=$NETWORK_VOLUME/tmp
+# or on macOS:
+export TMP=$NETWORK_VOLUME/tmp
+export TEMP=$NETWORK_VOLUME/tmp
 # Sync scripts from S3 to ensure we have the latest versions
 echo "📥 Syncing latest scripts from S3..."
 S3_ENVIRONMENT="${DEPLOYMENT_TARGET:-dev}"
@@ -167,7 +173,7 @@ echo "🕐 Starting pod execution tracking for tenant..."
 mkdir -p "$(dirname "$TENANT_LOG_DIR/pod_tracker-${POD_ID}.log")"
 nohup bash "$SCRIPT_DIR/pod_execution_tracker.sh" > "$TENANT_LOG_DIR/pod_tracker-${POD_ID}.log" 2>&1 &
 POD_TRACKER_PID=$!
-echo "$POD_TRACKER_PID" > "/tmp/pod_tracker_${POD_ID}.pid"
+echo "$POD_TRACKER_PID" > "$NETWORK_VOLUME/tmp/pod_tracker_${POD_ID}.pid"
 echo "Pod tracker started with PID $POD_TRACKER_PID. Log: $TENANT_LOG_DIR/pod_tracker-${POD_ID}.log"
 
 # Check GPU availability
@@ -245,27 +251,82 @@ fi
 
 # Create tenant-specific ComfyUI startup script
 echo "🔧 Creating tenant-specific ComfyUI startup script..."
-cat > "$NETWORK_VOLUME/start_comfyui_tenant.sh" << EOF
+cat > "$NETWORK_VOLUME/start_comfyui_tenant.sh" << 'EOF'
 #!/bin/bash
 # Tenant-specific ComfyUI startup script
 
 set -eo pipefail
 
-echo "🚀 Starting ComfyUI for tenant $POD_ID on port $COMFYUI_PORT..."
+echo "🚀 Starting ComfyUI for tenant \$POD_ID on port \$COMFYUI_PORT..."
 
-# Activate virtual environment
-source "$COMFYUI_VENV/bin/activate"
+# Detect GPU availability and configure accordingly
+echo "🔍 Detecting GPU availability..."
+HAS_GPU=false
+GPU_VENDOR="none"
+
+# Check for NVIDIA GPU
+if command -v nvidia-smi >/dev/null 2>&1; then
+    if nvidia-smi >/dev/null 2>&1; then
+        echo "✅ NVIDIA GPU detected"
+        HAS_GPU=true
+        GPU_VENDOR="nvidia"
+    else
+        echo "⚠️ nvidia-smi found but not working properly"
+    fi
+else
+    echo "ℹ️ nvidia-smi not found"
+fi
+
+# Check with PyTorch (works for NVIDIA and AMD/ROCm)
+source "\$COMFYUI_VENV/bin/activate"
+if python -c "import torch; print(torch.cuda.is_available())" 2>/dev/null | grep -q "True"; then
+    echo "✅ PyTorch GPU support detected"
+    HAS_GPU=true
+
+    BACKEND=\$(python -c "import torch; print('hip' if torch.version.hip else 'cuda')" 2>/dev/null)
+    if [ "\$BACKEND" = "hip" ]; then
+        GPU_VENDOR="amd"
+        echo "🟥 ROCm (AMD GPU) detected"
+    else
+        GPU_VENDOR="nvidia"
+        echo "🟦 CUDA (NVIDIA GPU) detected"
+    fi
+else
+    echo "⚠️ PyTorch reports no GPU support"
+    HAS_GPU=false
+    GPU_VENDOR="none"
+fi
+deactivate
+
+# Configure environment based on GPU availability
+if [ "\$HAS_GPU" = false ]; then
+    echo "🖥️ Configuring for CPU-only mode..."
+    export CUDA_VISIBLE_DEVICES=""
+    export FORCE_CUDA="0"
+    export PYTORCH_CUDA_ALLOC_CONF=""
+    export COMFYUI_CPU_ONLY="1"
+    DEVICE_ARGS="--cpu --force-fp16"
+else
+    echo "🚀 Configuring for GPU mode (\$GPU_VENDOR)..."
+    export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+    DEVICE_ARGS=""
+fi
+
+# Activate virtual environment again
+source "\$COMFYUI_VENV/bin/activate"
 
 # Change to ComfyUI directory
-cd "$NETWORK_VOLUME/ComfyUI"
+cd "\$NETWORK_VOLUME/ComfyUI"
 
 # Start ComfyUI with tenant-specific configuration
 export PYTORCH_ENABLE_INDUCTOR=0
-exec xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python main.py \\
-    --listen 0.0.0.0 \\
-    --port $COMFYUI_PORT \\
-    --enable-cors-header "*" \\
-    2>&1 | tee -a "$COMFYUI_LOG"
+echo "🎯 Starting ComfyUI with device args: \$DEVICE_ARGS"
+exec xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python main.py \
+    --listen 0.0.0.0 \
+    --port "\$COMFYUI_PORT" \
+    --enable-cors-header "*" \
+    \$DEVICE_ARGS \
+    2>&1 | tee -a "\$COMFYUI_LOG"
 EOF
 
 chmod +x "$NETWORK_VOLUME/start_comfyui_tenant.sh"

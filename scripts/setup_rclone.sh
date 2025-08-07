@@ -143,7 +143,7 @@ fi
 echo "🔍 Testing S3 write permissions..."
 test_file_content="aws_test_$(date +%s)"
 test_s3_path="s3://$AWS_BUCKET_NAME/.aws_test"
-test_local_file="/tmp/.aws_test"
+test_local_file="$NETWORK_VOLUME/tmp/.aws_test"
 
 echo "$test_file_content" > "$test_local_file"
 

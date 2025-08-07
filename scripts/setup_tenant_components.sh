@@ -66,7 +66,7 @@ if [ -d "$custom_nodes_dir" ]; then
     echo "🔧 Processing tenant custom nodes dependencies..."
     
     # Create consolidated requirements file for tenant-specific packages
-    TENANT_REQUIREMENTS="/tmp/tenant_requirements_${POD_ID}.txt"
+    TENANT_REQUIREMENTS="$NETWORK_VOLUME/tmp/tenant_requirements_${POD_ID}.txt"
     > "$TENANT_REQUIREMENTS"  # Clear file
     
     # Scan custom node directories for requirements files
@@ -111,26 +111,6 @@ if [ -d "$custom_nodes_dir" ]; then
         else
             echo "ℹ️ No valid requirements found after cleaning"
         fi
-        
-        # Run custom installation scripts for tenant custom nodes
-        echo "🔧 Running custom installation scripts..."
-        
-        for dir in "$custom_nodes_dir"/*; do
-            if [ -d "$dir" ]; then
-                dir_name=$(basename "$dir")
-                install_script="$dir/install.py"
-                
-                if [ -f "$install_script" ]; then
-                    echo "🔧 Running install.py for $dir_name..."
-                    cd "$dir"
-                    if python install.py; then
-                        echo "✅ Install script completed for $dir_name"
-                    else
-                        echo "⚠️ Install script failed for $dir_name, but continuing..."
-                    fi
-                fi
-            fi
-        done
         
         deactivate
         
@@ -204,19 +184,75 @@ if [ -n "${PIP_PACKAGES:-}" ]; then
 else
     echo "ℹ️ No user-specified PIP packages to install (PIP_PACKAGES not set)"
 fi
+echo "🔍 Detecting GPU availability..."
+HAS_GPU=false
+GPU_VENDOR="none"
+
+# Check for nvidia-smi (NVIDIA GPUs)
+if command -v nvidia-smi >/dev/null 2>&1; then
+    if nvidia-smi >/dev/null 2>&1; then
+        echo "✅ NVIDIA GPU detected"
+        HAS_GPU=true
+        GPU_VENDOR="nvidia"
+    else
+        echo "⚠️ nvidia-smi found but not working properly"
+    fi
+else
+    echo "ℹ️ nvidia-smi not found"
+fi
+
+# Check PyTorch GPU support — works for both NVIDIA and AMD ROCm
+source "$BASE_VENV_PATH/bin/activate"
+if python -c "import torch; print(torch.cuda.is_available())" 2>/dev/null | grep -q "True"; then
+    echo "✅ PyTorch GPU support detected"
+    HAS_GPU=true
+
+    # Detect backend (NVIDIA or ROCm)
+    BACKEND=$(python -c "import torch; print('hip' if torch.version.hip else 'cuda')" 2>/dev/null)
+    if [ "$BACKEND" = "hip" ]; then
+        GPU_VENDOR="amd"
+        echo "🟥 ROCm (AMD GPU) detected"
+    else
+        GPU_VENDOR="nvidia"
+        echo "🟦 CUDA (NVIDIA GPU) detected"
+    fi
+else
+    echo "⚠️ PyTorch does not detect GPU support"
+    HAS_GPU=false
+    GPU_VENDOR="none"
+fi
+deactivate 2>/dev/null || true
+
+# Configure ComfyUI accordingly
+if [ "$HAS_GPU" = false ]; then
+    echo "🖥️ Configuring ComfyUI for CPU-only mode..."
+    GPU_CONFIG="
+# Force CPU-only mode
+export CUDA_VISIBLE_DEVICES=\"\"
+export FORCE_CUDA=\"0\"
+export PYTORCH_CUDA_ALLOC_CONF=\"\"
+export COMFYUI_CPU_ONLY=\"1\""
+else
+    echo "🚀 Configuring ComfyUI for GPU ($GPU_VENDOR) mode..."
+    GPU_CONFIG="
+# GPU mode configuration
+export PYTORCH_CUDA_ALLOC_CONF=\"expandable_segments:True\""
+fi
 
 # Create tenant-specific activation helper
-echo "🔧 Creating tenant activation helper..."
+echo "�🔧 Creating tenant activation helper..."
 cat > "$NETWORK_VOLUME/activate-comfyui" << EOF
 #!/bin/bash
 # ComfyUI Environment Activation for Tenant $POD_ID
 export COMFYUI_VENV="$BASE_VENV_PATH"
 export PYTHONPATH="$TENANT_COMFYUI_PATH:\$PYTHONPATH"
+$GPU_CONFIG
 source "\$COMFYUI_VENV/bin/activate"
 echo "✅ ComfyUI environment activated for tenant $POD_ID"
 echo "   🐍 Python: \$(which python)"
 echo "   🎨 ComfyUI: $TENANT_COMFYUI_PATH"
 echo "   📦 Virtual env: $BASE_VENV_PATH"
+echo "   🖥️ GPU Mode: $HAS_GPU"
 EOF
 chmod +x "$NETWORK_VOLUME/activate-comfyui"
 
@@ -225,5 +261,6 @@ echo "📊 Summary:"
 echo "  🎯 Tenant: $POD_USER_NAME/$POD_ID"
 echo "  🎨 ComfyUI: $TENANT_COMFYUI_PATH"
 echo "  🐍 Shared venv: $BASE_VENV_PATH"
+echo "  🖥️ GPU Available: $HAS_GPU"
 echo "  ⚙️ Config: $tenant_config_dir"
 echo "  🔧 Activation: $NETWORK_VOLUME/activate-comfyui"

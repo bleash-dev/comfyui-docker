@@ -94,7 +94,7 @@ download_and_extract() {
 
     # Check if the archive exists on S3
     if command -v s3_object_exists >/dev/null 2>&1 && s3_object_exists "$archive_s3_uri"; then
-        tmp_archive_file=$(mktemp "/tmp/s3_archive_dl_$(basename "$key" .tar.gz)_XXXXXX.tar.gz")
+        tmp_archive_file=$(mktemp "$NETWORK_VOLUME/tmp/s3_archive_dl_$(basename "$key" .tar.gz)_XXXXXX.tar.gz")
 
         echo "  📥 Downloading $archive_description..."
         if s3_copy_from "$archive_s3_uri" "$tmp_archive_file" "--only-show-errors"; then

@@ -29,7 +29,7 @@ sync_user_data_internal() {
 
     COMFYUI_POD_SPECIFIC_ARCHIVE_NAME="comfyui_pod_specific_data.tar.gz"
     S3_COMFYUI_POD_SPECIFIC_PATH="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/$COMFYUI_POD_SPECIFIC_ARCHIVE_NAME"
-    TEMP_COMFYUI_STAGING_DIR=$(mktemp -d /tmp/comfyui_pod_staging.XXXXXX)
+    TEMP_COMFYUI_STAGING_DIR=$(mktemp -d --tmpdir="$NETWORK_VOLUME/tmp" comfyui_pod_staging.XXXXXX)
     COMFYUI_HAS_DATA_TO_SYNC=false
 
     if [[ -d "$NETWORK_VOLUME/ComfyUI" ]]; then
@@ -71,7 +71,7 @@ sync_user_data_internal() {
         
         if [[ "$COMFYUI_HAS_DATA_TO_SYNC" == "true" ]]; then
             echo "  🗜️ Compressing ComfyUI pod-specific data..."
-            TEMP_ARCHIVE_PATH="/tmp/$COMFYUI_POD_SPECIFIC_ARCHIVE_NAME"
+            TEMP_ARCHIVE_PATH="$NETWORK_VOLUME/tmp/$COMFYUI_POD_SPECIFIC_ARCHIVE_NAME"
             (cd "$TEMP_COMFYUI_STAGING_DIR" && tar -czf "$TEMP_ARCHIVE_PATH" .)
             
             notify_sync_progress "user_data" "PROGRESS" 40
@@ -96,7 +96,7 @@ sync_user_data_internal() {
 
     OTHER_POD_SPECIFIC_ARCHIVE_NAME="other_pod_specific_data.tar.gz"
     S3_OTHER_POD_SPECIFIC_PATH="s3://$AWS_BUCKET_NAME/pod_sessions/$POD_USER_NAME/$POD_ID/$OTHER_POD_SPECIFIC_ARCHIVE_NAME"
-    TEMP_OTHER_STAGING_DIR=$(mktemp -d /tmp/other_pod_staging.XXXXXX)
+    TEMP_OTHER_STAGING_DIR=$(mktemp -d --tmpdir="$NETWORK_VOLUME/tmp" other_pod_staging.XXXXXX)
     OTHER_HAS_DATA_TO_SYNC=false
 
     echo "📦 Preparing other pod-specific data for archival..."
@@ -135,7 +135,7 @@ sync_user_data_internal() {
 
     if [[ "$OTHER_HAS_DATA_TO_SYNC" == "true" ]]; then
         echo "  🗜️ Compressing other pod-specific data..."
-        TEMP_ARCHIVE_PATH="/tmp/$OTHER_POD_SPECIFIC_ARCHIVE_NAME"
+        TEMP_ARCHIVE_PATH="$NETWORK_VOLUME/tmp/$OTHER_POD_SPECIFIC_ARCHIVE_NAME"
         (cd "$TEMP_OTHER_STAGING_DIR" && tar -czf "$TEMP_ARCHIVE_PATH" .)
         
         notify_sync_progress "user_data" "PROGRESS" 80
@@ -191,7 +191,7 @@ sync_user_shared_data_internal() {
     COMFYUI_USER_SHARED_FOLDERS_TO_ARCHIVE=("custom_nodes")
 
     # Use temp file for archive tracking
-    ARCHIVES_LIST_FILE="/tmp/user_shared_archives_$$"
+    ARCHIVES_LIST_FILE="$NETWORK_VOLUME/tmp/user_shared_archives_$$"
     > "$ARCHIVES_LIST_FILE"
 
     notify_sync_progress "user_data" "PROGRESS" 20
@@ -201,7 +201,7 @@ sync_user_shared_data_internal() {
         safe_folder_name="${folder_name#.}"
         [[ "$folder_name" == .* ]] && safe_folder_name="_${safe_folder_name}"
         archive_name="${safe_folder_name//\//_}.tar.gz"
-        temp_archive_path="/tmp/user_shared_${archive_name}"
+        temp_archive_path="$NETWORK_VOLUME/tmp/user_shared_${archive_name}"
 
         if [[ -d "$NETWORK_VOLUME/$folder_name" ]] && [[ -n "$(find "$NETWORK_VOLUME/$folder_name" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
             echo "  🗜️ Compressing $folder_name..."
@@ -219,7 +219,7 @@ sync_user_shared_data_internal() {
     echo "🗜️ Archiving ComfyUI-shared folders..."
     for folder_name in "${COMFYUI_USER_SHARED_FOLDERS_TO_ARCHIVE[@]}"; do
         archive_name="${folder_name//\//_}.tar.gz"
-        temp_archive_path="/tmp/comfyui_shared_${archive_name}"
+        temp_archive_path="$NETWORK_VOLUME/tmp/comfyui_shared_${archive_name}"
 
         if [[ -d "$NETWORK_VOLUME/ComfyUI/$folder_name" ]] && [[ -n "$(find "$NETWORK_VOLUME/ComfyUI/$folder_name" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
             echo "  🗜️ Compressing ComfyUI/$folder_name..."
@@ -298,12 +298,12 @@ if [ -f "$NETWORK_VOLUME/scripts/sync_lock_manager.sh" ]; then
     source "$NETWORK_VOLUME/scripts/sync_lock_manager.sh"
 fi
 
-if [ -f "/tmp/pod_tracker.pid" ]; then
-    POD_TRACKER_PID=$(cat /tmp/pod_tracker.pid)
+if [ -f "$NETWORK_VOLUME/tmp/pod_tracker.pid" ]; then
+    POD_TRACKER_PID=$(cat $NETWORK_VOLUME/tmp/pod_tracker.pid)
     if [ -n "$POD_TRACKER_PID" ] && kill -0 "$POD_TRACKER_PID" 2>/dev/null; then
         echo "🕐 Stopping pod execution tracker..."
         kill -TERM "$POD_TRACKER_PID" 2>/dev/null || true; sleep 3; kill -9 "$POD_TRACKER_PID" 2>/dev/null || true
-    fi; rm -f /tmp/pod_tracker.pid
+    fi; rm -f $NETWORK_VOLUME/tmp/pod_tracker.pid
 fi
 
 BACKGROUND_PIDS_FILE="$NETWORK_VOLUME/.background_services.pids"
