@@ -87,12 +87,12 @@ jobs:
           
           # Get latest Ubuntu 22.04 LTS AMI
           UBUNTU_AMI=$(aws ec2 describe-images \
-                --owners 898082745236 \
-                --filters "Name=name,Values=Deep Learning AMI Ubuntu 22.04*" \
-                          "Name=state,Values=available" \
-                --query "Images | sort_by(@, &CreationDate) | [-1].ImageId" \
-                --output text \
-                --region ${{ env.AWS_REGION }})
+              --owners 898082745236 \
+              --filters "Name=name,Values=Deep Learning OSS Nvidia Driver AMI GPU PyTorch 2.7 (Amazon Linux 2023)" \
+                        "Name=state,Values=available" \
+              --query "Images | sort_by(@, &CreationDate) | [-1].ImageId" \
+              --output text \
+              --region ${{ env.AWS_REGION }})
           
           echo "🖥️ Using base Ubuntu AMI: $UBUNTU_AMI"
           echo "ami-id=$UBUNTU_AMI" >> $GITHUB_OUTPUT
