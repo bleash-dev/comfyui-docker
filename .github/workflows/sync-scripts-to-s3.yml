@@ -210,30 +210,27 @@ jobs:
         S3_BUCKET="${{ steps.env-config.outputs.s3_bucket }}"
         ENVIRONMENT="${{ steps.env-config.outputs.environment }}"
         
-        # Create metadata file
-        cat > /tmp/deployment-metadata.json << 'EOF'
-        {
-          "lastSync": "TIMESTAMP_PLACEHOLDER",
-          "environment": "ENVIRONMENT_PLACEHOLDER",
-          "gitCommit": "COMMIT_PLACEHOLDER",
-          "gitRef": "REF_PLACEHOLDER",
-          "triggeredBy": "EVENT_PLACEHOLDER",
-          "actor": "ACTOR_PLACEHOLDER",
-          "workflowRun": "RUN_PLACEHOLDER",
-          "repository": "REPO_PLACEHOLDER",
-          "changedFiles": "FILES_PLACEHOLDER"
-        }
-        EOF
-        
-        # Replace placeholders
-        sed -i "s/TIMESTAMP_PLACEHOLDER/$(date -u +%Y-%m-%dT%H:%M:%SZ)/" /tmp/deployment-metadata.json
-        sed -i "s/ENVIRONMENT_PLACEHOLDER/$ENVIRONMENT/" /tmp/deployment-metadata.json
-        sed -i "s/COMMIT_PLACEHOLDER/${{ github.sha }}/" /tmp/deployment-metadata.json
-        sed -i "s/REF_PLACEHOLDER/${{ github.ref }}/" /tmp/deployment-metadata.json
-        sed -i "s/EVENT_PLACEHOLDER/${{ github.event_name }}/" /tmp/deployment-metadata.json
-        sed -i "s/ACTOR_PLACEHOLDER/${{ github.actor }}/" /tmp/deployment-metadata.json
-        sed -i "s/RUN_PLACEHOLDER/${{ github.run_id }}/" /tmp/deployment-metadata.json
-        sed -i "s/REPO_PLACEHOLDER/${{ github.repository }}/" /tmp/deployment-metadata.json
+        # Create metadata file using jq to avoid sed escaping issues
+        jq -n \
+          --arg lastSync "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          --arg environment "$ENVIRONMENT" \
+          --arg gitCommit "${{ github.sha }}" \
+          --arg gitRef "${{ github.ref }}" \
+          --arg triggeredBy "${{ github.event_name }}" \
+          --arg actor "${{ github.actor }}" \
+          --arg workflowRun "${{ github.run_id }}" \
+          --arg repository "${{ github.repository }}" \
+          '{
+            lastSync: $lastSync,
+            environment: $environment,
+            gitCommit: $gitCommit,
+            gitRef: $gitRef,
+            triggeredBy: $triggeredBy,
+            actor: $actor,
+            workflowRun: $workflowRun,
+            repository: $repository,
+            changedFiles: []
+          }' > /tmp/deployment-metadata.json
         
         # Handle changed files as JSON array
         CHANGED_FILES_JSON=$(echo '${{ steps.changes.outputs.changed_files }}' | jq -R -s 'split("\n") | map(select(length > 0))')
