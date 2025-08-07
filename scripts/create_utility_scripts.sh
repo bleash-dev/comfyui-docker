@@ -6,7 +6,7 @@ echo "📝 Creating utility scripts..."
 # Set default script directory, Python version, and config root
 # NETWORK_VOLUME and AWS_BUCKET_NAME are assumed to be set in the environment
 export SCRIPT_DIR="${SCRIPT_DIR:-/scripts}" # This SCRIPT_DIR is for the execution_analytics.sh
-export PYTHON_VERSION="${PYTHON_VERSION:-3.10}"
+export PYTHON_VERSION="${PYTHON_VERSION:-3.11}"
 export PYTHON_CMD="${PYTHON_CMD:-python${PYTHON_VERSION}}"
 export CONFIG_ROOT="${CONFIG_ROOT:-/root}"
 export COMFYUI_VENV="$NETWORK_VOLUME/venv/comfyui" # Assuming NETWORK_VOLUME is set

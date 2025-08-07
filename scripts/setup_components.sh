@@ -5,7 +5,7 @@ echo "🔧 Setting up ComfyUI base components for AMI..."
 
 # Set default script directory, Python version, and config root
 export SCRIPT_DIR="${SCRIPT_DIR:-/scripts}"
-export PYTHON_VERSION="${PYTHON_VERSION:-3.10}"
+export PYTHON_VERSION="${PYTHON_VERSION:-3.11}"
 export PYTHON_CMD="${PYTHON_CMD:-python${PYTHON_VERSION}}"
 export COMFYUI_GIT="https://github.com/gilons/vf-comfyui-cors.git"
 

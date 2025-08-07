@@ -129,48 +129,56 @@ echo "📦 Installing system dependencies..."
 dnf update
 
 # Install all system packages from Dockerfile
-dnf install -y --no-install-recommends \
-    git \
-    python3.10 \
-    python3.10-venv \
-    python3-pip \
-    wget \
-    nano \
-    curl \
-    zstd \
-    openssh-server \
-    xxd \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    libxrandr-dev \
-    libxinerama-dev \
-    xvfb \
-    pv \
-    libxcursor-dev \
-    libnss3 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libcups2 \
-    libatspi2.0-0 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxi-dev \
-    libgl1-mesa-dev \
-    libglu1-mesa-dev \
-    ffmpeg \
-    libsm6 \
-    libxext6 \
-    tree \
-    zip \
-    unzip \
-    ca-certificates \
-    inotify-tools \
-    jq \
-    bc \
-    vim \
-    htop \
-    lsof \
-    net-tools
+sudo dnf install -y \
+  git \
+  python3.11 \
+  python3.11-pip \
+  wget \
+  nano \
+  zstd \
+  openssh-server \
+  vim-enhanced \
+  xxd \
+  mesa-libGL \
+  mesa-libGLU \
+  glib2 \
+  libXrandr-devel \
+  libXinerama-devel \
+  libXcursor-devel \
+  libXi-devel \
+  libXcomposite \
+  libXdamage \
+  libSM \
+  libXext \
+  cups-libs \
+  at-spi2-core \
+  at-spi2-atk \
+  atk \
+  nss \
+  inotify-tools \
+  jq \
+  bc \
+  tree \
+  zip \
+  unzip \
+  ca-certificates \
+  htop \
+  lsof \
+  net-tools \
+  xorg-x11-server-Xvfb
+
+
+# Download static ffmpeg binary
+curl -LO https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+
+# Extract
+tar -xf ffmpeg-release-amd64-static.tar.xz
+
+# Move it to /usr/local/bin
+cd ffmpeg-*-static
+sudo mv ffmpeg ffprobe /usr/local/bin/
+
+cd ../
 
 # Clean up package cache
 rm -rf /var/lib/apt/lists/*
@@ -181,8 +189,8 @@ checkpoint "SYSTEM_PACKAGES_INSTALLED"
 echo "� Installing Python packages..."
 
 # Create symbolic links for python commands
-ln -sf /usr/bin/python3.10 /usr/bin/python3
-ln -sf /usr/bin/python3.10 /usr/bin/python
+ln -sf /usr/bin/python3.11 /usr/bin/python3
+ln -sf /usr/bin/python3.11 /usr/bin/python
 
 # Install Python packages for multi-tenant management
 python3 -m pip install --no-cache-dir \
@@ -193,21 +201,22 @@ python3 -m pip install --no-cache-dir \
 checkpoint "PYTHON_PACKAGES_INSTALLED"
 
 # --- 5. INSTALL AWS CLI v2 ---
-echo "☁️ Installing AWS CLI v2..."
-curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-unzip awscliv2.zip
-./aws/install
-rm -rf awscliv2.zip aws/
-
-checkpoint "AWS_CLI_INSTALLED"
+AWS CLI already installed in the base image
 
 # --- 6. INSTALL CLOUDWATCH AGENT ---
-echo "📡 Installing CloudWatch Agent..."
-CW_AGENT_DEB="/tmp/amazon-cloudwatch-agent.deb"
-wget -q -O "$CW_AGENT_DEB" \
-    https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
-dpkg -i "$CW_AGENT_DEB" || dnf install -f -y
-rm -f "$CW_AGENT_DEB"
+echo "📡 Installing CloudWatch Agent for Amazon Linux 2023..."
+
+CW_AGENT_RPM="/tmp/amazon-cloudwatch-agent.rpm"
+wget -q -O "$CW_AGENT_RPM" \
+    https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
+
+# Install using rpm or dnf
+sudo rpm -Uvh "$CW_AGENT_RPM" || sudo dnf install -y "$CW_AGENT_RPM"
+
+# Clean up
+rm -f "$CW_AGENT_RPM"
+
+echo "✅ CloudWatch Agent installation complete"
 
 checkpoint "CLOUDWATCH_AGENT_INSTALLED"
 
@@ -440,7 +449,7 @@ chmod 755 /var/log/comfyui /workspace /scripts /opt/venv
 # Set environment variables for ComfyUI
 echo 'export DEBIAN_FRONTEND=noninteractive' >> /etc/environment
 echo 'export PYTHONUNBUFFERED=1' >> /etc/environment
-echo 'export PYTHON_VERSION=3.10' >> /etc/environment
+echo 'export PYTHON_VERSION=3.11' >> /etc/environment
 
 checkpoint "DIRECTORIES_CREATED"
 
@@ -816,7 +825,7 @@ WorkingDirectory=/workspace
 # Environment variables
 Environment=DEBIAN_FRONTEND=noninteractive
 Environment=PYTHONUNBUFFERED=1
-Environment=PYTHON_VERSION=3.10
+Environment=PYTHON_VERSION=3.11
 
 # Allow binding to privileged ports
 AmbientCapabilities=CAP_NET_BIND_SERVICE
