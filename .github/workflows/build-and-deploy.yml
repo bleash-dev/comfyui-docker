@@ -136,6 +136,7 @@ jobs:
         S3_PREFIX="s3://viral-comm-api-ec2-deployments-dev/comfyui-ami/${ENVIRONMENT}"
         BASE_AMI_TYPE="${{ steps.base-ami.outputs.ami-type }}"
         BUILD_TYPE="${{ steps.base-ami.outputs.build-type }}"
+        dnf install -y jq unzip
         
         cat > user-data.sh << 'EOF'
         #!/bin/bash
@@ -165,11 +166,7 @@ jobs:
         # Run prepare_ami.sh
         echo "⚙️ Running prepare_ami.sh..."
         echo "RUNNING_PREPARE_AMI" > /tmp/ami_progress.txt
-        timeout 3600 /scripts/prepare_ami.sh || {
-            echo "❌ prepare_ami.sh failed with exit code: $?"
-            echo "Last checkpoint: $(cat /tmp/ami_progress.txt 2>/dev/null || echo 'UNKNOWN')"
-            exit 1
-        }
+        /scripts/prepare_ami.sh
 
         # Success signal
         echo "✅ AMI setup completed at $(date)"
