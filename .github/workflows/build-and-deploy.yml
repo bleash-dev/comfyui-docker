@@ -500,7 +500,7 @@ jobs:
         INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
         AMI_TYPE="${{ steps.base-ami.outputs.ami-type }}"
         
-        MAX_ATTEMPTS=50  # Fresh builds take longer  
+        MAX_ATTEMPTS=4  # Fresh builds take longer  
         
         echo "Max attempts: $MAX_ATTEMPTS"
         
