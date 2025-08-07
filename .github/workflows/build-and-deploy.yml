@@ -137,46 +137,43 @@ jobs:
         BASE_AMI_TYPE="${{ steps.base-ami.outputs.ami-type }}"
         BUILD_TYPE="${{ steps.base-ami.outputs.build-type }}"
         
-        cat > user-data.sh << EOF
+        cat > user-data.sh << 'EOF'
         #!/bin/bash
         set -e
-        
-        # Set environment variables
-        export DEBIAN_FRONTEND=noninteractive
-        export ENVIRONMENT="$ENVIRONMENT"
-        export S3_PREFIX="$S3_PREFIX"
-        
-        # Log everything
-        exec > >(tee /var/log/user-data.log) 2>&1
-        echo "🚀 Starting ComfyUI AMI setup at \$(date)"
-        echo "Environment: \$ENVIRONMENT"
-        echo "S3 Prefix: \$S3_PREFIX"
+
+        # Log everything to file
+        exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
+
+        # Set environment variables (safe fallback)
+        export ENVIRONMENT="${ENVIRONMENT:-dev}"
+        export S3_PREFIX="${S3_PREFIX:-s3://my-default-bucket/scripts}"
+        REGION=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | jq -r .region)
+
+        echo "🚀 Starting ComfyUI AMI setup at $(date)"
+        echo "Environment: $ENVIRONMENT"
+        echo "S3 Prefix: $S3_PREFIX"
         echo "SETUP_STARTING" > /tmp/ami_progress.txt
-        
-        # Update system and install minimal requirements
-        apt-get update -y
-        apt-get install -y awscli
-        
-        # Download all scripts from S3
+
+        # Download scripts from S3
         echo "📥 Downloading scripts from S3..."
         mkdir -p /scripts
         cd /scripts
-        aws s3 sync "\${S3_PREFIX}/" . --region ${{ env.AWS_REGION }}
+        aws s3 sync "$S3_PREFIX/" . --region "$REGION"
         chmod +x *.sh 2>/dev/null || true
         chmod +x *.py 2>/dev/null || true
-        
-        # Run prepare_ami.sh which handles everything else
-        echo "� Running prepare_ami.sh..."
+
+        # Run prepare_ami.sh
+        echo "⚙️ Running prepare_ami.sh..."
         echo "RUNNING_PREPARE_AMI" > /tmp/ami_progress.txt
         timeout 3600 /scripts/prepare_ami.sh || {
-            echo "❌ prepare_ami.sh failed with exit code: \$?"
-            echo "Last checkpoint: \$(cat /tmp/ami_progress.txt 2>/dev/null || echo 'UNKNOWN')"
+            echo "❌ prepare_ami.sh failed with exit code: $?"
+            echo "Last checkpoint: $(cat /tmp/ami_progress.txt 2>/dev/null || echo 'UNKNOWN')"
             exit 1
         }
-        
-        # Signal completion
+
+        # Success signal
+        echo "✅ AMI setup completed at $(date)"
         echo "AMI_SETUP_COMPLETE" > /tmp/ami_ready.txt
-        echo "✅ AMI setup completed at \$(date)"
         EOF
         
         # Get VPC and subnet with specific preference
