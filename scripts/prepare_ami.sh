@@ -320,6 +320,95 @@ echo "\$LOG_TAG Sync complete."
 EOF
     chmod +x /usr/local/bin/sync-scripts-from-s3
 
+    # -- Async Script Sync Helper (Non-blocking) --
+    cat > /usr/local/bin/sync-scripts-from-s3-async <<EOF
+#!/bin/bash
+set -euo pipefail
+LOG_TAG="[script-sync-async]"
+
+# Start sync in background
+{
+    echo "\$LOG_TAG Starting background script sync..."
+    if aws s3 sync "${S3_PREFIX}/" /scripts --region "${AWS_REGION}" --delete; then
+        echo "\$LOG_TAG Making scripts executable..."
+        find /scripts -name "*.sh" -exec chmod +x {} \;
+        find /scripts -name "*.py" -exec chmod +x {} \;
+        if [ -f "/scripts/tenant_manager.py" ]; then
+            echo "\$LOG_TAG Updating main tenant manager binary..."
+            cp /scripts/tenant_manager.py /usr/local/bin/tenant_manager
+            chmod +x /usr/local/bin/tenant_manager
+        fi
+        echo "\$LOG_TAG Background sync complete."
+    else
+        echo "\$LOG_TAG Background sync failed, continuing with existing scripts..."
+    fi
+} &
+
+# Don't wait for background sync to complete
+echo "\$LOG_TAG Script sync started in background (PID: \$!)"
+exit 0
+EOF
+    chmod +x /usr/local/bin/sync-scripts-from-s3-async
+
+    # -- PyTorch Warmup Helper (Non-blocking) --
+    cat > /usr/local/bin/pytorch-warmup <<'EOF'
+#!/bin/bash
+set -euo pipefail
+LOG_TAG="[pytorch-warmup]"
+
+echo "$LOG_TAG Starting background PyTorch warmup..."
+
+# Start warmup in background
+{
+    # Use the ComfyUI venv for warmup
+    VENV_PATH="/base/venv/comfyui"
+    if [ -f "$VENV_PATH/bin/activate" ]; then
+        echo "$LOG_TAG Using ComfyUI venv: $VENV_PATH"
+        source "$VENV_PATH/bin/activate"
+        
+        # Simple GPU detection (same as start_tenant.sh)
+        if python -c "import torch; print(torch.cuda.is_available())" 2>/dev/null | grep -q "True"; then
+            echo "$LOG_TAG ✅ PyTorch GPU support detected"
+            HAS_GPU=true
+
+            BACKEND=$(python -c "import torch; print('hip' if torch.version.hip else 'cuda')" 2>/dev/null)
+            if [ "$BACKEND" = "hip" ]; then
+                GPU_VENDOR="amd"
+                echo "$LOG_TAG 🟥 ROCm (AMD GPU) detected"
+            else
+                GPU_VENDOR="nvidia"
+                echo "$LOG_TAG 🟦 CUDA (NVIDIA GPU) detected"
+            fi
+        else
+            echo "$LOG_TAG ⚠️ PyTorch reports no GPU support"
+            HAS_GPU=false
+            GPU_VENDOR="none"
+        fi
+        
+        # Simple warmup - just load PyTorch and basic modules
+        echo "$LOG_TAG Loading PyTorch modules..."
+        python -c "
+import torch
+import torchvision
+import numpy as np
+from PIL import Image
+print('$LOG_TAG PyTorch warmup completed')
+" 2>/dev/null || echo "$LOG_TAG PyTorch warmup failed"
+        
+        deactivate
+    else
+        echo "$LOG_TAG ComfyUI venv not found, skipping warmup"
+    fi
+    
+    echo "$LOG_TAG Background PyTorch warmup finished"
+} &
+
+# Don't wait for background warmup to complete
+echo "$LOG_TAG PyTorch warmup started in background (PID: $!)"
+exit 0
+EOF
+    chmod +x /usr/local/bin/pytorch-warmup
+
     # -- Main Tenant Manager Service --
     cp /scripts/tenant_manager.py /usr/local/bin/tenant_manager
     chmod +x /usr/local/bin/tenant_manager
@@ -342,8 +431,9 @@ RestartSec=10
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
-# Sync scripts before starting
-ExecStartPre=-/usr/local/bin/sync-scripts-from-s3
+# Sync scripts in background (non-blocking) and warmup PyTorch
+ExecStartPre=-/usr/local/bin/sync-scripts-from-s3-async
+ExecStartPre=-/usr/local/bin/pytorch-warmup
 
 # Main process
 ExecStart=/usr/bin/python3.11 /usr/local/bin/tenant_manager
@@ -367,7 +457,7 @@ echo "--- ComfyUI Multi-Tenant Status ---"
 echo; echo "● Service Status:"
 systemctl status comfyui-multitenant --no-pager
 echo; echo "● Ephemeral Storage:"
-df -h /workspace
+df -h /workspace 2>/dev/null || echo "Workspace not mounted"
 echo; echo "● Listening Ports (80, 8xxx):"
 ss -tulpn | grep -E ':(80|8[0-9]{3})\s' || echo "No standard ports in use."
 echo; echo "● Recent Logs (last 20 lines):"
@@ -378,9 +468,11 @@ EOF
     cat > /usr/local/bin/update-scripts << 'EOF'
 #!/bin/bash
 echo "🔄 Manually syncing scripts from S3 and restarting service..."
+echo "📥 This will do a synchronous sync (blocking) to ensure completion..."
 /usr/local/bin/sync-scripts-from-s3
 systemctl restart comfyui-multitenant.service
 echo "✅ Done. Use 'comfyui-monitor' to check status."
+echo "ℹ️  Note: On service startup, scripts sync in background for faster boot time."
 EOF
     chmod +x /usr/local/bin/update-scripts
 
@@ -467,6 +559,17 @@ Python Version: $(python3.11 --version)
 Services: comfyui-multitenant, mount-ephemeral-storage
 Monitoring: /usr/local/bin/comfyui-monitor
 Update Utility: /usr/local/bin/update-scripts
+
+=== Performance Optimizations ===
+✅ PyTorch Warmup: Enabled (preloads PyTorch into memory)
+✅ Async Script Sync: Enabled (non-blocking startup)
+✅ CUDA Ready: $(if python3.11 -c "import torch; print('Yes' if torch.cuda.is_available() else 'No')" 2>/dev/null; then echo "Yes"; else echo "Unknown"; fi)
+
+=== Startup Sequence ===
+1. Mount ephemeral storage
+2. Start background script sync (non-blocking)
+3. Warmup PyTorch (preload into memory)
+4. Start tenant manager service
 EOF
     log "📋 AMI summary created at /var/log/ami-summary.log"
 
