@@ -346,7 +346,7 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 ExecStartPre=-/usr/local/bin/sync-scripts-from-s3
 
 # Main process
-ExecStart=/usr/bin/python3 /usr/local/bin/tenant_manager
+ExecStart=/usr/bin/python3.11 /usr/local/bin/tenant_manager
 
 # Environment
 Environment=PYTHONUNBUFFERED=1
@@ -409,7 +409,7 @@ final_validation() {
     log "🔍 Performing final validation..."
 
     # Test tenant manager import
-    if ! python3 -c "import sys; sys.path.append('/usr/local/bin'); import tenant_manager"; then
+    if ! python3.11 -c "import sys; sys.path.append('/usr/local/bin'); import tenant_manager"; then
         log "❌ Validation Error: Tenant manager script is invalid or cannot be imported."
         errors=$((errors + 1))
     fi
@@ -463,7 +463,7 @@ Completion Time: $(date)
 Build Type: Docker-Free Multi-Tenant
 Environment: ${ENVIRONMENT}
 Base ComfyUI: ${COMFYUI_DIR}
-Python Version: $(python3 --version)
+Python Version: $(python3.11 --version)
 Services: comfyui-multitenant, mount-ephemeral-storage
 Monitoring: /usr/local/bin/comfyui-monitor
 Update Utility: /usr/local/bin/update-scripts
