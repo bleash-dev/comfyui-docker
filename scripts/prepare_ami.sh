@@ -180,7 +180,7 @@ python3 -m pip install --no-cache-dir \
 checkpoint "PYTHON_PACKAGES_INSTALLED"
 
 # --- 5. INSTALL AWS CLI v2 ---
-AWS CLI already installed in the base image
+echo "AWS CLI already installed in the base image"
 
 # --- 6. INSTALL CLOUDWATCH AGENT ---
 echo "📡 Installing CloudWatch Agent for Amazon Linux 2023..."
