@@ -134,8 +134,6 @@ jobs:
         # Create user data script
         ENVIRONMENT="${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}"
         S3_PREFIX="s3://viral-comm-api-ec2-deployments-dev/comfyui-ami/${ENVIRONMENT}"
-        BASE_AMI_TYPE="${{ steps.base-ami.outputs.ami-type }}"
-        BUILD_TYPE="${{ steps.base-ami.outputs.build-type }}"
         
         cat > user-data.sh << 'EOF'
         #!/bin/bash
