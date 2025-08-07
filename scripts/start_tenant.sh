@@ -141,7 +141,7 @@ if [ -n "${APT_PACKAGES:-}" ]; then
         echo "Installing: ${CLEAN_APT_PACKAGES[*]}" | tee -a "$USER_SCRIPT_LOG"
         
         # Install packages (skip update in tenant to speed up)
-        if apt-get install -y --no-install-recommends "${CLEAN_APT_PACKAGES[@]}" >> "$USER_SCRIPT_LOG" 2>&1; then
+        if dnf install -y --no-install-recommends "${CLEAN_APT_PACKAGES[@]}" >> "$USER_SCRIPT_LOG" 2>&1; then
             echo "✅ APT packages installed successfully: ${CLEAN_APT_PACKAGES[*]}" | tee -a "$USER_SCRIPT_LOG"
         else
             echo "❌ ERROR: Some APT packages failed to install. Check log for details." | tee -a "$USER_SCRIPT_LOG"

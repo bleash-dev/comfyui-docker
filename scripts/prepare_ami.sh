@@ -100,7 +100,7 @@ echo "🔧 Clearing APT locks aggressively..." | tee -a "$LOG_FILE"
 
 # Force kill any apt/dpkg processes
 echo "🔪 Force killing any existing apt/dpkg processes..." | tee -a "$LOG_FILE"
-timeout 10 pkill -9 -f apt-get || true
+timeout 10 pkill -9 -f dnf || true
 timeout 10 pkill -9 -f dpkg || true
 timeout 10 pkill -9 -f unattended-upgrade || true
 timeout 10 pkill -9 -f packagekit || true
@@ -126,10 +126,10 @@ echo 'DPkg::Use-Pty "0";' >> "$APT_CONFIG_FILE"
 echo "📦 Installing system dependencies..."
 
 # Update package list
-apt-get update
+dnf update
 
 # Install all system packages from Dockerfile
-apt-get install -y --no-install-recommends \
+dnf install -y --no-install-recommends \
     git \
     python3.10 \
     python3.10-venv \
@@ -206,7 +206,7 @@ echo "📡 Installing CloudWatch Agent..."
 CW_AGENT_DEB="/tmp/amazon-cloudwatch-agent.deb"
 wget -q -O "$CW_AGENT_DEB" \
     https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
-dpkg -i "$CW_AGENT_DEB" || apt-get install -f -y
+dpkg -i "$CW_AGENT_DEB" || dnf install -f -y
 rm -f "$CW_AGENT_DEB"
 
 checkpoint "CLOUDWATCH_AGENT_INSTALLED"
@@ -1065,8 +1065,8 @@ echo "🧹 Finalizing and cleaning up for AMI creation..." | tee -a "$LOG_FILE"
 
 # Clean apt cache
 echo "🧹 Cleaning apt cache..." | tee -a "$LOG_FILE"
-apt-get autoremove -y 2>&1 | tee -a "$LOG_FILE"
-apt-get clean 2>&1 | tee -a "$LOG_FILE"
+dnf autoremove -y 2>&1 | tee -a "$LOG_FILE"
+dnf clean 2>&1 | tee -a "$LOG_FILE"
 rm -rf /var/lib/apt/lists/* 2>&1 | tee -a "$LOG_FILE"
 
 # Final log sync before cleanup
