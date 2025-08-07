@@ -98,12 +98,12 @@ fi
 echo "📁 Network Volume: $NETWORK_VOLUME"
 
 # Setup tenant-specific logging
-TENANT_LOG_DIR="$NETWORK_VOLUME/logs"
+export TENANT_LOG_DIR="$NETWORK_VOLUME/logs"
 mkdir -p "$TENANT_LOG_DIR"
 
-USER_SCRIPT_LOG="$TENANT_LOG_DIR/user-script.log"
-STARTUP_LOG="$TENANT_LOG_DIR/startup.log"
-COMFYUI_LOG="$TENANT_LOG_DIR/comfyui.log"
+export USER_SCRIPT_LOG="$TENANT_LOG_DIR/user-script.log"
+export STARTUP_LOG="$TENANT_LOG_DIR/startup.log"
+export COMFYUI_LOG="$TENANT_LOG_DIR/comfyui.log"
 
 touch "$USER_SCRIPT_LOG" "$STARTUP_LOG" "$COMFYUI_LOG"
 chmod 664 "$USER_SCRIPT_LOG" "$STARTUP_LOG" "$COMFYUI_LOG" 2>/dev/null || true

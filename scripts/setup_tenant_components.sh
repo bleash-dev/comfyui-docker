@@ -201,28 +201,6 @@ else
     echo "ℹ️ nvidia-smi not found"
 fi
 
-# Check PyTorch GPU support — works for both NVIDIA and AMD ROCm
-source "$BASE_VENV_PATH/bin/activate"
-if python -c "import torch; print(torch.cuda.is_available())" 2>/dev/null | grep -q "True"; then
-    echo "✅ PyTorch GPU support detected"
-    HAS_GPU=true
-
-    # Detect backend (NVIDIA or ROCm)
-    BACKEND=$(python -c "import torch; print('hip' if torch.version.hip else 'cuda')" 2>/dev/null)
-    if [ "$BACKEND" = "hip" ]; then
-        GPU_VENDOR="amd"
-        echo "🟥 ROCm (AMD GPU) detected"
-    else
-        GPU_VENDOR="nvidia"
-        echo "🟦 CUDA (NVIDIA GPU) detected"
-    fi
-else
-    echo "⚠️ PyTorch does not detect GPU support"
-    HAS_GPU=false
-    GPU_VENDOR="none"
-fi
-deactivate 2>/dev/null || true
-
 # Configure ComfyUI accordingly
 if [ "$HAS_GPU" = false ]; then
     echo "🖥️ Configuring ComfyUI for CPU-only mode..."
