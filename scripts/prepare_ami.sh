@@ -145,12 +145,8 @@ setup_system_deps() {
 
 # Configures Python environment and installs packages
 setup_python_env() {
-    log "🐍 Configuring Python ${PYTHON_VERSION}..."
-    ln -sf "/usr/bin/python${PYTHON_VERSION}" /usr/bin/python3
-    ln -sf "/usr/bin/python${PYTHON_VERSION}" /usr/bin/python
-
     log "🐍 Installing Python packages for instance management..."
-    python3 -m pip install --no-cache-dir \
+    python3.11 -m pip install --no-cache-dir \
         boto3 \
         psutil \
         requests

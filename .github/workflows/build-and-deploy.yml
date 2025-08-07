@@ -141,7 +141,7 @@ jobs:
 
         # Log everything to file
         exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
-        dnf install -y jq unzip
+        apt-get install -y jq unzip
         # Set environment variables (safe fallback)
         export ENVIRONMENT="${ENVIRONMENT:-dev}"
         export REGION=us-east-1
