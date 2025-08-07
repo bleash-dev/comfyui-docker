@@ -91,42 +91,21 @@ sync_logs_to_cloudwatch() {
 checkpoint "AMI_PREP_STARTED"
 
 # --- 2. PACKAGE MANAGEMENT SETUP ---
-echo "📦 Preparing package manager (apt)..." | tee -a "$LOG_FILE"
-export DEBIAN_FRONTEND=noninteractive
-export NEEDRESTART_MODE=a
+echo "📦 Preparing package manager (dnf)..." | tee -a "$LOG_FILE"
+LOG_FILE=${LOG_FILE:-/var/log/setup.log}
+mkdir -p "$(dirname "$LOG_FILE")"
+touch "$LOG_FILE"
 
-# Aggressive APT lock handling - use timeout and force clear
-echo "🔧 Clearing APT locks aggressively..." | tee -a "$LOG_FILE"
-
-# Force kill any apt/dpkg processes
-echo "🔪 Force killing any existing apt/dpkg processes..." | tee -a "$LOG_FILE"
+# Optional: kill any hanging dnf processes (rare on clean instance)
+echo "🔪 Killing hanging dnf processes if any..." | tee -a "$LOG_FILE"
 timeout 10 pkill -9 -f dnf || true
-timeout 10 pkill -9 -f dpkg || true
-timeout 10 pkill -9 -f unattended-upgrade || true
-timeout 10 pkill -9 -f packagekit || true
-sleep 3
-
-# Remove lock files directly (will be recreated)
-echo "🗑️ Removing lock files..." | tee -a "$LOG_FILE"
-rm -f /var/lib/dpkg/lock-frontend
-rm -f /var/lib/apt/lists/lock 
-rm -f /var/cache/apt/archives/lock
-rm -f /var/lib/dpkg/lock
 sleep 2
-
-# Configure apt for non-interactive use
-APT_CONFIG_FILE="/etc/apt/apt.conf.d/90-noninteractive"
-echo 'APT::Get::Assume-Yes "true";' > "$APT_CONFIG_FILE"
-echo 'APT::Get::AllowUnauthenticated "true";' >> "$APT_CONFIG_FILE"
-echo 'DPkg::Options "--force-confdef";' >> "$APT_CONFIG_FILE"
-echo 'DPkg::Options "--force-confold";' >> "$APT_CONFIG_FILE"
-echo 'DPkg::Use-Pty "0";' >> "$APT_CONFIG_FILE"
 
 # --- 3. INSTALL SYSTEM DEPENDENCIES (from Dockerfile) ---
 echo "📦 Installing system dependencies..."
 
 # Update package list
-dnf update
+dnf -y update || echo "⚠️ dnf update failed"
 
 # Install all system packages from Dockerfile
 sudo dnf install -y \
