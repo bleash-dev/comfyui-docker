@@ -216,29 +216,3 @@ else
 # GPU mode configuration
 export PYTORCH_CUDA_ALLOC_CONF=\"expandable_segments:True\""
 fi
-
-# Create tenant-specific activation helper
-echo "�🔧 Creating tenant activation helper..."
-cat > "$NETWORK_VOLUME/activate-comfyui" << EOF
-#!/bin/bash
-# ComfyUI Environment Activation for Tenant $POD_ID
-export COMFYUI_VENV="$BASE_VENV_PATH"
-export PYTHONPATH="$TENANT_COMFYUI_PATH:\$PYTHONPATH"
-$GPU_CONFIG
-source "\$COMFYUI_VENV/bin/activate"
-echo "✅ ComfyUI environment activated for tenant $POD_ID"
-echo "   🐍 Python: \$(which python)"
-echo "   🎨 ComfyUI: $TENANT_COMFYUI_PATH"
-echo "   📦 Virtual env: $BASE_VENV_PATH"
-echo "   🖥️ GPU Mode: $HAS_GPU"
-EOF
-chmod +x "$NETWORK_VOLUME/activate-comfyui"
-
-echo "✅ Tenant-specific ComfyUI components setup completed!"
-echo "📊 Summary:"
-echo "  🎯 Tenant: $POD_USER_NAME/$POD_ID"
-echo "  🎨 ComfyUI: $TENANT_COMFYUI_PATH"
-echo "  🐍 Shared venv: $BASE_VENV_PATH"
-echo "  🖥️ GPU Available: $HAS_GPU"
-echo "  ⚙️ Config: $tenant_config_dir"
-echo "  🔧 Activation: $NETWORK_VOLUME/activate-comfyui"

@@ -277,26 +277,6 @@ else
     echo "ℹ️ nvidia-smi not found"
 fi
 
-# Check with PyTorch (works for NVIDIA and AMD/ROCm)
-source "$COMFYUI_VENV/bin/activate"
-if python -c "import torch; print(torch.cuda.is_available())" 2>/dev/null | grep -q "True"; then
-    echo "✅ PyTorch GPU support detected"
-    HAS_GPU=true
-
-    BACKEND=$(python -c "import torch; print('hip' if torch.version.hip else 'cuda')" 2>/dev/null)
-    if [ "$BACKEND" = "hip" ]; then
-        GPU_VENDOR="amd"
-        echo "🟥 ROCm (AMD GPU) detected"
-    else
-        GPU_VENDOR="nvidia"
-        echo "🟦 CUDA (NVIDIA GPU) detected"
-    fi
-else
-    echo "⚠️ PyTorch reports no GPU support"
-    HAS_GPU=false
-    GPU_VENDOR="none"
-fi
-deactivate
 
 # Configure environment based on GPU availability
 if [ "$HAS_GPU" = false ]; then
