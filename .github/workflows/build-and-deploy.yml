@@ -147,7 +147,7 @@ jobs:
         # Set environment variables (safe fallback)
         export ENVIRONMENT="${ENVIRONMENT:-dev}"
         export S3_PREFIX="${S3_PREFIX:-s3://my-default-bucket/scripts}"
-        REGION=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | jq -r .region)
+        REGION=us-east-1
 
         echo "🚀 Starting ComfyUI AMI setup at $(date)"
         echo "Environment: $ENVIRONMENT"
@@ -500,7 +500,7 @@ jobs:
         INSTANCE_ID="${{ steps.launch-instance.outputs.instance-id }}"
         AMI_TYPE="${{ steps.base-ami.outputs.ami-type }}"
         
-        MAX_ATTEMPTS=4  # Fresh builds take longer  
+        MAX_ATTEMPTS=50  # Fresh builds take longer  
         
         echo "Max attempts: $MAX_ATTEMPTS"
         
