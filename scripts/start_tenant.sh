@@ -74,7 +74,7 @@ echo "  Base ComfyUI: $BASE_COMFYUI_PATH"
 echo "  Tenant ComfyUI: $TENANT_COMFYUI_PATH"
 
 # Set default Python version and config root
-export PYTHON_VERSION="${PYTHON_VERSION:-3.11}"
+export PYTHON_VERSION="${PYTHON_VERSION:-3}"
 export PYTHON_CMD="${PYTHON_CMD:-python${PYTHON_VERSION}}"
 export CONFIG_ROOT="${CONFIG_ROOT:-/root}"
 echo "Python Version: $($PYTHON_CMD --version)"
