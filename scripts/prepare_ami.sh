@@ -32,7 +32,7 @@ CLOUDWATCH_LOG_GROUP="/comfyui/ami-preparation"
 # -- Environment & S3 --
 ENVIRONMENT="${ENVIRONMENT:-dev}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
-S3_BUCKET_NAME="viral-comm-api-ec2-deployments-dev" # CHANGEME: Your S3 bucket name
+S3_BUCKET_NAME="viral-comm-api-ec2-deployments-${ENVIRONMENT}" # CHANGEME: Your S3 bucket name
 S3_PREFIX="s3://${S3_BUCKET_NAME}/comfyui-ami/${ENVIRONMENT}"
 
 # -- ComfyUI Base Installation --

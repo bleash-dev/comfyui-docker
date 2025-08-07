@@ -53,6 +53,9 @@ SSH into the instance and make your changes:
 
 # Or create with custom AMI name
 ./create_ami.sh my-build-instance "v2.1.0-custom-features"
+
+# Create AMI and automatically terminate the source instance
+./create_ami.sh --terminate-instance my-build-instance "Production ready AMI"
 ```
 
 ### 4. Validate (Optional)
@@ -65,11 +68,10 @@ SSH into the instance and make your changes:
 ### 5. Cleanup
 
 ```bash
-# Terminate build instance
-./manage_instance.sh terminate my-build-instance
-
 # Clean up old AMIs (keeps last 5)
 ./cleanup_old_amis.sh
+
+# Note: If you used --terminate-instance option, the build instance is already terminated
 ```
 
 ## Configuration
@@ -135,13 +137,32 @@ The scripts manage these SSM parameters:
 # 2. SSH and make changes
 ssh -i ~/.ssh/your-key.pem ubuntu@<instance-ip>
 
-# 3. Create AMI
+# 3. Create AMI and terminate instance automatically
+./create_ami.sh --terminate-instance update-$(date +%Y%m%d) "Update-$(date +%Y%m%d)-bug-fixes"
+
+# 4. Validate
+./validate_ami.sh $(aws ssm get-parameter --name /comfyui/ami/dev/latest --query 'Parameter.Value' --output text)
+
+# 5. Clean up old AMIs
+./cleanup_old_amis.sh
+```
+
+### Manual Instance Management Workflow
+
+```bash
+# 1. Launch instance
+./launch_build_instance.sh update-$(date +%Y%m%d)
+
+# 2. SSH and make changes
+ssh -i ~/.ssh/your-key.pem ubuntu@<instance-ip>
+
+# 3. Create AMI (keep instance for testing)
 ./create_ami.sh update-$(date +%Y%m%d) "Update-$(date +%Y%m%d)-bug-fixes"
 
 # 4. Validate
 ./validate_ami.sh $(aws ssm get-parameter --name /comfyui/ami/dev/latest --query 'Parameter.Value' --output text)
 
-# 5. Cleanup
+# 5. Manually terminate when ready
 ./manage_instance.sh terminate update-$(date +%Y%m%d)
 ```
 
@@ -163,8 +184,8 @@ ssh -i ~/.ssh/your-key.pem ubuntu@<instance-ip>
 
 # Make experimental changes...
 
-# Create development AMI (doesn't update production SSM)
-./create_ami.sh dev-test-$(whoami) "experimental-features" --no-ssm-update
+# Create development AMI (doesn't update production SSM, but terminates instance)
+./create_ami.sh --no-ssm-update --terminate-instance dev-test-$(whoami) "experimental-features"
 
 # Test the AMI
 ./validate_ami.sh <new-ami-id>

@@ -18,6 +18,7 @@ print_usage() {
     echo "  --ami-name NAME         Custom AMI name (auto-generated if not specified)"
     echo "  --no-reboot            Create AMI without rebooting instance"
     echo "  --no-ssm-update        Don't update SSM parameters (for testing)"
+    echo "  --terminate-instance    Terminate the source instance after AMI creation"
     echo "  --environment ENV       Target environment (default: $ENVIRONMENT)"
     echo "  --dry-run               Show what would be done without actually doing it"
     echo "  --help                  Show this help message"
@@ -30,6 +31,7 @@ print_usage() {
     echo "  $0 my-build-instance"
     echo "  $0 my-build-instance 'Updated ComfyUI with bug fixes'"
     echo "  $0 --no-ssm-update test-build 'Experimental features'"
+    echo "  $0 --terminate-instance my-build 'Production ready AMI'"
     echo "  $0 --environment staging my-build 'Staging release v2.1'"
 }
 
@@ -37,6 +39,7 @@ print_usage() {
 AMI_NAME=""
 NO_REBOOT=false
 NO_SSM_UPDATE=false
+TERMINATE_INSTANCE=true
 TARGET_ENVIRONMENT="$ENVIRONMENT"
 DRY_RUN=false
 
@@ -53,6 +56,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-ssm-update)
             NO_SSM_UPDATE=true
+            shift
+            ;;
+        --terminate-instance)
+            TERMINATE_INSTANCE=true
             shift
             ;;
         --environment)
@@ -160,6 +167,7 @@ echo "   Description: $AMI_DESCRIPTION"
 echo "   Environment: $TARGET_ENVIRONMENT"
 echo "   No Reboot: $NO_REBOOT"
 echo "   Update SSM: $([[ "$NO_SSM_UPDATE" == "true" ]] && echo "No" || echo "Yes")"
+echo "   Terminate Instance: $([[ "$TERMINATE_INSTANCE" == "true" ]] && echo "Yes" || echo "No")"
 
 # Stop instance if it's running and we need to reboot
 if [[ "$INSTANCE_STATE" == "running" && "$NO_REBOOT" == "false" ]]; then
@@ -175,6 +183,9 @@ if [[ "$DRY_RUN" == "true" ]]; then
     echo "   aws ec2 create-image --instance-id $INSTANCE_ID --name '$AMI_NAME' --description '$AMI_DESCRIPTION' --no-reboot=$NO_REBOOT"
     if [[ "$NO_SSM_UPDATE" == "false" ]]; then
         echo "   Would update SSM parameter: /comfyui/ami/$TARGET_ENVIRONMENT/latest"
+    fi
+    if [[ "$TERMINATE_INSTANCE" == "true" ]]; then
+        echo "   Would terminate instance: $INSTANCE_ID ($INSTANCE_NAME)"
     fi
     exit 0
 fi
@@ -347,12 +358,35 @@ aws ec2 create-tags \
 
 log_success "AMI tagged successfully"
 
+# Terminate instance if requested
+if [[ "$TERMINATE_INSTANCE" == "true" ]]; then
+    log_step "Terminating source instance..."
+    log_info "Terminating instance: $INSTANCE_ID ($INSTANCE_NAME)"
+    
+    # Confirm termination if instance was running (to avoid accidents)
+    if [[ "$INSTANCE_STATE" == "running" ]]; then
+        log_warning "The source instance was originally running. Terminating it now..."
+    fi
+    
+    aws ec2 terminate-instances \
+        --instance-ids "$INSTANCE_ID" \
+        --region "$AWS_REGION" >/dev/null
+    
+    log_success "Instance termination initiated"
+    log_info "Instance $INSTANCE_ID will be terminated shortly"
+    
+    # Update the next steps message
+    TERMINATION_NOTE="   ✅ Source instance ($INSTANCE_NAME) has been terminated"
+else
+    TERMINATION_NOTE="   3. Terminate build instance: $SCRIPT_DIR/manage_instance.sh terminate $INSTANCE_NAME"
+fi
+
 log_header "AMI Creation Complete!"
 echo ""
 log_info "Next Steps:"
 echo "   1. Test the AMI: $SCRIPT_DIR/validate_ami.sh $AMI_ID"
 echo "   2. Clean up old AMIs: $SCRIPT_DIR/cleanup_old_amis.sh"
-echo "   3. Terminate build instance: $SCRIPT_DIR/manage_instance.sh terminate $INSTANCE_NAME"
+echo "$TERMINATION_NOTE"
 echo ""
 log_info "Deployment Information:"
 echo "   New AMI ID: $AMI_ID"
