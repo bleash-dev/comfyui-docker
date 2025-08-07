@@ -37,7 +37,7 @@ TARGET_ENVIRONMENT="$ENVIRONMENT"
 TARGET_AMI_PREFIX="$AMI_NAME_PREFIX"
 DRY_RUN=false
 FORCE=false
-INCLUDE_SNAPSHOTS=false
+INCLUDE_SNAPSHOTS=true
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
