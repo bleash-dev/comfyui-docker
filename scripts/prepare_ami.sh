@@ -382,9 +382,9 @@ chunk_and_upload_base_assets() {
 
     # 3. Parallel upload with s5cmd
     log "☁️ Uploading venv chunks to ${S3_VENV_CHUNKS_PREFIX} ..."
-    s5cmd --concurrency ${S5CMD_CONCURRENCY} cp "${VENV_CHUNK_DIR}/*" "${S3_VENV_CHUNKS_PREFIX}/" || return 1
+    s5cmd cp "${VENV_CHUNK_DIR}/*" "${S3_VENV_CHUNKS_PREFIX}/" || return 1
     log "☁️ Uploading ComfyUI chunks to ${S3_COMFYUI_CHUNKS_PREFIX} ..."
-    s5cmd --concurrency ${S5CMD_CONCURRENCY} cp "${COMFYUI_CHUNK_DIR}/*" "${S3_COMFYUI_CHUNKS_PREFIX}/" || return 1
+    s5cmd cp "${COMFYUI_CHUNK_DIR}/*" "${S3_COMFYUI_CHUNKS_PREFIX}/" || return 1
 
     log "✅ Base assets chunked & uploaded. Cleaning temp..."
     rm -rf "$TMP_WORK"
