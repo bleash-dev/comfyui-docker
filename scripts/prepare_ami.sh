@@ -346,7 +346,7 @@ chunk_and_upload_base_assets() {
         return 1
     fi
 
-    TMP_WORK="$(mktemp -d /tmp/base_chunks_XXXX)"
+    TMP_WORK="$(mktemp -d /workspace/tmp/base_chunks_XXXX)"
     VENV_CHUNK_DIR="${TMP_WORK}/venv_chunks"
     COMFYUI_CHUNK_DIR="${TMP_WORK}/comfyui_chunks"
     mkdir -p "$VENV_CHUNK_DIR" "$COMFYUI_CHUNK_DIR"

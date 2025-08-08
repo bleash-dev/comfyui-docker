@@ -27,7 +27,7 @@ echo "📍 Base ComfyUI path: $BASE_COMFYUI_PATH"
 export COMFYUI_VENV="$BASE_VENV_PATH"
 
 # Create consolidated requirements file for optimization
-CONSOLIDATED_REQUIREMENTS="/tmp/consolidated_requirements.txt"
+CONSOLIDATED_REQUIREMENTS="$BASE_ROOT/tmp/consolidated_requirements.txt"
 > "$CONSOLIDATED_REQUIREMENTS"  # Clear file
 
 # Setup virtual environments (base installation only)
