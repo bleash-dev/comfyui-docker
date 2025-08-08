@@ -48,16 +48,16 @@ PYTORCH_VERSION="2.4.0"
 GIT_BRANCH="${GIT_BRANCH:-main}"
 
 # Chunking / Compression settings
-VENV_CHUNK_SIZE_MB="${VENV_CHUNK_SIZE_MB:-200}"   # Passed through to venv_chunk_manager
-VENV_MAX_PARALLEL="${VENV_MAX_PARALLEL:-30}"     # Parallelism for chunk manager
-COMFYUI_CHUNK_SIZE_MB="${COMFYUI_CHUNK_SIZE_MB:-200}"
-COMFYUI_TAR_NAME="comfyui_base.tar.gz"
-COMFYUI_MANIFEST_NAME="comfyui_manifest.txt"
-S5CMD_CONCURRENCY="${S5CMD_CONCURRENCY:-50}"
+export VENV_CHUNK_SIZE_MB="${VENV_CHUNK_SIZE_MB:-200}"   # Passed through to venv_chunk_manager
+export VENV_MAX_PARALLEL="${VENV_MAX_PARALLEL:-30}"     # Parallelism for chunk manager
+export COMFYUI_CHUNK_SIZE_MB="${COMFYUI_CHUNK_SIZE_MB:-200}"
+export COMFYUI_TAR_NAME="comfyui_base.tar.gz"
+export COMFYUI_MANIFEST_NAME="comfyui_manifest.txt"
+export S5CMD_CONCURRENCY="${S5CMD_CONCURRENCY:-50}"
 
 # -- System --
-PYTHON_VERSION="3.11"
-WORKSPACE_DIR="/workspace"
+export PYTHON_VERSION="3.11"
+export WORKSPACE_DIR="/workspace"
 
 # --- 2. HELPER FUNCTIONS ---
 
