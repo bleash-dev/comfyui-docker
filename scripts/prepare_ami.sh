@@ -34,13 +34,27 @@ ENVIRONMENT="${ENVIRONMENT:-dev}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 S3_BUCKET_NAME="viral-comm-api-ec2-deployments-${ENVIRONMENT}" # CHANGEME: Your S3 bucket name
 S3_PREFIX="s3://${S3_BUCKET_NAME}/comfyui-ami/${ENVIRONMENT}"
+S3_BASE_PREFIX="${S3_PREFIX}/base"
+S3_VENV_CHUNKS_PREFIX="${S3_BASE_PREFIX}/venv_chunks"
+S3_COMFYUI_CHUNKS_PREFIX="${S3_BASE_PREFIX}/comfyui_chunks"
 
-# -- ComfyUI Base Installation --
-BASE_DIR="/base"
+# -- ComfyUI Base Installation (now on NVMe /workspace) --
+# Physical location on NVMe
+BASE_DIR="/workspace/base"
+# Compatibility symlink target (legacy scripts reference /base)
+LEGACY_BASE_LINK="/base"
 VENV_DIR="${BASE_DIR}/venv/comfyui"
 COMFYUI_DIR="${BASE_DIR}/ComfyUI"
 PYTORCH_VERSION="2.4.0"
 GIT_BRANCH="${GIT_BRANCH:-main}"
+
+# Chunking / Compression settings
+VENV_CHUNK_SIZE_MB="${VENV_CHUNK_SIZE_MB:-200}"   # Passed through to venv_chunk_manager
+VENV_MAX_PARALLEL="${VENV_MAX_PARALLEL:-30}"     # Parallelism for chunk manager
+COMFYUI_CHUNK_SIZE_MB="${COMFYUI_CHUNK_SIZE_MB:-200}"
+COMFYUI_TAR_NAME="comfyui_base.tar.gz"
+COMFYUI_MANIFEST_NAME="comfyui_manifest.txt"
+S5CMD_CONCURRENCY="${S5CMD_CONCURRENCY:-50}"
 
 # -- System --
 PYTHON_VERSION="3.11"
@@ -78,14 +92,15 @@ initialize_setup() {
     log "Environment: ${ENVIRONMENT}"
     log "AWS Region: ${AWS_REGION}"
     log "S3 Path: ${S3_PREFIX}"
+    log "Base (NVMe) directory: ${BASE_DIR}"
 }
 
 install_s5_cmd() {
     # Download s5cmd
-    wget https://github.com/peak/s5cmd/releases/latest/download/s5cmd_Linux-64bit.tar.gz
+    wget https://github.com/peak/s5cmd/releases/download/v2.3.0/s5cmd_2.3.0_Linux-32bit.tar.gz
 
     # Extract
-    tar -xzf s5cmd_Linux-64bit.tar.gz
+    tar -xzf s5cmd_2.3.0_Linux-32bit.tar.gz
 
     # Move binary to /usr/local/bin so it's accessible everywhere
     sudo mv s5cmd /usr/local/bin/
@@ -288,18 +303,23 @@ download_and_setup_scripts() {
 
 # Installs the base shared ComfyUI environment
 install_comfyui_base() {
-    log "🎨 Installing base ComfyUI environment into ${BASE_DIR}..."
-    mkdir -p "${BASE_DIR}" "${VENV_DIR}"
-    chmod 755 "${BASE_DIR}" "${BASE_DIR}/venv"
+    log "🎨 Installing base ComfyUI environment into ${BASE_DIR} (NVMe)..."
+    mkdir -p "${BASE_DIR}" "${VENV_DIR}" || true
+    chmod 755 "${BASE_DIR}" "${BASE_DIR}/venv" || true
 
-    log "🔧 Running setup_components.sh..."
-    # Set env vars for the setup script
-    export NETWORK_VOLUME="${BASE_DIR}"
+    # Copy venv_chunk_manager to /usr/local/bin for early restore usage
+    if [ -f /scripts/venv_chunk_manager.sh ]; then
+        cp /scripts/venv_chunk_manager.sh /usr/local/bin/venv_chunk_manager.sh
+        chmod +x /usr/local/bin/venv_chunk_manager.sh
+    fi
+
+    log "🔧 Running setup_components.sh (base install to NVMe)..."
+    export NETWORK_VOLUME="${BASE_DIR}"  # Some scripts expect this for log paths
     export PYTORCH_VERSION="${PYTORCH_VERSION}"
     export GIT_BRANCH="${GIT_BRANCH}"
 
     if bash /scripts/setup_components.sh 2>&1 | tee -a "$LOG_FILE"; then
-        log "✅ Base ComfyUI environment installed successfully."
+        log "✅ Base ComfyUI environment installed successfully on NVMe."
     else
         log "❌ setup_components.sh failed. See logs for details."
         return 1
@@ -308,10 +328,145 @@ install_comfyui_base() {
     log "🔍 Verifying base installation..."
     if [ ! -f "${VENV_DIR}/bin/python" ] || [ ! -f "${COMFYUI_DIR}/main.py" ]; then
         log "❌ Base installation validation failed. Venv or ComfyUI missing."
-        ls -la "${BASE_DIR}" "${VENV_DIR}" "${COMFYUI_DIR}"
+        ls -la "${BASE_DIR}" "${VENV_DIR}" "${COMFYUI_DIR}" || true
         return 1
     fi
-    log "✅ Base installation validated."
+    log "✅ Base installation validated on NVMe."
+}
+
+# Chunk and upload base assets (venv + ComfyUI)
+chunk_and_upload_base_assets() {
+    log "📦 Chunking & Uploading base assets to S3 (parallel)..."
+
+    if [ ! -d "${VENV_DIR}" ] || [ ! -x "${VENV_DIR}/bin/python" ]; then
+        log "❌ Venv not ready for chunking: ${VENV_DIR}"
+        return 1
+    fi
+    if [ ! -d "${COMFYUI_DIR}" ]; then
+        log "❌ ComfyUI directory missing: ${COMFYUI_DIR}"
+        return 1
+    fi
+
+    TMP_WORK="$(mktemp -d /tmp/base_chunks_XXXX)"
+    VENV_CHUNK_DIR="${TMP_WORK}/venv_chunks"
+    COMFYUI_CHUNK_DIR="${TMP_WORK}/comfyui_chunks"
+    mkdir -p "$VENV_CHUNK_DIR" "$COMFYUI_CHUNK_DIR"
+
+    # 1. Chunk venv (reuse venv_chunk_manager)
+    log "🧩 Chunking virtual environment..."
+    if /usr/local/bin/venv_chunk_manager.sh chunk "${VENV_DIR}" "${VENV_CHUNK_DIR}"; then
+        log "✅ Venv chunking complete ($(ls -1 ${VENV_CHUNK_DIR} | wc -l) files)."
+    else
+        log "❌ Venv chunking failed"
+        return 1
+    fi
+
+    # 2. Chunk ComfyUI directory: create tar then split
+    log "🧩 Chunking ComfyUI base directory..."
+    pushd "${COMFYUI_DIR}" >/dev/null || return 1
+    TAR_PATH="${COMFYUI_CHUNK_DIR}/${COMFYUI_TAR_NAME}"
+    tar -czf "$TAR_PATH" .
+    popd >/dev/null || true
+    # Split tar if larger than chunk size
+    CHUNK_SIZE_BYTES=$((COMFYUI_CHUNK_SIZE_MB * 1024 * 1024))
+    FILE_SIZE=$(stat -c%s "$TAR_PATH" 2>/dev/null || stat -f%z "$TAR_PATH" 2>/dev/null)
+    if [ "$FILE_SIZE" -gt "$CHUNK_SIZE_BYTES" ]; then
+        log "🔪 Splitting ComfyUI tar (${FILE_SIZE} bytes) into ~${COMFYUI_CHUNK_SIZE_MB}MB parts..."
+        split -b ${COMFYUI_CHUNK_SIZE_MB}M -d -a 3 "$TAR_PATH" "${COMFYUI_CHUNK_DIR}/comfyui_part_"
+        rm -f "$TAR_PATH"
+    else
+        log "ℹ️ ComfyUI tar fits within single chunk (${FILE_SIZE} bytes)."
+    fi
+    # Create manifest
+    ls -1 "${COMFYUI_CHUNK_DIR}" > "${COMFYUI_CHUNK_DIR}/${COMFYUI_MANIFEST_NAME}"
+    sha256sum "${COMFYUI_CHUNK_DIR}"/* > "${COMFYUI_CHUNK_DIR}/checksums.txt" 2>/dev/null || sha256 "${COMFYUI_CHUNK_DIR}"/* > "${COMFYUI_CHUNK_DIR}/checksums.txt" 2>/dev/null || true
+
+    # 3. Parallel upload with s5cmd
+    log "☁️ Uploading venv chunks to ${S3_VENV_CHUNKS_PREFIX} ..."
+    s5cmd --concurrency ${S5CMD_CONCURRENCY} cp "${VENV_CHUNK_DIR}/*" "${S3_VENV_CHUNKS_PREFIX}/" || return 1
+    log "☁️ Uploading ComfyUI chunks to ${S3_COMFYUI_CHUNKS_PREFIX} ..."
+    s5cmd --concurrency ${S5CMD_CONCURRENCY} cp "${COMFYUI_CHUNK_DIR}/*" "${S3_COMFYUI_CHUNKS_PREFIX}/" || return 1
+
+    log "✅ Base assets chunked & uploaded. Cleaning temp..."
+    rm -rf "$TMP_WORK"
+}
+
+# Create restore script executed at runtime prior to tenant manager
+create_restore_base_script() {
+    log "🛠️ Creating base restore script for runtime instances..."
+    cat > /usr/local/bin/restore-base-assets <<'EOF'
+#!/bin/bash
+set -euo pipefail
+LOG_TAG="[restore-base]"
+NVME_MOUNT="/workspace"
+BASE_DIR="/workspace/base"
+LEGACY_LINK="/base"
+VENV_DIR="${BASE_DIR}/venv/comfyui"
+COMFYUI_DIR="${BASE_DIR}/ComfyUI"
+S3_BASE_PREFIX="${S3_BASE_PREFIX}"
+S3_VENV_CHUNKS_PREFIX="${S3_VENV_CHUNKS_PREFIX}"
+S3_COMFYUI_CHUNKS_PREFIX="${S3_COMFYUI_CHUNKS_PREFIX}"
+VENV_MARKER="${VENV_DIR}/bin/python"
+RESTORE_MARKER="${BASE_DIR}/.restored"
+MANIFEST_NAME="${COMFYUI_MANIFEST_NAME}"
+
+log(){ echo "$(date '+%Y-%m-%d %H:%M:%S') $LOG_TAG $*"; }
+
+if [ -f "$RESTORE_MARKER" ] && [ -x "$VENV_MARKER" ] && [ -d "$COMFYUI_DIR" ]; then
+  log "Base already restored. Skipping."
+  exit 0
+fi
+
+if ! mount | grep -q " on ${NVME_MOUNT} "; then
+  log "NVMe not mounted yet; aborting restore."
+  exit 1
+fi
+
+mkdir -p "$BASE_DIR" "$BASE_DIR/.tmp" || true
+ln -sfn "$BASE_DIR" "$LEGACY_LINK" || true
+
+# Download and restore venv
+if [ ! -x "$VENV_MARKER" ]; then
+  log "Restoring venv from chunks..."
+  VENV_TMP="$BASE_DIR/.tmp/venv_chunks"
+  mkdir -p "$VENV_TMP"
+  s5cmd --concurrency ${S5CMD_CONCURRENCY} cp "${S3_VENV_CHUNKS_PREFIX}/*" "$VENV_TMP/" || { log "Failed to download venv chunks"; exit 1; }
+  if command -v /usr/local/bin/venv_chunk_manager.sh >/dev/null 2>&1; then
+     /usr/local/bin/venv_chunk_manager.sh restore "$VENV_TMP" "$VENV_DIR" || { log "Venv restore failed"; exit 1; }
+  else
+     log "venv_chunk_manager.sh missing!"
+     exit 1
+  fi
+else
+  log "Venv already present."
+fi
+
+# Download and restore ComfyUI
+if [ ! -d "$COMFYUI_DIR" ]; then
+  log "Restoring ComfyUI base..."
+  COMFY_TMP="$BASE_DIR/.tmp/comfyui_chunks"
+  mkdir -p "$COMFY_TMP"
+  s5cmd --concurrency ${S5CMD_CONCURRENCY} cp "${S3_COMFYUI_CHUNKS_PREFIX}/*" "$COMFY_TMP/" || { log "Failed to download ComfyUI chunks"; exit 1; }
+  if ls "$COMFY_TMP"/comfyui_part_* >/dev/null 2>&1; then
+     cat "$COMFY_TMP"/comfyui_part_* > "$COMFY_TMP/combined.tar.gz"
+     tar -xzf "$COMFY_TMP/combined.tar.gz" -C "$COMFYUI_DIR" --strip-components=0 || { log "ComfyUI extraction failed"; exit 1; }
+  elif [ -f "$COMFY_TMP/${COMFYUI_TAR_NAME}" ]; then
+     mkdir -p "$COMFYUI_DIR"
+     tar -xzf "$COMFY_TMP/${COMFYUI_TAR_NAME}" -C "$COMFYUI_DIR" --strip-components=0 || { log "ComfyUI extraction failed"; exit 1; }
+  else
+     log "No ComfyUI chunks found"
+     exit 1
+  fi
+else
+  log "ComfyUI already present."
+fi
+
+touch "$RESTORE_MARKER"
+rm -rf "$BASE_DIR/.tmp" || true
+log "Base assets restored successfully."
+EOF
+    chmod +x /usr/local/bin/restore-base-assets
+    log "✅ Restore script created at /usr/local/bin/restore-base-assets"
 }
 
 # Creates all systemd services and helper scripts
@@ -444,11 +599,11 @@ WorkingDirectory=/workspace
 Restart=always
 RestartSec=10
 
-# Allow binding to privileged ports (e.g., 80)
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
-# Sync scripts in background (non-blocking) and warmup PyTorch
+# Ensure base assets restored first (blocking), then async script sync, then warmup
+ExecStartPre=-/usr/local/bin/restore-base-assets
 ExecStartPre=-/usr/local/bin/sync-scripts-from-s3-async
 ExecStartPre=-/usr/local/bin/pytorch-warmup
 
@@ -569,24 +724,28 @@ finalize_and_cleanup() {
     cat > /var/log/ami-summary.log << EOF
 === ComfyUI AMI Preparation Summary ===
 Completion Time: $(date)
-Build Type: Docker-Free Multi-Tenant
+Build Type: Docker-Free Multi-Tenant (Chunked Base on NVMe)
 Environment: ${ENVIRONMENT}
-Base ComfyUI: ${COMFYUI_DIR}
+Base (NVMe) Root: ${BASE_DIR}
+Legacy Symlink: ${LEGACY_BASE_LINK} -> ${BASE_DIR}
 Python Version: $(python3.11 --version)
 Services: comfyui-multitenant, mount-ephemeral-storage
-Monitoring: /usr/local/bin/comfyui-monitor
-Update Utility: /usr/local/bin/update-scripts
+Artifacts S3:
+  Venv Chunks: ${S3_VENV_CHUNKS_PREFIX}
+  ComfyUI Chunks: ${S3_COMFYUI_CHUNKS_PREFIX}
 
 === Performance Optimizations ===
-✅ PyTorch Warmup: Enabled (preloads PyTorch into memory)
-✅ Async Script Sync: Enabled (non-blocking startup)
-✅ CUDA Ready: $(if python3.11 -c "import torch; print('Yes' if torch.cuda.is_available() else 'No')" 2>/dev/null; then echo "Yes"; else echo "Unknown"; fi)
+✅ PyTorch Warmup: Enabled
+✅ Async Script Sync: Enabled
+✅ Base Restore: On-demand via restore-base-assets
+✅ NVMe Base Install: Yes
 
 === Startup Sequence ===
 1. Mount ephemeral storage
-2. Start background script sync (non-blocking)
-3. Warmup PyTorch (preload into memory)
-4. Start tenant manager service
+2. Restore base assets from S3 (if not already present)
+3. Background script sync
+4. PyTorch warmup
+5. Start tenant manager service
 EOF
     log "📋 AMI summary created at /var/log/ami-summary.log"
 
@@ -613,6 +772,8 @@ main() {
     run_step setup_ephemeral_storage "Set Up Ephemeral Storage Service"
     run_step download_and_setup_scripts "Download Management Scripts from S3"
     run_step install_comfyui_base "Install Base ComfyUI Environment"
+    run_step chunk_and_upload_base_assets "Chunk & Upload Base Assets"
+    run_step create_restore_base_script "Create Base Restore Script"
     run_step create_system_services "Create Systemd Services"
     run_step final_validation "Perform Final Validation"
     run_step finalize_and_cleanup "Finalize and Clean Up"
