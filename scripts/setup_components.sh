@@ -14,11 +14,9 @@ export COMFYUI_GIT="https://github.com/gilons/vf-comfyui-cors.git"
 echo "📝 Using Python: $PYTHON_CMD ($($PYTHON_CMD --version))"
 
 # This script is for AMI build mode only - setting up base installation
-# Use NETWORK_VOLUME if set (from prepare_ami.sh), otherwise fall back to /base for compatibility
-BASE_ROOT="${NETWORK_VOLUME:-/base}"
-echo "🏗️ AMI build mode - installing base ComfyUI at ${BASE_ROOT}/"
-export BASE_VENV_PATH="${BASE_ROOT}/venv/comfyui"
-export BASE_COMFYUI_PATH="${BASE_ROOT}/ComfyUI"
+echo "🏗️ AMI build mode - installing base ComfyUI at /base/"
+export BASE_VENV_PATH="/base/venv/comfyui"
+export BASE_COMFYUI_PATH="/base/ComfyUI"
 
 echo "📍 Base Virtual environment: $BASE_VENV_PATH"
 echo "📍 Base ComfyUI path: $BASE_COMFYUI_PATH"
@@ -27,7 +25,7 @@ echo "📍 Base ComfyUI path: $BASE_COMFYUI_PATH"
 export COMFYUI_VENV="$BASE_VENV_PATH"
 
 # Create consolidated requirements file for optimization
-CONSOLIDATED_REQUIREMENTS="/workspace/tmp/consolidated_requirements.txt"
+CONSOLIDATED_REQUIREMENTS="/tmp/consolidated_requirements.txt"
 > "$CONSOLIDATED_REQUIREMENTS"  # Clear file
 
 # Setup virtual environments (base installation only)
