@@ -42,7 +42,6 @@ S3_COMFYUI_CHUNKS_PREFIX="${S3_BASE_PREFIX}/comfyui_chunks"
 # Physical location on NVMe
 BASE_DIR="/workspace/base"
 # Compatibility symlink target (legacy scripts reference /base)
-LEGACY_BASE_LINK="/base"
 VENV_DIR="${BASE_DIR}/venv/comfyui"
 COMFYUI_DIR="${BASE_DIR}/ComfyUI"
 PYTORCH_VERSION="2.4.0"
@@ -528,13 +527,11 @@ EOF
 set -euo pipefail
 LOG_TAG="[pytorch-warmup]"
 
-echo "$LOG_TAG Starting background PyTorch warmup..."
-
-# Start warmup in background
-{
-    # Use the ComfyUI venv for warmup
-    VENV_PATH="/base/venv/comfyui"
-    if [ -f "$VENV_PATH/bin/activate" ]; then
+echo "$LOG_TAG Starting background PyTorch warmup..."    # Start warmup in background
+    {
+        # Use the ComfyUI venv for warmup (via symlink for compatibility)
+        VENV_PATH="/workspace/base/venv/comfyui"
+        if [ -f "$VENV_PATH/bin/activate" ]; then
         echo "$LOG_TAG Using ComfyUI venv: $VENV_PATH"
         source "$VENV_PATH/bin/activate"
         
@@ -727,7 +724,6 @@ Completion Time: $(date)
 Build Type: Docker-Free Multi-Tenant (Chunked Base on NVMe)
 Environment: ${ENVIRONMENT}
 Base (NVMe) Root: ${BASE_DIR}
-Legacy Symlink: ${LEGACY_BASE_LINK} -> ${BASE_DIR}
 Python Version: $(python3.11 --version)
 Services: comfyui-multitenant, mount-ephemeral-storage
 Artifacts S3:
