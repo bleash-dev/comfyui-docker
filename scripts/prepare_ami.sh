@@ -109,7 +109,7 @@ install_s5_cmd() {
     sudo chmod +x /usr/local/bin/s5cmd
 
     # Test
-    s5cmd --version
+    s5cmd --help
 }
 
 # Installs all required system packages
