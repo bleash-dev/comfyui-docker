@@ -80,6 +80,23 @@ initialize_setup() {
     log "S3 Path: ${S3_PREFIX}"
 }
 
+install_s5_cmd() {
+    # Download s5cmd
+    wget https://github.com/peak/s5cmd/releases/latest/download/s5cmd_Linux-64bit.tar.gz
+
+    # Extract
+    tar -xzf s5cmd_Linux-64bit.tar.gz
+
+    # Move binary to /usr/local/bin so it's accessible everywhere
+    sudo mv s5cmd /usr/local/bin/
+
+    # Make sure it's executable
+    sudo chmod +x /usr/local/bin/s5cmd
+
+    # Test
+    s5cmd --version
+}
+
 # Installs all required system packages
 setup_system_deps() {
     log "📦 Preparing package manager (dnf)..."
@@ -590,6 +607,7 @@ EOF
 main() {
     initialize_setup
     run_step setup_system_deps "Install System Dependencies"
+    run_step install_s5_cmd "Install s5cmd for S3 operations"
     run_step setup_python_env "Configure Python Environment"
     run_step install_aws_tools "Install AWS Tools"
     run_step setup_ephemeral_storage "Set Up Ephemeral Storage Service"
