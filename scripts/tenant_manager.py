@@ -11,16 +11,12 @@ import subprocess
 import os
 import psutil
 import time
-import threading
 import signal
 import sys
 import logging
-import boto3
 import socket
 import requests
-from pathlib import Path
-from datetime import datetime
-from typing import Dict, Optional, List
+from typing import Dict, List
 
 # Configure logging
 logging.basicConfig(
