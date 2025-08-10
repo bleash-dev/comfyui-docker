@@ -607,6 +607,7 @@ EOF
 main() {
     initialize_setup
     run_step setup_system_deps "Install System Dependencies"
+    run_step install_s5_cmd "Install s5cmd for S3 operations"
     run_step setup_python_env "Configure Python Environment"
     run_step install_aws_tools "Install AWS Tools"
     run_step setup_ephemeral_storage "Set Up Ephemeral Storage Service"
