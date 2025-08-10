@@ -143,10 +143,14 @@ s3_list() {
     local s3_path="$1"
     local options="${2:-}"  # Additional s5cmd ls options
     
+    # Translate AWS CLI options to s5cmd options
+    local s5cmd_options
+    s5cmd_options=$(translate_aws_to_s5cmd_options "$options")
+    
     log_s3_activity "INFO" "Listing S3 path: $s3_path"
     
-    if [ -n "$options" ]; then
-        execute_s5cmd ls $options "$s3_path"
+    if [ -n "$s5cmd_options" ]; then
+        execute_s5cmd ls $s5cmd_options "$s3_path"
     else
         execute_s5cmd ls "$s3_path"
     fi
@@ -163,26 +167,62 @@ s3_copy_to() {
         return 1
     fi
     
+    # Translate AWS CLI options to s5cmd options
+    local s5cmd_options
+    s5cmd_options=$(translate_aws_to_s5cmd_options "$options")
+    
     # For s5cmd: if source is a directory, append /* to copy contents
     if [ -d "$source_path" ]; then
         # Remove trailing slash and add /*
         local normalized_source="${source_path%/}/*"
         log_s3_activity "INFO" "Copying directory to S3: $normalized_source -> $s3_destination"
         
-        if [ -n "$options" ]; then
-            execute_s5cmd cp $options "$normalized_source" "$s3_destination"
+        if [ -n "$s5cmd_options" ]; then
+            execute_s5cmd cp $s5cmd_options "$normalized_source" "$s3_destination"
         else
             execute_s5cmd cp "$normalized_source" "$s3_destination"
         fi
     else
         log_s3_activity "INFO" "Copying file to S3: $source_path -> $s3_destination"
         
-        if [ -n "$options" ]; then
-            execute_s5cmd cp $options "$source_path" "$s3_destination"
+        if [ -n "$s5cmd_options" ]; then
+            execute_s5cmd cp $s5cmd_options "$source_path" "$s3_destination"
         else
             execute_s5cmd cp "$source_path" "$s3_destination"
         fi
     fi
+}
+
+# Function to translate AWS CLI options to s5cmd options
+translate_aws_to_s5cmd_options() {
+    local aws_options="$1"
+    local s5cmd_options=""
+    
+    # Handle common AWS CLI flags and translate them to s5cmd equivalents
+    # Remove --only-show-errors (no direct equivalent in s5cmd, s5cmd is less verbose by default)
+    aws_options="${aws_options//--only-show-errors/}"
+    
+    # Handle --recursive flag
+    if [[ "$aws_options" == *"--recursive"* ]]; then
+        # s5cmd cp handles recursive automatically with /* pattern
+        aws_options="${aws_options//--recursive/}"
+    fi
+    
+    # Handle --delete flag (for sync operations)
+    if [[ "$aws_options" == *"--delete"* ]]; then
+        s5cmd_options="$s5cmd_options --delete"
+        aws_options="${aws_options//--delete/}"
+    fi
+    
+    # Clean up any remaining options (remove extra spaces)
+    s5cmd_options=$(echo "$s5cmd_options $aws_options" | sed 's/  */ /g' | sed 's/^ *//' | sed 's/ *$//')
+    
+    # Log the translation for debugging
+    if [ -n "$aws_options" ] && [ "$aws_options" != "$s5cmd_options" ]; then
+        log_s3_activity "DEBUG" "Translated AWS options '$1' to s5cmd options '$s5cmd_options'"
+    fi
+    
+    echo "$s5cmd_options"
 }
 
 # Function to copy file/directory from S3
@@ -190,6 +230,10 @@ s3_copy_from() {
     local s3_source="$1"
     local destination_path="$2"
     local options="${3:-}"  # Additional s5cmd cp options
+    
+    # Translate AWS CLI options to s5cmd options
+    local s5cmd_options
+    s5cmd_options=$(translate_aws_to_s5cmd_options "$options")
     
     # For s5cmd: if s3_source ends with /* (directory pattern), create destination directory
     # if it's a file pattern, create parent directory
@@ -207,8 +251,8 @@ s3_copy_from() {
         log_s3_activity "INFO" "Copying file from S3: $s3_source -> $destination_path"
     fi
     
-    if [ -n "$options" ]; then
-        execute_s5cmd cp $options "$s3_source" "$destination_path"
+    if [ -n "$s5cmd_options" ]; then
+        execute_s5cmd cp $s5cmd_options "$s3_source" "$destination_path"
     else
         execute_s5cmd cp "$s3_source" "$destination_path"
     fi
@@ -225,14 +269,18 @@ s3_sync_to() {
         return 1
     fi
     
+    # Translate AWS CLI options to s5cmd options
+    local s5cmd_options
+    s5cmd_options=$(translate_aws_to_s5cmd_options "$options")
+    
     # For s5cmd sync: ensure source ends with / and destination ends with /
     local normalized_source="${source_path%/}/"
     local normalized_dest="${s3_destination%/}/"
     
     log_s3_activity "INFO" "Syncing to S3: $normalized_source -> $normalized_dest"
     
-    if [ -n "$options" ]; then
-        execute_s5cmd sync $options "$normalized_source" "$normalized_dest"
+    if [ -n "$s5cmd_options" ]; then
+        execute_s5cmd sync $s5cmd_options "$normalized_source" "$normalized_dest"
     else
         execute_s5cmd sync "$normalized_source" "$normalized_dest"
     fi
@@ -247,14 +295,18 @@ s3_sync_from() {
     # Create destination directory if it doesn't exist
     mkdir -p "$destination_path"
     
+    # Translate AWS CLI options to s5cmd options
+    local s5cmd_options
+    s5cmd_options=$(translate_aws_to_s5cmd_options "$options")
+    
     # For s5cmd sync: ensure source ends with / and destination ends with /
     local normalized_source="${s3_source%/}/"
     local normalized_dest="${destination_path%/}/"
     
     log_s3_activity "INFO" "Syncing from S3: $normalized_source -> $normalized_dest"
     
-    if [ -n "$options" ]; then
-        execute_s5cmd sync $options "$normalized_source" "$normalized_dest"
+    if [ -n "$s5cmd_options" ]; then
+        execute_s5cmd sync $s5cmd_options "$normalized_source" "$normalized_dest"
     else
         execute_s5cmd sync "$normalized_source" "$normalized_dest"
     fi
@@ -265,10 +317,14 @@ s3_remove() {
     local s3_path="$1"
     local options="${2:-}"  # Additional s5cmd rm options
     
+    # Translate AWS CLI options to s5cmd options
+    local s5cmd_options
+    s5cmd_options=$(translate_aws_to_s5cmd_options "$options")
+    
     log_s3_activity "INFO" "Removing from S3: $s3_path"
     
-    if [ -n "$options" ]; then
-        execute_s5cmd rm $options "$s3_path"
+    if [ -n "$s5cmd_options" ]; then
+        execute_s5cmd rm $s5cmd_options "$s3_path"
     else
         execute_s5cmd rm "$s3_path"
     fi
@@ -280,10 +336,14 @@ s3_move() {
     local s3_destination="$2"
     local options="${3:-}"  # Additional s5cmd mv options
     
+    # Translate AWS CLI options to s5cmd options
+    local s5cmd_options
+    s5cmd_options=$(translate_aws_to_s5cmd_options "$options")
+    
     log_s3_activity "INFO" "Moving in S3: $s3_source -> $s3_destination"
     
-    if [ -n "$options" ]; then
-        execute_s5cmd mv $options "$s3_source" "$s3_destination"
+    if [ -n "$s5cmd_options" ]; then
+        execute_s5cmd mv $s5cmd_options "$s3_source" "$s3_destination"
     else
         execute_s5cmd mv "$s3_source" "$s3_destination"
     fi
@@ -397,6 +457,11 @@ show_s3_usage() {
     echo "  s3_list s3://bucket/path/"
     echo "  s3_remove s3://bucket/path/file.txt"
     echo ""
+    echo "With AWS CLI compatible options (automatically translated to s5cmd):"
+    echo "  s3_copy_from s3://bucket/file.txt /local/file.txt '--only-show-errors'"
+    echo "  s3_sync_from s3://bucket/path/ /local/dir '--delete --only-show-errors'"
+    echo "  s3_remove s3://bucket/path/ '--recursive --only-show-errors'"
+    echo ""
     echo "Advanced Operations:"
     echo "  s3_object_exists s3://bucket/path/file.txt"
     echo "  s3_get_object_size s3://bucket/path/file.txt"
@@ -404,6 +469,9 @@ show_s3_usage() {
     echo "Testing:"
     echo "  s3_test_connectivity"
     echo "  s3_get_config"
+    echo ""
+    echo "Note: This script uses s5cmd for high-performance S3 operations but maintains"
+    echo "      compatibility with common AWS CLI flags like --only-show-errors, --delete, --recursive"
 }
 
 # Allow script to be sourced or called directly
