@@ -11,7 +11,7 @@ echo "☁️ Creating centralized S3 interactor script..."
 cat > "$TARGET_DIR/s3_interactor.sh" << 'EOF'
 #!/bin/bash
 # Centralized S3 Interactor Script
-# Provides a consistent interface for S3 operations with AWS S3
+# Provides a consistent interface for S3 operations using s5cmd for high performance
 
 # Configuration
 S3_INTERACTOR_LOG="$NETWORK_VOLUME/.s3_interactor.log"
@@ -24,13 +24,21 @@ S3_REGION="${S3_REGION:-$AWS_REGION}"  # Fallback to AWS_REGION
 S3_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID:-$AWS_ACCESS_KEY_ID}"
 S3_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY:-$AWS_SECRET_ACCESS_KEY}"
 
+# s5cmd configuration - uses environment variables or defaults
+
+# Check for s5cmd availability
+if ! command -v s5cmd >/dev/null 2>&1; then
+    echo "ERROR: s5cmd not found in PATH. Please install s5cmd first."
+    exit 1
+fi
+
 # Provider-specific configuration
 case "$S3_PROVIDER" in
     "aws")
         # AWS S3 configuration (default)
-        S3_CLI_PROVIDER_ARGS=""
+        S5CMD_ENDPOINT_ARG=""
         if [ -n "$S3_ENDPOINT_URL" ]; then
-            S3_CLI_PROVIDER_ARGS="--endpoint-url $S3_ENDPOINT_URL"
+            S5CMD_ENDPOINT_ARG="--endpoint-url $S3_ENDPOINT_URL"
         fi
         ;;
     *)
@@ -109,6 +117,23 @@ execute_aws_cli() {
     fi
 }
 
+# Function to execute s5cmd with provider-specific arguments
+execute_s5cmd() {
+    # Set environment variables for s5cmd
+    export AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY_ID"
+    export AWS_SECRET_ACCESS_KEY="$S3_SECRET_ACCESS_KEY"
+    export AWS_DEFAULT_REGION="$S3_REGION"
+    
+    # Build s5cmd command with endpoint if specified
+    if [ -n "$S5CMD_ENDPOINT_ARG" ]; then
+        log_s3_activity "DEBUG" "Executing: s5cmd $S5CMD_ENDPOINT_ARG $*"
+        s5cmd $S5CMD_ENDPOINT_ARG "$@"
+    else
+        log_s3_activity "DEBUG" "Executing: s5cmd $*"
+        s5cmd "$@"
+    fi
+}
+
 # =============================================================================
 # S3 OPERATION FUNCTIONS
 # =============================================================================
@@ -116,14 +141,14 @@ execute_aws_cli() {
 # Function to list objects in S3 bucket/prefix
 s3_list() {
     local s3_path="$1"
-    local options="${2:-}"  # Additional aws s3 ls options
+    local options="${2:-}"  # Additional s5cmd ls options
     
     log_s3_activity "INFO" "Listing S3 path: $s3_path"
     
     if [ -n "$options" ]; then
-        execute_aws_cli s3 ls "$s3_path" $options
+        execute_s5cmd ls $options "$s3_path"
     else
-        execute_aws_cli s3 ls "$s3_path"
+        execute_s5cmd ls "$s3_path"
     fi
 }
 
@@ -131,37 +156,61 @@ s3_list() {
 s3_copy_to() {
     local source_path="$1"
     local s3_destination="$2"
-    local options="${3:-}"  # Additional aws s3 cp options
+    local options="${3:-}"  # Additional s5cmd cp options
     
     if [ ! -e "$source_path" ]; then
         log_s3_activity "ERROR" "Source path does not exist: $source_path"
         return 1
     fi
     
-    log_s3_activity "INFO" "Copying to S3: $source_path -> $s3_destination"
-    
-    if [ -n "$options" ]; then
-        execute_aws_cli s3 cp "$source_path" "$s3_destination" $options
+    # For s5cmd: if source is a directory, append /* to copy contents
+    if [ -d "$source_path" ]; then
+        # Remove trailing slash and add /*
+        local normalized_source="${source_path%/}/*"
+        log_s3_activity "INFO" "Copying directory to S3: $normalized_source -> $s3_destination"
+        
+        if [ -n "$options" ]; then
+            execute_s5cmd cp $options "$normalized_source" "$s3_destination"
+        else
+            execute_s5cmd cp "$normalized_source" "$s3_destination"
+        fi
     else
-        execute_aws_cli s3 cp "$source_path" "$s3_destination"
+        log_s3_activity "INFO" "Copying file to S3: $source_path -> $s3_destination"
+        
+        if [ -n "$options" ]; then
+            execute_s5cmd cp $options "$source_path" "$s3_destination"
+        else
+            execute_s5cmd cp "$source_path" "$s3_destination"
+        fi
     fi
 }
 
-# Function to copy file from S3
+# Function to copy file/directory from S3
 s3_copy_from() {
     local s3_source="$1"
     local destination_path="$2"
-    local options="${3:-}"  # Additional aws s3 cp options
+    local options="${3:-}"  # Additional s5cmd cp options
     
-    # Create destination directory if it doesn't exist
-    mkdir -p "$(dirname "$destination_path")"
-    
-    log_s3_activity "INFO" "Copying from S3: $s3_source -> $destination_path"
+    # For s5cmd: if s3_source ends with /* (directory pattern), create destination directory
+    # if it's a file pattern, create parent directory
+    if [[ "$s3_source" == *"/*" ]]; then
+        # Directory copy - ensure destination directory exists
+        mkdir -p "$destination_path"
+        log_s3_activity "INFO" "Copying directory from S3: $s3_source -> $destination_path"
+    else
+        # File copy - create parent directory if destination looks like a file path
+        if [[ "$destination_path" != */ ]]; then
+            mkdir -p "$(dirname "$destination_path")"
+        else
+            mkdir -p "$destination_path"
+        fi
+        log_s3_activity "INFO" "Copying file from S3: $s3_source -> $destination_path"
+    fi
     
     if [ -n "$options" ]; then
-        execute_aws_cli s3 cp "$s3_source" "$destination_path" $options
+        execute_s5cmd cp $options "$s3_source" "$destination_path"
     else
-        execute_aws_cli s3 cp "$s3_source" "$destination_path"
+        execute_s5cmd cp "$s3_source" "$destination_path"
     fi
 }
 
@@ -169,19 +218,23 @@ s3_copy_from() {
 s3_sync_to() {
     local source_path="$1"
     local s3_destination="$2"
-    local options="${3:-}"  # Additional aws s3 sync options
+    local options="${3:-}"  # Additional s5cmd sync options
     
     if [ ! -d "$source_path" ]; then
         log_s3_activity "ERROR" "Source directory does not exist: $source_path"
         return 1
     fi
     
-    log_s3_activity "INFO" "Syncing to S3: $source_path -> $s3_destination"
+    # For s5cmd sync: ensure source ends with / and destination ends with /
+    local normalized_source="${source_path%/}/"
+    local normalized_dest="${s3_destination%/}/"
+    
+    log_s3_activity "INFO" "Syncing to S3: $normalized_source -> $normalized_dest"
     
     if [ -n "$options" ]; then
-        execute_aws_cli s3 sync "$source_path" "$s3_destination" $options
+        execute_s5cmd sync $options "$normalized_source" "$normalized_dest"
     else
-        execute_aws_cli s3 sync "$source_path" "$s3_destination"
+        execute_s5cmd sync "$normalized_source" "$normalized_dest"
     fi
 }
 
@@ -189,31 +242,35 @@ s3_sync_to() {
 s3_sync_from() {
     local s3_source="$1"
     local destination_path="$2"
-    local options="${3:-}"  # Additional aws s3 sync options
+    local options="${3:-}"  # Additional s5cmd sync options
     
     # Create destination directory if it doesn't exist
     mkdir -p "$destination_path"
     
-    log_s3_activity "INFO" "Syncing from S3: $s3_source -> $destination_path"
+    # For s5cmd sync: ensure source ends with / and destination ends with /
+    local normalized_source="${s3_source%/}/"
+    local normalized_dest="${destination_path%/}/"
+    
+    log_s3_activity "INFO" "Syncing from S3: $normalized_source -> $normalized_dest"
     
     if [ -n "$options" ]; then
-        execute_aws_cli s3 sync "$s3_source" "$destination_path" $options
+        execute_s5cmd sync $options "$normalized_source" "$normalized_dest"
     else
-        execute_aws_cli s3 sync "$s3_source" "$destination_path"
+        execute_s5cmd sync "$normalized_source" "$normalized_dest"
     fi
 }
 
 # Function to remove S3 object(s)
 s3_remove() {
     local s3_path="$1"
-    local options="${2:-}"  # Additional aws s3 rm options (e.g., --recursive)
+    local options="${2:-}"  # Additional s5cmd rm options
     
     log_s3_activity "INFO" "Removing from S3: $s3_path"
     
     if [ -n "$options" ]; then
-        execute_aws_cli s3 rm "$s3_path" $options
+        execute_s5cmd rm $options "$s3_path"
     else
-        execute_aws_cli s3 rm "$s3_path"
+        execute_s5cmd rm "$s3_path"
     fi
 }
 
@@ -221,14 +278,14 @@ s3_remove() {
 s3_move() {
     local s3_source="$1"
     local s3_destination="$2"
-    local options="${3:-}"  # Additional aws s3 mv options
+    local options="${3:-}"  # Additional s5cmd mv options
     
     log_s3_activity "INFO" "Moving in S3: $s3_source -> $s3_destination"
     
     if [ -n "$options" ]; then
-        execute_aws_cli s3 mv "$s3_source" "$s3_destination" $options
+        execute_s5cmd mv $options "$s3_source" "$s3_destination"
     else
-        execute_aws_cli s3 mv "$s3_source" "$s3_destination"
+        execute_s5cmd mv "$s3_source" "$s3_destination"
     fi
 }
 

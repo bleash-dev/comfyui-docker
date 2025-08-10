@@ -177,6 +177,7 @@ declare -A CUSTOM_NODES=(
 # Define custom node branch mappings
 declare -A CUSTOM_NODE_BRANCHES=(
     ["Comfyui-FileSytem-Manager"]="${GIT_BRANCH:-main}"
+    ["ComfyUI-Auth-Manager"]="${GIT_BRANCH:-main}"
 )
 
 # Change to the custom_nodes directory
