@@ -27,6 +27,7 @@ DOWNLOAD_QUEUE_FILE="$NETWORK_VOLUME/.download_queue.json"
 DOWNLOAD_PROGRESS_FILE="$NETWORK_VOLUME/.download_progress.json"
 DOWNLOAD_LOCK_DIR="$NETWORK_VOLUME/.download_locks"
 DOWNLOAD_PID_FILE="$NETWORK_VOLUME/.download_worker.pid"
+MODEL_REGISTRATION_FILE="$NETWORK_VOLUME/.model_destination_registry.json"
 MAX_CONCURRENT_DOWNLOADS=3
 
 # Ensure log file exists
@@ -232,6 +233,11 @@ initialize_download_system() {
         echo '{}' > "$DOWNLOAD_PROGRESS_FILE"
     fi
     
+    # Initialize registration file if it doesn't exist
+    if [ ! -f "$MODEL_REGISTRATION_FILE" ]; then
+        echo '{}' > "$MODEL_REGISTRATION_FILE"
+    fi
+    
     # Validate JSON files
     if ! jq empty "$DOWNLOAD_QUEUE_FILE" >/dev/null 2>&1; then
         echo '[]' > "$DOWNLOAD_QUEUE_FILE"
@@ -239,6 +245,10 @@ initialize_download_system() {
     
     if ! jq empty "$DOWNLOAD_PROGRESS_FILE" >/dev/null 2>&1; then
         echo '{}' > "$DOWNLOAD_PROGRESS_FILE"
+    fi
+    
+    if ! jq empty "$MODEL_REGISTRATION_FILE" >/dev/null 2>&1; then
+        echo '{}' > "$MODEL_REGISTRATION_FILE"
     fi
     
     log_download "INFO" "Download system initialized"
@@ -309,7 +319,7 @@ convert_to_bytes() {
     esac
 }
 
-# Function to add download to queue (prevents duplicates)
+# Function to add download to queue (prevents duplicates by destination)
 add_to_download_queue() {
     local group="$1"
     local model_name="$2"
@@ -322,6 +332,15 @@ add_to_download_queue() {
         return 1
     fi
     
+    # Determine download destination to prevent concurrent downloads to same destination
+    local download_destination="$local_path"  # Default fallback
+    if command -v determine_download_destination >/dev/null 2>&1; then
+        download_destination=$(determine_download_destination "$local_path" "$s3_path")
+        if [ -z "$download_destination" ]; then
+            download_destination="$local_path"  # Fallback to original logic
+        fi
+    fi
+    
     initialize_download_system
     
     if ! acquire_download_lock "queue" 30; then
@@ -331,20 +350,33 @@ add_to_download_queue() {
     
     trap "release_download_lock 'queue'" EXIT INT TERM QUIT
     
-    # Check if download already exists in queue
+    # Check if download already exists in queue by destination (prevent concurrent downloads to same file)
     local existing_count
-    existing_count=$(jq --arg group "$group" --arg modelName "$model_name" \
-        '[.[] | select(.group == $group and .modelName == $modelName)] | length' \
+    existing_count=$(jq --arg downloadDest "$download_destination" \
+        '[.[] | select(.downloadDestination == $downloadDest)] | length' \
         "$DOWNLOAD_QUEUE_FILE" 2>/dev/null || echo "0")
     
     if [ "$existing_count" -gt 0 ]; then
-        log_download "INFO" "Download already in queue: $group/$model_name"
+        log_download "INFO" "Download already queued for destination: $download_destination"
         release_download_lock "queue"
         trap - EXIT INT TERM QUIT
         return 0
     fi
     
-    # Add to queue with S3 path
+    # Also check if download is in progress for this destination
+    local progress_count
+    progress_count=$(jq --arg downloadDest "$download_destination" \
+        '[.. | objects | select(.downloadDestination == $downloadDest and .status == "progress")] | length' \
+        "$DOWNLOAD_PROGRESS_FILE" 2>/dev/null || echo "0")
+    
+    if [ "$progress_count" -gt 0 ]; then
+        log_download "INFO" "Download already in progress for destination: $download_destination"
+        release_download_lock "queue"
+        trap - EXIT INT TERM QUIT
+        return 0
+    fi
+    
+    # Add to queue with S3 path and download destination
     local temp_file
     temp_file=$(mktemp)
     
@@ -352,6 +384,7 @@ add_to_download_queue() {
        --arg modelName "$model_name" \
        --arg s3Path "$s3_path" \
        --arg localPath "$local_path" \
+       --arg downloadDestination "$download_destination" \
        --argjson totalSize "${total_size:-0}" \
        --arg timestamp "$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")" \
        '. + [{
@@ -359,16 +392,20 @@ add_to_download_queue() {
            "modelName": $modelName,
            "s3Path": $s3Path,
            "localPath": $localPath,
+           "downloadDestination": $downloadDestination,
            "totalSize": $totalSize,
            "queuedAt": $timestamp
        }]' "$DOWNLOAD_QUEUE_FILE" > "$temp_file"
     
     if [ $? -eq 0 ] && jq empty "$temp_file" 2>/dev/null; then
         mv "$temp_file" "$DOWNLOAD_QUEUE_FILE"
-        log_download "INFO" "Added to download queue: $group/$model_name (S3: $s3_path)"
+        log_download "INFO" "Added to download queue: $group/$model_name (S3: $s3_path, Dest: $download_destination)"
+        
+        # Register this model for the download destination
+        register_model_for_destination "$group" "$model_name" "$local_path" "$download_destination"
         
         # Update progress status to queued
-        update_download_progress "$group" "$model_name" "$local_path" "${total_size:-0}" 0 "queued"
+        update_download_progress "$group" "$model_name" "$local_path" "${total_size:-0}" 0 "queued" "$download_destination"
         
         release_download_lock "queue"
         trap - EXIT INT TERM QUIT
@@ -486,15 +523,21 @@ update_download_progress() {
     local total_size="$4"
     local downloaded="$5"
     local progress_status="$6"
+    local download_destination="$7"  # Optional: download destination if different from local_path
     
     # Log every call to update_download_progress to a dedicated progress log file
     local progress_log_file="$NETWORK_VOLUME/.download_progress_calls.log"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] PROGRESS_CALL: group='$group', model='$model_name', status='$progress_status', downloaded=${downloaded:-0}/${total_size:-0} bytes, path='$local_path'" >> "$progress_log_file"
+    echo "[$timestamp] PROGRESS_CALL: group='$group', model='$model_name', status='$progress_status', downloaded=${downloaded:-0}/${total_size:-0} bytes, path='$local_path', dest='${download_destination:-$local_path}'" >> "$progress_log_file"
     
     if [ -z "$group" ] || [ -z "$model_name" ] || [ -z "$progress_status" ]; then
         log_download "ERROR" "Missing required parameters for progress update"
         return 1
+    fi
+    
+    # Use local_path as fallback for download_destination
+    if [ -z "$download_destination" ]; then
+        download_destination="$local_path"
     fi
     
     # Ensure progress file exists before proceeding
@@ -516,6 +559,7 @@ update_download_progress() {
     jq --arg group "$group" \
        --arg modelName "$model_name" \
        --arg localPath "${local_path:-}" \
+       --arg downloadDestination "${download_destination:-}" \
        --argjson totalSize "${total_size:-0}" \
        --argjson downloaded "${downloaded:-0}" \
        --arg status "$progress_status" \
@@ -525,6 +569,7 @@ update_download_progress() {
        .[$group][$modelName] = {
            "totalSize": $totalSize,
            "localPath": $localPath,
+           "downloadDestination": $downloadDestination,
            "downloaded": $downloaded,
            "status": $status,
            "lastUpdated": $timestamp
@@ -755,6 +800,63 @@ download_model_with_progress() {
         return 1
     fi
 
+    # Before starting, check if the download has been cancelled.
+    if is_download_cancelled "$group" "$model_name"; then
+        log_download "INFO" "Download cancelled before starting: $group/$model_name"
+        update_download_progress "$group" "$model_name" "$local_path" "${provided_size:-0}" 0 "cancelled" "$local_path"
+        return 1
+    fi
+
+    # Determine download destination and check if symlink is needed
+    local symlink_info
+    if command -v check_symlink_requirement >/dev/null 2>&1; then
+        symlink_info=$(check_symlink_requirement "$local_path" "$s3_path")
+    else
+        log_download "WARN" "check_symlink_requirement function not available, using local_path as download destination"
+        symlink_info="no_symlink|${local_path}"
+    fi
+
+    if [ -z "$symlink_info" ]; then
+        log_download "ERROR" "Failed to determine download destination for: $local_path"
+        update_download_progress "$group" "$model_name" "$local_path" "${provided_size:-0}" 0 "failed" "$local_path"
+        return 1
+    fi
+
+    local needs_symlink download_destination target_symlink_path
+    IFS='|' read -r needs_symlink download_destination target_symlink_path <<< "$symlink_info"
+
+    log_download "INFO" "Download destination: $download_destination"
+    if [ "$needs_symlink" = "symlink_needed" ]; then
+        log_download "INFO" "Will create symlink: $target_symlink_path -> $download_destination"
+    fi
+
+    # Check if download destination already exists
+    if [ -f "$download_destination" ]; then
+        local existing_size
+        existing_size=$(stat -f%z "$download_destination" 2>/dev/null || stat -c%s "$download_destination" 2>/dev/null || echo "0")
+        
+        log_download "INFO" "Model already exists at download destination: $download_destination ($existing_size bytes)"
+        
+        # If symlink is needed and doesn't exist, create it
+        if [ "$needs_symlink" = "symlink_needed" ] && [ -n "$target_symlink_path" ]; then
+            if [ ! -e "$target_symlink_path" ] && [ ! -L "$target_symlink_path" ]; then
+                log_download "INFO" "Creating symlink for existing model: $target_symlink_path -> $download_destination"
+                mkdir -p "$(dirname "$target_symlink_path")"
+                if ln -sf "$download_destination" "$target_symlink_path" 2>/dev/null; then
+                    log_download "INFO" "Symlink created successfully"
+                else
+                    log_download "WARN" "Failed to create symlink, but model file exists"
+                fi
+            else
+                log_download "DEBUG" "Symlink already exists or target path is occupied"
+            fi
+        fi
+        
+        # Update progress to completed
+        update_download_progress "$group" "$model_name" "$local_path" "$existing_size" "$existing_size" "completed" "$download_destination"
+        return 0
+    fi
+
     # Parse S3 path to get bucket and key
     local bucket key
     if [[ "$s3_path" =~ ^s3://([^/]+)/(.*)$ ]]; then
@@ -770,14 +872,7 @@ download_model_with_progress() {
 
     if [ -z "$bucket" ] || [ -z "$key" ]; then
         log_download "ERROR" "Could not parse S3 path: $s3_path"
-        update_download_progress "$group" "$model_name" "$local_path" 0 0 "failed"
-        return 1
-    fi
-
-    # Before starting, check if the download has been cancelled.
-    if is_download_cancelled "$group" "$model_name"; then
-        log_download "INFO" "Download cancelled before starting: $group/$model_name"
-        update_download_progress "$group" "$model_name" "$local_path" "${provided_size:-0}" 0 "cancelled"
+        update_download_progress "$group" "$model_name" "$local_path" 0 0 "failed" "$download_destination"
         return 1
     fi
 
@@ -808,36 +903,51 @@ download_model_with_progress() {
         log_download "INFO" "Using uncompressed version for download: $(basename "$actual_download_path")"
     fi
 
-    # Create the final destination directory if it doesn't exist
-    mkdir -p "$(dirname "$local_path")"
+    # Create the download destination directory if it doesn't exist
+    mkdir -p "$(dirname "$download_destination")"
 
     # Get the actual file size for progress tracking (of the file we're downloading)
     local download_file_size
     download_file_size=$(s3_get_object_size "$actual_download_path" || echo "${provided_size:-0}")
     
-    log_download "INFO" "Starting download via S3 for $group/$model_name"
+    log_download "INFO" "Starting download via S3 for $group/$model_name to $download_destination"
     log_download "INFO" "Download size: $download_file_size bytes, Final size: ${uncompressed_size:-$download_file_size} bytes"
 
     # Update status to "in progress" using the final uncompressed size for progress reporting
-    update_download_progress "$group" "$model_name" "$local_path" "${uncompressed_size:-$download_file_size}" 0 "progress"
+    update_download_progress "$group" "$model_name" "$local_path" "${uncompressed_size:-$download_file_size}" 0 "progress" "$download_destination"
     
-    # Download and decompress if needed
-    if download_and_decompress_model "$actual_download_path" "$local_path" "$group" "$model_name" "$is_compressed" "$uncompressed_size"; then
+    # Download and decompress if needed to the download destination
+    if download_and_decompress_model "$actual_download_path" "$download_destination" "$group" "$model_name" "$is_compressed" "$uncompressed_size"; then
         local final_size
-        final_size=$(stat -f%z "$local_path" 2>/dev/null || stat -c%s "$local_path" 2>/dev/null || echo "${uncompressed_size:-$download_file_size}")
+        final_size=$(stat -f%z "$download_destination" 2>/dev/null || stat -c%s "$download_destination" 2>/dev/null || echo "${uncompressed_size:-$download_file_size}")
         
-        # Update status to completed
-        update_download_progress "$group" "$model_name" "$local_path" "$final_size" "$final_size" "completed"
-        log_download "INFO" "Download completed successfully: $group/$model_name ($final_size bytes)"
+        log_download "INFO" "Download completed successfully: $group/$model_name ($final_size bytes) at $download_destination"
         
-        # Resolve symlinks if function is available
-        if command -v resolve_symlinks >/dev/null 2>&1; then
-            resolve_symlinks "" "$model_name" false
+        # Create symlink if needed for this specific model
+        if [ "$needs_symlink" = "symlink_needed" ] && [ -n "$target_symlink_path" ]; then
+            log_download "INFO" "Creating symlink: $target_symlink_path -> $download_destination"
+            mkdir -p "$(dirname "$target_symlink_path")"
+            
+            # Remove existing file/symlink if it exists
+            if [ -e "$target_symlink_path" ] || [ -L "$target_symlink_path" ]; then
+                log_download "DEBUG" "Removing existing file/symlink: $target_symlink_path"
+                rm -f "$target_symlink_path"
+            fi
+            
+            if ln -sf "$download_destination" "$target_symlink_path" 2>/dev/null; then
+                log_download "INFO" "Symlink created successfully: $target_symlink_path -> $download_destination"
+            else
+                log_download "ERROR" "Failed to create symlink: $target_symlink_path -> $download_destination"
+                # Don't fail the entire download just because symlink creation failed
+            fi
         fi
+        
+        # Create symlinks for any other models that should point to this same destination
+        complete_models_for_destination "$download_destination"
         return 0
     else
         log_download "ERROR" "Download/decompression failed for: $group/$model_name"
-        update_download_progress "$group" "$model_name" "$local_path" "${uncompressed_size:-$download_file_size}" 0 "failed"
+        update_download_progress "$group" "$model_name" "$local_path" "${uncompressed_size:-$download_file_size}" 0 "failed" "$download_destination"
         return 1
     fi
 }
@@ -1009,6 +1119,7 @@ start_download_worker() {
                     model_name=$(jq -r ".modelName // empty" "$next_download_file")
                     s3_path=$(jq -r ".s3Path // empty" "$next_download_file")
                     local_path=$(jq -r ".localPath // empty" "$next_download_file")
+                    download_destination=$(jq -r ".downloadDestination // empty" "$next_download_file")
                     total_size=$(jq -r ".totalSize // 0" "$next_download_file")
                     
                     rm -f "$next_download_file"
@@ -1016,7 +1127,7 @@ start_download_worker() {
                     # Check if this download was cancelled while in queue
                     if is_download_cancelled "$group" "$model_name"; then
                         log_download "INFO" "Skipping cancelled download from queue: $group/$model_name"
-                        update_download_progress "$group" "$model_name" "$local_path" "$total_size" 0 "cancelled"
+                        update_download_progress "$group" "$model_name" "$local_path" "$total_size" 0 "cancelled" "$download_destination"
                         # Continue to next iteration without incrementing empty_queue_checks
                         continue
                     fi
@@ -1066,10 +1177,6 @@ start_download_worker() {
     log_download "INFO" "Download worker started in background"
     return 0
 }
-
-# (The rest of the script remains the same and is provided below for completeness)
-
-# ... [The remaining functions from stop_download_worker to the end are unchanged] ...
 
 # Function to stop download worker
 # Works independently regardless of execution scope and cleans up locks
@@ -1414,9 +1521,32 @@ download_models() {
             continue
         fi
         
-        # Skip if file already exists (unless this is "all" mode)
-        if [ "$mode" != "all" ] && [ -f "$local_path" ]; then
-            log_download "INFO" "Skipping existing file: $local_path"
+        # Check if model already exists at download destination
+        local skip_model=false
+        if [ "$mode" != "all" ]; then
+            # Determine where the file would be downloaded to
+            local download_destination="$local_path"  # Default fallback
+            if command -v determine_download_destination >/dev/null 2>&1; then
+                download_destination=$(determine_download_destination "$local_path" "$original_s3_path")
+                if [ -z "$download_destination" ]; then
+                    download_destination="$local_path"  # Fallback to original logic
+                fi
+            fi
+            
+            # Check if download destination exists
+            if [ -f "$download_destination" ]; then
+                log_download "INFO" "Skipping existing file at download destination: $download_destination"
+                skip_model=true
+            fi
+            
+            # Also check the local_path if it's different from download destination
+            if [ "$local_path" != "$download_destination" ] && [ -f "$local_path" ]; then
+                log_download "INFO" "Skipping - target file already exists: $local_path"
+                skip_model=true
+            fi
+        fi
+        
+        if [ "$skip_model" = "true" ]; then
             continue
         fi
         
@@ -1681,7 +1811,7 @@ cancel_download() {
     
     if [ -z "$target_group" ] || [ -z "$target_model_name" ]; then
         log_download "ERROR" "Could not find download to cancel for: ${local_path:-$group/$model_name}"
-        return 1
+        return  1
     fi
     
     log_download "INFO" "Cancelling download: $target_group/$target_model_name"
@@ -1697,7 +1827,7 @@ cancel_download() {
     terminate_active_download "$target_group" "$target_model_name"
     
     # Update progress status to cancelled
-    local current_local_path current_total_size current_downloaded
+    local current_local_path current_total_size current_downloaded current_download_destination
     
     # Get current progress if available
     if [ -f "$DOWNLOAD_PROGRESS_FILE" ]; then
@@ -1708,6 +1838,7 @@ cancel_download() {
         
         if [ "$progress_data" != "{}" ] && [ "$progress_data" != "null" ]; then
             current_local_path=$(echo "$progress_data" | jq -r '.localPath // empty')
+            current_download_destination=$(echo "$progress_data" | jq -r '.downloadDestination // empty')
             current_total_size=$(echo "$progress_data" | jq -r '.totalSize // 0')
             current_downloaded=$(echo "$progress_data" | jq -r '.downloaded // 0')
         fi
@@ -1718,6 +1849,11 @@ cancel_download() {
         current_local_path="$local_path"
     fi
     
+    # Use local_path as fallback for download destination
+    if [ -z "$current_download_destination" ]; then
+        current_download_destination="$current_local_path"
+    fi
+    
     # Clean up any partial download files
     if [ -n "$current_local_path" ]; then
         rm -f "${current_local_path}.downloading"
@@ -1725,7 +1861,10 @@ cancel_download() {
     fi
     
     # Update progress to cancelled
-    update_download_progress "$target_group" "$target_model_name" "$current_local_path" "${current_total_size:-0}" "${current_downloaded:-0}" "cancelled"
+    update_download_progress "$target_group" "$target_model_name" "$current_local_path" "${current_total_size:-0}" "${current_downloaded:-0}" "cancelled" "$current_download_destination"
+    
+    # Remove from registrations since it's cancelled
+    remove_model_from_registrations "$target_group" "$target_model_name" "$current_local_path"
     
     # Clean up cancellation signal after a delay (in background)
     (sleep 5; rm -f "$cancel_signal_file") &
@@ -1800,182 +1939,243 @@ cancel_all_downloads() {
     return 0
 }
 
-# Function to get downloadable models that don't exist locally
-# Returns a JSON array of models that can be downloaded but don't exist locally
-# Usage: get_downloadable_models [output_file]
-# Returns a JSON array of all models in the config that do not exist locally
-get_downloadable_models() {
-    local output_file="${1:-}"
+# Model destination registration system
+# This tracks which models should point to each download destination,
+# allowing us to handle symlinks without scanning all configs
+
+# Register a model for a specific download destination
+register_model_for_destination() {
+    local group="$1"
+    local model_name="$2"
+    local local_path="$3"
+    local download_destination="$4"
     
-    # Ensure MODEL_CONFIG_FILE is available
-    if [ -z "$MODEL_CONFIG_FILE" ] || [ ! -f "$MODEL_CONFIG_FILE" ]; then
-        log_download "ERROR" "Model config file not found: $MODEL_CONFIG_FILE"
-        if [ -z "$output_file" ]; then
-            echo "[]"
-        else
-            echo "[]" > "$output_file"
-            echo "$output_file"
-        fi
+    if [ -z "$group" ] || [ -z "$model_name" ] || [ -z "$local_path" ] || [ -z "$download_destination" ]; then
+        log_download "ERROR" "Missing required parameters for model registration"
         return 1
-    fi
-    
-    # Create output file if not provided
-    local temp_output=false
-    if [ -z "$output_file" ]; then
-        output_file=$(mktemp)
-        temp_output=true
     fi
     
     initialize_download_system
     
-    log_download "INFO" "Getting list of downloadable models not existing locally from: $MODEL_CONFIG_FILE"
-    
-    # Get list of local models using the actual load_local_models function
-    local all_models_file
-    all_models_file=$(load_local_models)
-    local load_result=$?
-    
-    if [ $load_result -ne 0 ] || [ ! -f "$all_models_file" ]; then
-        log_download "ERROR" "Failed to load local models"
-        if [ -z "$output_file" ]; then
-            echo "[]"
-        else
-            echo "[]" > "$output_file"
-            echo "$output_file"
-        fi
+    if ! acquire_download_lock "registration" 30; then
+        log_download "ERROR" "Failed to acquire registration lock"
         return 1
     fi
     
-    # Create a temporary file for processing
+    trap "release_download_lock 'registration'" EXIT INT TERM QUIT
+    
     local temp_file
     temp_file=$(mktemp)
     
-    # Initialize output as empty array
-    echo '[]' > "$output_file"
+    # Create or update the registration file
+    # Structure: { "download_destination": [{ "group": "", "modelName": "", "localPath": "" }, ...] }
+    jq --arg dest "$download_destination" \
+       --arg group "$group" \
+       --arg modelName "$model_name" \
+       --arg localPath "$local_path" \
+       '
+       # Initialize the destination array if it does not exist
+       .[$dest] = (.[$dest] // []) |
+       # Check if this model is already registered for this destination
+       if (.[$dest] | any(.group == $group and .modelName == $modelName and .localPath == $localPath)) then
+           .
+       else
+           # Add the new model registration
+           .[$dest] += [{
+               "group": $group,
+               "modelName": $modelName,
+               "localPath": $localPath
+           }]
+       end
+       ' "${MODEL_REGISTRATION_FILE:-/tmp/model_destination_registry.json}" 2>/dev/null > "$temp_file"
     
-    # Use jq to find models that don't exist locally (check file system directly)
-    jq '
-        # Get all models from config that have originalS3Path but exclude symlinked models
-        [
-            to_entries[] |
-            select(.value | type == "object") as $group |
-            $group.value | to_entries[] |
-            select(.value.originalS3Path and (.value.originalS3Path | length > 0) and (.value.symLinkedFrom | not)) |
-            .value as $model |
-            $model + {
-                modelKey: .key,
-                directoryGroup: $group.key
-            }
-        ]
-    ' "$MODEL_CONFIG_FILE" > "$temp_file"
-    
-    # Filter models that don't exist on disk
-    while IFS= read -r model; do
-        if [ -n "$model" ] && [ "$model" != "null" ]; then
-            local local_path
-            local_path=$(echo "$model" | jq -r '.localPath // empty')
-            
-            if [ -n "$local_path" ]; then
-                # Replace {{NETWORK_VOLUME}} with actual value
-                local_path="${local_path//\{\{NETWORK_VOLUME\}\}/$NETWORK_VOLUME}"
-                
-                # Check if file doesn't exist locally
-                if [ ! -f "$local_path" ]; then
-                    # Append to output array
-                    jq --argjson model "$model" '. += [$model]' "$output_file" > "${output_file}.tmp" && mv "${output_file}.tmp" "$output_file"
-                fi
-            fi
-        fi
-    done < <(jq -c '.[]' "$temp_file" 2>/dev/null)
-    
-    # Clean up temporary files
-    rm -f "$local_models_file" "$temp_file"
-    
-    # Count and log results
-    local count
-    count=$(jq 'length' "$output_file" 2>/dev/null || echo "0")
-    log_download "INFO" "Found $count downloadable models not existing locally"
-    
-    # If we created a temporary output file, print contents and clean up
-    if [ "$temp_output" = true ]; then
-        cat "$output_file"
-        rm -f "$output_file"
+    if [ $? -eq 0 ] && jq empty "$temp_file" 2>/dev/null; then
+        mv "$temp_file" "${MODEL_REGISTRATION_FILE:-/tmp/model_destination_registry.json}"
+        log_download "DEBUG" "Registered model $group/$model_name for destination: $download_destination"
+        release_download_lock "registration"
+        trap - EXIT INT TERM QUIT
+        return 0
     else
-        echo "$output_file"
+        rm -f "$temp_file"
+        log_download "ERROR" "Failed to register model for destination"
+        release_download_lock "registration"
+        trap - EXIT INT TERM QUIT
+        return 1
     fi
-    
-    return 0
 }
 
-# Function to list active downloads (for monitoring/management)
-list_active_downloads() {
-    local format="${1:-json}"  # json, table, or simple
+# Complete all models registered for a specific download destination
+complete_models_for_destination() {
+    local download_destination="$1"
     
-    initialize_download_system
-    
-    local active_count=0
-    local queued_count=0
-    local output=""
-    
-    # Count queued downloads
-    if [ -f "$DOWNLOAD_QUEUE_FILE" ]; then
-        queued_count=$(jq 'length' "$DOWNLOAD_QUEUE_FILE" 2>/dev/null || echo "0")
+    if [ -z "$download_destination" ]; then
+        log_download "ERROR" "Missing download destination for completion"
+        return 1
     fi
     
-    # Process active downloads from progress file
-    if [ -f "$DOWNLOAD_PROGRESS_FILE" ]; then
-        if [ "$format" = "json" ]; then
-            # Return full JSON structure
-            jq '.' "$DOWNLOAD_PROGRESS_FILE"
-            return 0
+    if [ ! -f "${MODEL_REGISTRATION_FILE:-/tmp/model_destination_registry.json}" ]; then
+        log_download "DEBUG" "No registration file found, nothing to complete"
+        return 0
+    fi
+    
+    if ! acquire_download_lock "registration" 30; then
+        log_download "ERROR" "Failed to acquire registration lock for completion"
+        return 1
+    fi
+    
+    trap "release_download_lock 'registration'" EXIT INT TERM QUIT
+    
+    # Get all models registered for this destination
+    local registered_models
+    registered_models=$(jq -r --arg dest "$download_destination" \
+        '.[$dest] // []' \
+        "${MODEL_REGISTRATION_FILE:-/tmp/model_destination_registry.json}" 2>/dev/null)
+    
+    if [ -z "$registered_models" ] || [ "$registered_models" = "[]" ]; then
+        log_download "DEBUG" "No models registered for destination: $download_destination"
+        release_download_lock "registration"
+        trap - EXIT INT TERM QUIT
+        return 0
+    fi
+    
+    log_download "INFO" "Completing models for destination: $download_destination"
+    
+    # Process each registered model
+    echo "$registered_models" | jq -r '.[] | @base64' | while read -r encoded_model; do
+        if [ -z "$encoded_model" ]; then
+            continue
         fi
         
-        # Parse for other formats
-        local progress_data
-        progress_data=$(jq -r '
-            to_entries[] |
-            select(.value | type == "object") |
-            .key as $group |
-            (.value | to_entries[] |
-             select(.value.status and (.value.status == "progress" or .value.status == "queued")) |
-             [$group, .key, .value.status, .value.localPath, .value.downloaded, .value.totalSize] |
-             @tsv)
-        ' "$DOWNLOAD_PROGRESS_FILE" 2>/dev/null)
+        local model_data
+        model_data=$(echo "$encoded_model" | base64 -d 2>/dev/null)
+        if [ -z "$model_data" ]; then
+            continue
+        fi
         
-        if [ -n "$progress_data" ]; then
-            if [ "$format" = "table" ]; then
-                output="Group\tModel\tStatus\tLocal Path\tProgress\n"
-                output="$output$(echo "$progress_data" | while IFS=$'\t' read -r group model status path downloaded total; do
-                    local progress_pct=0
-                    if [ "$total" -gt 0 ] && [ "$downloaded" -gt 0 ]; then
-                        progress_pct=$((downloaded * 100 / total))
-                    fi
-                    echo "$group\t$model\t$status\t$path\t${progress_pct}%"
-                done)"
-                echo -e "$output" | column -t
-            else
-                # Simple format
-                echo "$progress_data" | while IFS=$'\t' read -r group model status path downloaded total; do
-                    local progress_pct=0
-                    if [ "$total" -gt 0 ] && [ "$downloaded" -gt 0 ]; then
-                        progress_pct=$((downloaded * 100 / total))
-                    fi
-                    echo "$group/$model: $status (${progress_pct}%)"
-                done
+        local group model_name local_path
+        group=$(echo "$model_data" | jq -r '.group // empty')
+        model_name=$(echo "$model_data" | jq -r '.modelName // empty')
+        local_path=$(echo "$model_data" | jq -r '.localPath // empty')
+        
+        if [ -z "$group" ] || [ -z "$model_name" ] || [ -z "$local_path" ]; then
+            log_download "WARNING" "Invalid model data in registration: $model_data"
+            continue
+        fi
+        
+        log_download "DEBUG" "Processing registered model: $group/$model_name -> $local_path"
+        
+        # Check if symlink is needed (local_path != download_destination)
+        if [ "$local_path" != "$download_destination" ]; then
+            log_download "INFO" "Creating symlink for $group/$model_name: $local_path -> $download_destination"
+            
+            # Create directory if needed
+            local target_dir
+            target_dir=$(dirname "$local_path")
+            if [ ! -d "$target_dir" ]; then
+                mkdir -p "$target_dir" 2>/dev/null || {
+                    log_download "WARNING" "Failed to create directory: $target_dir"
+                    continue
+                }
             fi
             
-            active_count=$(echo "$progress_data" | wc -l)
+            # Remove existing file/symlink if it exists
+            if [ -e "$local_path" ] || [ -L "$local_path" ]; then
+                log_download "DEBUG" "Removing existing file/symlink: $local_path"
+                rm -f "$local_path"
+            fi
+            
+            # Create the symlink
+            if ln -sf "$download_destination" "$local_path" 2>/dev/null; then
+                log_download "INFO" "Symlink created successfully: $local_path -> $download_destination"
+            else
+                log_download "ERROR" "Failed to create symlink: $local_path -> $download_destination"
+                continue
+            fi
         fi
+        
+        # Get the final file size for progress update
+        local final_size=0
+        if [ -f "$download_destination" ]; then
+            final_size=$(stat -f%z "$download_destination" 2>/dev/null || stat -c%s "$download_destination" 2>/dev/null || echo "0")
+        fi
+        
+        # Update status to completed
+        update_download_progress "$group" "$model_name" "$local_path" "$final_size" "$final_size" "completed" "$download_destination"
+    done
+    
+    # Remove the registration for this destination
+    local temp_file
+    temp_file=$(mktemp)
+    
+    jq --arg dest "$download_destination" \
+       'del(.[$dest])' \
+       "${MODEL_REGISTRATION_FILE:-/tmp/model_destination_registry.json}" > "$temp_file"
+    
+    if [ $? -eq 0 ] && jq empty "$temp_file" 2>/dev/null; then
+        mv "$temp_file" "${MODEL_REGISTRATION_FILE:-/tmp/model_destination_registry.json}"
+        log_download "DEBUG" "Removed registration for destination: $download_destination"
+    else
+        rm -f "$temp_file"
+        log_download "WARNING" "Failed to clean up registration for destination: $download_destination"
     fi
     
-    if [ "$format" != "json" ]; then
-        echo ""
-        echo "Summary: $active_count active downloads, $queued_count queued"
-    fi
-    
+    release_download_lock "registration"
+    trap - EXIT INT TERM QUIT
     return 0
 }
 
+# Remove a specific model from destination registrations
+remove_model_from_registrations() {
+    local group="$1"
+    local model_name="$2"
+    local local_path="$3"
+    
+    if [ -z "$group" ] || [ -z "$model_name" ] || [ -z "$local_path" ]; then
+        log_download "DEBUG" "Missing parameters for registration removal, skipping"
+        return 0
+    fi
+    
+    if [ ! -f "$MODEL_REGISTRATION_FILE" ]; then
+        log_download "DEBUG" "No registration file found, nothing to remove"
+        return 0
+    fi
+    
+    if ! acquire_download_lock "registration" 30; then
+        log_download "WARNING" "Failed to acquire registration lock for removal"
+        return 0
+    fi
+    
+    trap "release_download_lock 'registration'" EXIT INT TERM QUIT
+    
+    local temp_file
+    temp_file=$(mktemp)
+    
+    # Remove the model from all destinations it might be registered for
+    jq --arg group "$group" \
+       --arg modelName "$model_name" \
+       --arg localPath "$local_path" \
+       '
+       to_entries |
+       map({
+           key: .key,
+           value: [.value[] | select(.group != $group or .modelName != $modelName or .localPath != $localPath)]
+       }) |
+       map(select(.value | length > 0)) |
+       from_entries
+       ' "$MODEL_REGISTRATION_FILE" > "$temp_file"
+    
+    if [ $? -eq 0 ] && jq empty "$temp_file" 2>/dev/null; then
+        mv "$temp_file" "$MODEL_REGISTRATION_FILE"
+        log_download "DEBUG" "Removed model $group/$model_name from registrations"
+    else
+        rm -f "$temp_file"
+        log_download "WARNING" "Failed to remove model from registrations"
+    fi
+    
+    release_download_lock "registration"
+    trap - EXIT INT TERM QUIT
+    return 0
+}
 EOF
 
 chmod +x "$TARGET_DIR/model_download_integration.sh"
